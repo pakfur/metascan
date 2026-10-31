@@ -288,19 +288,48 @@ class ImportProcess:
             or native in self._retry_next
         )
 
-    def enqueue_unknown(self, paths: Sequence[str]) -> int:
+    def gave_up_on(self, path: str) -> bool:
+        """Import tried this file twice and left it alone, and it has not
+        changed since."""
+        stamp = self._bad.get(path)
+        if stamp is None:
+            return False
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        return stamp == (st.st_size, st.st_mtime)
+
+    def accepts_unknown(self) -> bool:
+        """Whether Import would take files from hygiene: watching is on and
+        it is not paused or stopped (the owner's choice)."""
+        return self._watch_on is True and not self._halted()
+
+    async def enqueue_unknown(self, paths: Sequence[str]) -> int:
         """Files hygiene found on disk that the library does not have: they
-        go through Import's own pipeline (move check, ingest, ``library``
-        event, embedding kick), not a second ingest path. Event loop only.
-        Returns how many were new to the queue."""
-        before = len(self._todo)
+        go through Import's own pipeline (``_intake``: move check, a pass in
+        hand, ingest, ``library`` event, embedding kick), not a second ingest
+        path. Nothing is taken while Import is paused, stopped or not
+        watching. Event loop only. Returns how many were handed over."""
+        if not self.accepts_unknown():
+            return 0
         known = set(self._todo) | set(self._held) | set(self._retry_next)
-        self._queue([p for p in paths if p not in known])
-        added = len(self._todo) - before
-        if added:
-            self._wake_loop()
-            self.poke()
-        return added
+        fresh = [p for p in paths if p not in known and not self.gave_up_on(p)]
+        if not fresh:
+            return 0
+        await self._intake(fresh)
+        self._wake_loop()
+        self.poke()
+        return len(fresh)
+
+    async def apply_moves(
+        self, pairs: Sequence[Tuple[str, str]]
+    ) -> Optional[List[Tuple[str, str]]]:
+        """Re-key rows for moves found elsewhere (hygiene): under the move
+        gate, then the pending snapshot, the FAISS rows and the grid, exactly
+        as the watcher's own moves. Whatever Import's state: a move keeps
+        ratings, it is not an ingest. None when a scan runs."""
+        return await self._apply_moves(list(pairs))
 
     # lifecycle -----------------------------------------------------------
     def start_loop(self) -> None:

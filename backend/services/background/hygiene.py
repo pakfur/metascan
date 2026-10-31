@@ -82,7 +82,7 @@ class HygieneContext:
     tagging: Any = None  # TaggingProcess (kick)
     scanner: Any = None  # Scanner, for ingest_file
     thumbnails: Any = None  # ThumbnailCache
-    confirmed: Any = frozenset()  # folders the owner confirmed with Play
+    confirmed: Any = field(default_factory=dict)  # folder -> rows shown at Play
     shared: Dict[str, Any] = field(default_factory=dict)  # one pass, all checks
 
     def stopped(self) -> bool:
@@ -155,7 +155,8 @@ class HygieneProcess:
         self._get_thumbnails = get_thumbnails
         self._blocked: Optional[MassRemovalBlocked] = None
         self._blocked_folders: List[str] = []
-        self._confirmed: frozenset = frozenset()  # lapses after one pass
+        self._confirmed: Dict[str, int] = {}  # folder -> rows Play confirmed
+        self._blocked_counts: List[Tuple[str, int]] = []
         self._last_run = ""
         self._cleaned_last = 0
         self._clock = clock
@@ -222,8 +223,9 @@ class HygieneProcess:
         if self._running():
             self._error = None
             return
-        if self._blocked_folders:
-            self._confirmed = frozenset(self._blocked_folders[:1])
+        if self._blocked_counts:
+            folder, count = self._blocked_counts[0]
+            self._confirmed = {folder: count}
         self._error = None
         self._manual_pending = True
         if not self._begin_if_clear():
@@ -335,7 +337,7 @@ class HygieneProcess:
             tagging=self._get_tagging(),
             scanner=self._get_scanner(),
             thumbnails=self._get_thumbnails(),
-            confirmed=self._confirmed,
+            confirmed=dict(self._confirmed),
         )
 
     def _set_activity(self, activity: str, done: int = 0, total: int = 0) -> None:
@@ -347,6 +349,7 @@ class HygieneProcess:
         complete = False
         cleaned = 0
         blocked: List[Tuple[str, int]] = []
+        ctx: Optional[HygieneContext] = None
         try:
             ctx = self._context()
             ran = set()
@@ -382,11 +385,19 @@ class HygieneProcess:
             if complete or self._error:
                 self._manual_pending = False
                 self._next_ok_at = self._clock() + self._interval_s
-                self._confirmed = frozenset()  # one pass only
+                self._confirmed = {}  # one pass only
                 self._blocked_folders = [f for f, _ in blocked]
+                self._blocked_counts = list(blocked)
                 if complete and not self._error:
                     self._cleaned_last = cleaned
                     self._last_run = time.strftime("%H:%M")
+            elif self._confirmed:
+                # Cut short: a confirmation that cleaned nothing is kept for
+                # the next pass, one that was used up lapses.
+                used = ctx.shared.get("deleted_in", set()) if ctx else set()
+                self._confirmed = {
+                    f: n for f, n in self._confirmed.items() if f not in used
+                }
             self._pass = None
             self._progress = None
             self._notify()

@@ -35,4 +35,4 @@ A process told to pause or stop may need a moment to finish what it is saving. I
 
 ## Current limits
 
-Import is always on: new and moved files in your library folders are picked up without any button, and the grid refreshes when they land (a `library` / `media_added` event). The only explicit import left is Full clean & rescan, under Config → Maintenance. The hygiene work is still to come.
+Import is always on: new and moved files in your library folders are picked up without any button, and the grid refreshes when they land (a `library` / `media_added` event; hygiene's removal of rows whose files are gone sends `media_removed {count}`). The only explicit import left is Full clean & rescan, under Config → Maintenance. The hygiene work is still to come.

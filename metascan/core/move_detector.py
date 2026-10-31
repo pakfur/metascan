@@ -45,8 +45,22 @@ def parse_mtime(raw: Any) -> Optional[float]:
         return None
 
 
+# The scanner stores a naive local timestamp; one in the repeated autumn hour
+# reads back an hour off. An hour apart (within the tolerance) is the same time.
+DST_SHIFT_S = 3600.0
+
+
+def mtimes_equal(a: Optional[float], b: Optional[float]) -> bool:
+    """Two modification times that are the same moment: within the 2 s
+    tolerance, or an hour apart within it (a daylight-saving fold)."""
+    if a is None or b is None:
+        return False
+    d = abs(a - b)
+    return d <= MTIME_TOLERANCE_S or abs(d - DST_SHIFT_S) <= MTIME_TOLERANCE_S
+
+
 def _near(a: Optional[float], b: Optional[float]) -> bool:
-    return a is not None and b is not None and abs(a - b) <= MTIME_TOLERANCE_S
+    return mtimes_equal(a, b)
 
 
 def _phash_conflict(a: Candidate, b: Candidate) -> bool:

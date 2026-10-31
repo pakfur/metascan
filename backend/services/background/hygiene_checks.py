@@ -41,20 +41,26 @@ from backend.services.background.hygiene import (
     HygieneContext,
 )
 from metascan.core.folder_poller import WATCH_INTERVAL_S, FolderPoller, FolderSpec
-from metascan.core.move_detector import MOVE_GRACE_S
+from metascan.core.move_detector import (
+    MOVE_GRACE_S,
+    Candidate,
+    match_moves,
+    mtimes_equal,
+)
 from metascan.utils.fs_compat import path_key
-from metascan.utils.path_utils import to_native_path
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
 MASS_REMOVAL_FRACTION = 0.25  # more than this share of a folder's rows ...
 MASS_REMOVAL_MIN_ROWS = 100  # ... and more than this many rows
+CONFIRM_MARGIN = 0.05
+CONFIRM_MARGIN_ROWS = 10
 NO_FOLDER_LABEL = "folders no longer in the scan list"
 DELETE_BATCH = 200  # the longest the move gate is held
 STAT_CHUNK = 500
 PAGE = 500
 NEW_FILE_SETTLE_S = 30.0  # a file written this recently is Import's to settle
-MTIME_TOLERANCE_S = 2.0
 
 
 def _scan() -> Any:
@@ -101,8 +107,75 @@ def _group_of(path: str, folders: Sequence[Tuple[str, str]]) -> str:
     return label
 
 
+def _confirmed_covers(confirmed: Any, label: str, count: int) -> bool:
+    """Play confirmed ``label`` when it showed ``confirmed[label]`` rows: a
+    count that has grown by more than 5% (at least 10 rows) is a new
+    question."""
+    shown = confirmed.get(label) if hasattr(confirmed, "get") else None
+    if shown is None:
+        return False
+    return bool(count <= shown + max(CONFIRM_MARGIN_ROWS, CONFIRM_MARGIN * shown))
+
+
 def _is_blocked(count: int, total: int) -> bool:
     return count > MASS_REMOVAL_MIN_ROWS and count > MASS_REMOVAL_FRACTION * total
+
+
+def _key(path: str) -> str:
+    return path_key(os.path.normpath(os.path.abspath(path)))
+
+
+async def _survey(ctx: HygieneContext, stored: Sequence[str]) -> Dict[str, Any]:
+    """Walk the configured folders once per pass (the poller's own walk):
+    the files on disk the library has no row for, how many folders were
+    walked and which could not be seen. Shared by the move matcher and
+    NewFiles."""
+    cached = ctx.shared.get("survey")
+    if cached is not None:
+        return dict(cached)
+    scan = _scan()
+    from backend.config import get_directories
+    from metascan.core.scanner import Scanner
+
+    directories = get_directories(ctx.config)
+    specs = [FolderSpec(d.filepath, d.search_subfolders) for d in directories]
+    roots = scan._generated_output_roots(ctx.config)
+    supported = Scanner.SUPPORTED_EXTENSIONS
+    poller = FolderPoller(
+        specs,
+        scan._probe_folder,
+        roots,
+        lambda p: Path(p).suffix.lower() in supported,
+    )
+    known = {_key(p) for p in stored}
+    unavailable = await asyncio.to_thread(
+        scan._unavailable_folders,
+        directories,
+        lambda: [to_native_path(p) for p in stored],
+    )
+    missing: List[str] = []
+    walked = 0
+    unknown: List[str] = []
+    for done, spec in enumerate(specs):
+        if ctx.stopped():
+            break
+        ctx.report("Looking for new files", done, len(specs))
+        if spec.filepath in unavailable:
+            missing.append(spec.filepath)
+            continue
+        found = await asyncio.to_thread(poller.walk_folder, spec)
+        if found is None:
+            missing.append(spec.filepath)
+            continue
+        walked += 1
+        unknown.extend(p for p in found if _key(p) not in known)
+    result = {"unknown": unknown, "walked": walked, "missing": missing}
+    if not ctx.shared.get("interrupted"):
+        ctx.shared["survey"] = result
+        ctx.shared["walked_folders"] = ctx.shared.get("walked_folders", 0) + walked
+        folders = ctx.shared.setdefault("missing_folders", [])
+        folders.extend(f for f in missing if f not in folders)
+    return result
 
 
 class MissingFiles:
@@ -133,15 +206,25 @@ class MissingFiles:
                 return CheckResult()
             ctx.report("Checking for missing files", done * STAT_CHUNK, len(native))
             gone.extend(await asyncio.to_thread(self._gone, chunk))
-
-        eligible = self._past_grace(ctx, gone, started)
-        if not eligible or ctx.stopped():
+        if not gone or ctx.stopped():
             return CheckResult()
+
+        # A moved or renamed folder is not a deletion: re-key what moved
+        # (whatever Import is doing; it only keeps the ratings) before any
+        # row is deleted.
+        gone, moved = await self._rescue_moves(ctx, stored, gone)
+        if ctx.shared.get("interrupted"):
+            return CheckResult()
+        if not gone:
+            return CheckResult()
+        moved_posix = {to_posix_path(o) for o in moved}
+        native = [p for p in native if to_posix_path(p) not in moved_posix]
+        eligible = set(str(Path(p)) for p in self._past_grace(ctx, gone, started))
 
         # The folders are checked after the pass over the files, what would be
         # deleted is stat-ed again, and nothing under an unavailable folder goes.
         to_delete, left_alone, unavailable = await asyncio.to_thread(
-            scan._stale_paths_to_clean, eligible, directories
+            scan._stale_paths_to_clean, gone, directories
         )
         missing = ctx.shared.setdefault("missing_folders", [])
         for folder in left_alone:
@@ -155,8 +238,18 @@ class MissingFiles:
             )
         paths = await asyncio.to_thread(self._outside_lost_roots, ctx, to_delete)
 
-        allowed = self._apply_guard(ctx, directories, native, paths)
+        # The guard counts every missing row, in grace or not: a mass vanish
+        # must not be cleaned in slices. Only the rows past grace are deleted.
+        allowed = [
+            p
+            for p in self._apply_guard(ctx, directories, native, paths)
+            if str(Path(p)) in eligible
+        ]
         cleaned = 0
+        folders = [
+            (f, scan._path_key(f))
+            for f in dict.fromkeys(d.filepath for d in directories)
+        ]
         for batch in _chunks(allowed, DELETE_BATCH):
             if ctx.stopped():
                 break
@@ -165,10 +258,71 @@ class MissingFiles:
             if n is None:
                 ctx.shared["interrupted"] = True  # a scan started: not ours now
                 break
+            if n:
+                ctx.shared.setdefault("deleted_in", set()).update(
+                    _group_of(p, folders) for p in batch
+                )
             cleaned += n
         if cleaned:
             self._announce(cleaned)
         return CheckResult(cleaned=cleaned)
+
+    async def _rescue_moves(
+        self, ctx: HygieneContext, stored: Sequence[str], gone: List[str]
+    ) -> Tuple[List[str], List[str]]:
+        """Match the missing rows against the files on disk the library does
+        not have (spec 11.1; ambiguity is "not a move") and re-key the matches
+        through Import's own function. Returns the rows still missing and the
+        old (stored) paths that moved."""
+        imp = ctx.import_process
+        if imp is None or not hasattr(imp, "apply_moves"):
+            return gone, []
+        survey = await _survey(ctx, stored)
+        if not survey["unknown"] or ctx.stopped():
+            return gone, []
+        pairs = await asyncio.to_thread(self._match, ctx.db, gone, survey["unknown"])
+        if not pairs:
+            return gone, []
+        applied = await imp.apply_moves(pairs)
+        if applied is None:  # a scan runs: it owns the library now
+            ctx.shared["interrupted"] = True
+            return [], []
+        moved_old = {o for o, _ in applied}
+        ctx.shared.setdefault("moved_new", set()).update(
+            _key(to_native_path(n)) for _, n in applied
+        )
+        return [g for g in gone if to_posix_path(g) not in moved_old], list(moved_old)
+
+    @staticmethod
+    def _match(
+        db: Any, gone: Sequence[str], unknown: Sequence[str]
+    ) -> List[Tuple[str, str]]:
+        """Thread. ``(old, new)`` stored-path pairs: a missing row and the
+        unknown file that is the same file."""
+        from metascan.core.phash_utils import compute_phash_for_file
+
+        old: List[Candidate] = []
+        for g in gone:
+            cand = db.candidate_for(to_posix_path(g))
+            if cand is not None:
+                old.append(cand)
+        if not old:
+            return []
+        sizes = {c.size for c in old}
+        new: List[Candidate] = []
+        for p in unknown:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            phash = None
+            if st.st_size in sizes:  # only a file some missing row could be
+                try:
+                    phash = compute_phash_for_file(Path(p))
+                except Exception:
+                    phash = None
+            new.append(Candidate(to_posix_path(p), st.st_size, st.st_mtime, phash))
+        return match_moves(new, old)
 
     @staticmethod
     def _gone(chunk: Sequence[str]) -> List[str]:
@@ -252,7 +406,7 @@ class MissingFiles:
             rows = grouped.get(label)
             if not rows:
                 continue
-            if label not in ctx.confirmed and _is_blocked(
+            if not _confirmed_covers(ctx.confirmed, label, len(rows)) and _is_blocked(
                 len(rows), totals.get(label, len(rows))
             ):
                 blocked.append((label, len(rows)))
@@ -299,60 +453,34 @@ class NewFiles:
     name = "new files"
 
     async def run(self, ctx: HygieneContext) -> CheckResult:
-        scan = _scan()
-        from backend.config import get_directories
-        from metascan.core.scanner import Scanner
-
-        db = ctx.db
-        directories = get_directories(ctx.config)
-        roots = scan._generated_output_roots(ctx.config)
-        specs = [FolderSpec(d.filepath, d.search_subfolders) for d in directories]
-        supported = Scanner.SUPPORTED_EXTENSIONS
-        poller = FolderPoller(
-            specs,
-            scan._probe_folder,
-            roots,
-            lambda p: Path(p).suffix.lower() in supported,
-        )
-        stored = await asyncio.to_thread(db.all_media_paths)
-        known = {path_key(os.path.normpath(os.path.abspath(p))) for p in stored}
-        unavailable = await asyncio.to_thread(
-            scan._unavailable_folders,
-            directories,
-            lambda: [to_native_path(p) for p in stored],
-        )
-        missing = ctx.shared.setdefault("missing_folders", [])
-        walked = 0
-        unknown: List[str] = []
-        for done, spec in enumerate(specs):
-            if ctx.stopped():
-                return CheckResult()
-            ctx.report("Looking for new files", done, len(specs))
-            if spec.filepath in unavailable:
-                if spec.filepath not in missing:
-                    missing.append(spec.filepath)
-                continue
-            found = await asyncio.to_thread(poller.walk_folder, spec)
-            if found is None:
-                if spec.filepath not in missing:
-                    missing.append(spec.filepath)
-                continue
-            walked += 1
-            unknown.extend(
-                p
-                for p in found
-                if path_key(os.path.normpath(os.path.abspath(p))) not in known
-            )
-        ctx.shared["walked_folders"] = ctx.shared.get("walked_folders", 0) + walked
+        stored = await asyncio.to_thread(ctx.db.all_media_paths)
+        survey = await _survey(ctx, stored)
+        if ctx.shared.get("interrupted"):
+            return CheckResult()
+        moved = ctx.shared.get("moved_new", set())
+        unknown = [p for p in survey["unknown"] if _key(p) not in moved]
 
         added = 0
         imp = ctx.import_process
-        watching = bool(ctx.config.get("watch_directories", True))
-        if unknown and imp is not None and watching and not ctx.stopped():
-            ready = await asyncio.to_thread(self._settled, imp, unknown)
-            added = imp.enqueue_unknown(ready)
-            if added:
-                ctx.report(f"Handed {added} new files to Import", added, added)
+        if unknown:
+            # A file Import gave up on is a failed ingest, as in a scan; any
+            # other unknown file keeps a Full clean's marker until it is in.
+            waiting = [
+                p for p in unknown if not (imp is not None and imp.gave_up_on(p))
+            ]
+            if waiting:
+                ctx.shared["new_files_pending"] = True
+            watching = bool(ctx.config.get("watch_directories", True))
+            if (
+                imp is not None
+                and watching
+                and imp.accepts_unknown()
+                and not ctx.stopped()
+            ):
+                ready = await asyncio.to_thread(self._settled, imp, unknown)
+                added = await imp.enqueue_unknown(ready)
+                if added:
+                    ctx.report(f"Handed {added} new files to Import", added, added)
         await self._generated(ctx)
         return CheckResult(changed=added)
 
@@ -451,7 +579,7 @@ class ChangedFiles:
                 st = os.stat(to_native_path(path))
             except OSError:
                 continue
-            if st.st_size != size or abs(st.st_mtime - mtime) > MTIME_TOLERANCE_S:
+            if st.st_size != size or not mtimes_equal(st.st_mtime, mtime):
                 out.append(path)
         return out
 
@@ -472,8 +600,25 @@ class ChangedFiles:
         return True
 
 
+def _stamp(path: str) -> Optional[Tuple[int, float]]:
+    try:
+        st = os.stat(to_native_path(path))
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime)
+
+
 class MissingDerived:
     name = "missing derived data"
+
+    def __init__(self) -> None:
+        # (kind, path) -> file stamp when the derived data could not be made:
+        # not tried again until the file changes (for the server's lifetime)
+        self._failed: Dict[Tuple[str, str], Optional[Tuple[int, float]]] = {}
+
+    def _skip(self, kind: str, path: str) -> bool:
+        key = (kind, path)
+        return key in self._failed and self._failed[key] == _stamp(path)
 
     async def run(self, ctx: HygieneContext) -> CheckResult:
         fixed = await self._phashes(ctx)
@@ -499,10 +644,17 @@ class MissingDerived:
             for path in page:
                 if ctx.stopped():
                     return fixed
+                if self._skip("phash", path):
+                    continue
                 ctx.report(f"Hashing {_bare(path)}", fixed, 0)
-                fixed += await asyncio.to_thread(
+                n = await asyncio.to_thread(
                     self._phash_one, db, compute_phash_for_file, path
                 )
+                if n:
+                    self._failed.pop(("phash", path), None)
+                else:
+                    self._failed[("phash", path)] = _stamp(path)
+                fixed += n
         return fixed
 
     @staticmethod
@@ -534,11 +686,17 @@ class MissingDerived:
             for path in lacking:
                 if ctx.stopped():
                     return fixed
+                if self._skip("thumb", path):
+                    continue
                 ctx.report(f"Thumbnail for {_bare(path)}", fixed, 0)
                 made = await asyncio.to_thread(
                     cache.get_or_create_thumbnail, Path(to_native_path(path))
                 )
-                fixed += 1 if made else 0
+                if made:
+                    self._failed.pop(("thumb", path), None)
+                    fixed += 1
+                else:
+                    self._failed[("thumb", path)] = _stamp(path)
         return fixed
 
     @staticmethod
@@ -605,8 +763,10 @@ class Finish:
         scan = _scan()
         cancelled = ctx.stopped()
         missing = list(ctx.shared.get("missing_folders", []))
-        back = bool(ctx.shared.get("generated_back", True)) and not ctx.shared.get(
-            "output_unreachable"
+        back = (
+            bool(ctx.shared.get("generated_back", True))
+            and not ctx.shared.get("output_unreachable")
+            and not ctx.shared.get("new_files_pending")
         )
         report = scan.PassReport(
             cancelled=cancelled,
