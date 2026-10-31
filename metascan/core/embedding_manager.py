@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Set, Tuple, Any
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -746,6 +746,53 @@ class FaissIndexManager:
             rebuilt.add(np.ascontiguousarray(data))
             self._index = rebuilt
         self._dirty = True
+
+    def rename(self, pairs: List[Tuple[str, str]]) -> int:
+        """Re-key rows ``(old, new)`` without touching their vectors; returns
+        how many were renamed. The pairs apply at once (a swap, or a chain
+        b -> c with a -> b, works), a pair whose ``old`` is not in the index
+        is skipped, and a ``new`` that already holds a row of its own (a
+        deleted file's stale one) is overwritten: that row is dropped, which
+        rebuilds the index as a flat one of the same metric."""
+        if self._index is None:
+            return 0
+        moves: Dict[str, str] = {}
+        taken: Set[str] = set()
+        for old, new in pairs:
+            if old == new or old not in self._path_to_id or old in moves:
+                continue
+            if new in taken:
+                continue
+            moves[old] = new
+            taken.add(new)
+        if not moves:
+            return 0
+
+        drop = {
+            self._path_to_id[new]
+            for new in moves.values()
+            if new in self._path_to_id and new not in moves
+        }
+        id_to_path = list(self._id_to_path)
+        for old, new in moves.items():
+            id_to_path[self._path_to_id[old]] = new
+
+        if drop:
+            _ensure_heavy_imports()
+            assert _faiss is not None
+            total, dim = int(self._index.ntotal), int(self._index.d)
+            data = np.array(self._index.reconstruct_n(0, total), dtype=np.float32)
+            keep = [i for i in range(total) if i not in drop]
+            rebuilt = _faiss.IndexFlat(dim, self._index.metric_type)
+            if keep:
+                rebuilt.add(np.ascontiguousarray(data[keep]))
+            self._index = rebuilt
+            id_to_path = [id_to_path[i] for i in keep]
+
+        self._id_to_path = id_to_path
+        self._path_to_id = {p: i for i, p in enumerate(id_to_path)}
+        self._dirty = True
+        return len(moves)
 
     def search(
         self, query_vector: np.ndarray, top_k: int = 50

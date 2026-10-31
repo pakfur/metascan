@@ -22,7 +22,8 @@ from metascan.core.gpu_guard import gpu_reserved
 from metascan.core.hardware import detect_hardware
 from metascan.core.inference_client import InferenceClient, InferenceError
 from metascan.utils.app_paths import get_data_dir
-from metascan.utils.path_utils import to_native_path
+from metascan.core.faiss_renames import apply_pending_renames
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,7 @@ def _get_faiss_manager() -> FaissIndexManager:
         fm = FaissIndexManager(_get_embedding_queue().index_dir)
         fm.load()  # No-op if no on-disk index exists
         _faiss_manager = fm
+        refresh_pending_map()
         if fm.is_loaded:
             _start_tombstone_backfill(fm)
     return _faiss_manager
@@ -182,6 +184,61 @@ def _start_tombstone_backfill(fm: FaissIndexManager) -> None:
     threading.Thread(
         target=_run, name="tombstone-embedding-backfill", daemon=True
     ).start()
+
+
+# ----- Pending FAISS renames (a moved file keeps its vector) -----
+
+# Held while the server renames rows on disk and around a build's start, so
+# a build can never start while the server step is saving.
+_rename_lock = threading.Lock()
+_pending_map: Dict[str, str] = {}
+
+
+def refresh_pending_map() -> None:
+    """Re-read ``faiss_pending_renames`` into the in-memory map. Blocking
+    (one small query); call after anything that writes the table."""
+    global _pending_map
+    try:
+        _pending_map = dict(get_db().list_faiss_pending_renames())
+    except Exception:
+        logger.warning("Could not read the pending FAISS renames", exc_info=True)
+
+
+def map_pending(path: str) -> str:
+    """The path a search result should show: a moved file's row is still
+    stored under its old path until the rename is applied."""
+    new = _pending_map.get(to_posix_path(path))
+    return to_native_path(new) if new is not None else path
+
+
+def apply_pending_faiss_renames() -> int:
+    """Rename the on-disk index's rows for moved files, then reload the
+    in-memory index. Blocking. Does nothing while the embedding worker
+    process is alive (it is the index's writer and applies the renames
+    itself at its start). Returns the rows renamed."""
+    eq = _get_embedding_queue()
+    with _rename_lock:
+        if eq.is_indexing():
+            return 0
+        fm = FaissIndexManager(eq.index_dir)
+        fm.load()
+        result = apply_pending_renames(get_db(), fm)
+    refresh_pending_map()
+    if result.renamed:
+        _reload_faiss_after_index_build()
+    return result.renamed
+
+
+async def after_media_move() -> None:
+    """Call after ``move_media_batch``: searches show the new paths at once
+    and the rows are renamed as soon as no worker is running."""
+    await asyncio.to_thread(refresh_pending_map)
+    await asyncio.to_thread(apply_pending_faiss_renames)
+
+
+def _start_indexing_locked(eq: EmbeddingQueue, *args: Any) -> bool:
+    with _rename_lock:
+        return eq.start_indexing(*args)
 
 
 def embedding_index_dir() -> Path:
@@ -298,6 +355,7 @@ def _rebuild_faiss_manager(seq: int) -> None:
             return  # a newer reload already installed its manager
         _faiss_installed_seq = seq
         _faiss_manager = fm
+    refresh_pending_map()  # the worker may have cleared the renames it applied
     if fm.is_loaded:
         _start_tombstone_backfill(fm)
 
@@ -501,7 +559,7 @@ async def search_similar(
     raw = await asyncio.to_thread(fm.search, vec, k)
 
     return [
-        {"file_path": to_native_path(p), "similarity_score": float(s)}
+        {"file_path": to_native_path(map_pending(p)), "similarity_score": float(s)}
         for p, s in raw
         if float(s) >= body.threshold
     ]
@@ -533,7 +591,7 @@ async def content_search(
     raw = await asyncio.to_thread(fm.search, vec, k)
 
     return [
-        {"file_path": to_native_path(p), "similarity_score": float(s)}
+        {"file_path": to_native_path(map_pending(p)), "similarity_score": float(s)}
         for p, s in raw
         if float(s) >= body.threshold
     ]
@@ -667,7 +725,8 @@ async def launch_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str
     _vlm_scan_stops = _capture_vlm_scan_stops() if tag_with_vlm else None
 
     started = await asyncio.to_thread(
-        eq.start_indexing,
+        _start_indexing_locked,
+        eq,
         paths,
         sim.get("clip_model", "small"),
         sim.get("device", "auto"),

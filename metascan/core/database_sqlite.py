@@ -326,6 +326,7 @@ MOVE_PATH_COLUMNS: Tuple[Tuple[str, str], ...] = (
 # ``path_rewritten`` is a flag; ``params_path`` / ``log_path`` /
 # writer-adapter ``file_path`` name files that are not library media;
 # ``voice_ref_path`` is an audio reference with no FK to ``media``;
+# ``faiss_pending_renames`` IS the record of moves (written by the move);
 # ``media.file_size`` is a number.
 MOVE_EXCLUDED_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("media_tombstones", "file_path"),
@@ -336,6 +337,8 @@ MOVE_EXCLUDED_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("writer_adapters", "file_path"),
     ("storyboard_subjects", "voice_ref_path"),
     ("media", "file_size"),
+    ("faiss_pending_renames", "old_path"),
+    ("faiss_pending_renames", "new_path"),
 )
 _MOVE_IN_CHUNK = 500
 
@@ -2123,6 +2126,21 @@ class DatabaseManager:
                 )
                 """
             )
+            # FAISS rows to rename after a media move (move_media_batch
+            # writes them in its own transaction): the file's vector stays,
+            # only the path it is stored under changes. Applied by the
+            # embedding worker at the start of a run, or by the server while
+            # no worker is alive; a row is cleared once the renamed index is
+            # saved (or its old path is not in the index at all).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS faiss_pending_renames (
+                    old_path TEXT PRIMARY KEY,
+                    new_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -2995,12 +3013,96 @@ class DatabaseManager:
                         f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
                         [(n, o) for o, n in plan],
                     )
+                self._queue_faiss_renames(conn, plan)
                 conn.commit()
             except Exception as e:
                 conn.rollback()
                 logger.error(f"Move of {len(plan)} media rows failed: {e}")
                 raise
             return plan
+
+    @staticmethod
+    def _queue_faiss_renames(
+        conn: sqlite3.Connection, plan: Sequence[Tuple[str, str]]
+    ) -> None:
+        """Record ``plan`` (applied moves, in order) in
+        ``faiss_pending_renames``, inside the move's transaction. A chain
+        collapses: a pending a -> b meets b -> c and becomes a -> c (the old
+        row, a, is the one in the index), and a pending row that ends where
+        it started is dropped. A source that is already pending keeps its
+        first target (the file now there is not the one the row belongs to)."""
+        for old, new in plan:
+            chained = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT old_path FROM faiss_pending_renames WHERE new_path = ?",
+                    (old,),
+                ).fetchall()
+            ]
+            if not chained:
+                conn.execute(
+                    "INSERT OR IGNORE INTO faiss_pending_renames "
+                    "(old_path, new_path) VALUES (?, ?)",
+                    (old, new),
+                )
+                continue
+            for first in chained:
+                if first == new:
+                    conn.execute(
+                        "DELETE FROM faiss_pending_renames WHERE old_path = ?",
+                        (first,),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE faiss_pending_renames SET new_path = ? "
+                        "WHERE old_path = ?",
+                        (new, first),
+                    )
+
+    def list_faiss_pending_renames(self) -> List[Tuple[str, str]]:
+        """Pending FAISS renames ``(old, new)`` (stored POSIX paths)."""
+        with self.lock, self._get_connection() as conn:
+            return [
+                (r[0], r[1])
+                for r in conn.execute(
+                    "SELECT old_path, new_path FROM faiss_pending_renames "
+                    "ORDER BY created_at, rowid"
+                ).fetchall()
+            ]
+
+    def clear_faiss_pending_renames(self, pairs: Sequence[Tuple[str, str]]) -> int:
+        """Drop the pending rows exactly equal to ``pairs``: a row a later
+        move re-pointed while the rename ran stays."""
+        cleared = 0
+        with self.lock, self._get_connection() as conn:
+            for old, new in pairs:
+                cur = conn.execute(
+                    "DELETE FROM faiss_pending_renames "
+                    "WHERE old_path = ? AND new_path = ?",
+                    (old, new),
+                )
+                cleared += max(cur.rowcount, 0)
+            conn.commit()
+        return cleared
+
+    def embedded_paths(self, file_paths: Sequence[str]) -> Set[str]:
+        """Of the stored POSIX ``file_paths``, those whose ``media_hashes``
+        row says the file is embedded (``has_embedding = 1``)."""
+        found: Set[str] = set()
+        paths = list(dict.fromkeys(file_paths))
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(paths), 500):
+                chunk = paths[start : start + 500]
+                marks = ",".join("?" * len(chunk))
+                found.update(
+                    r[0]
+                    for r in conn.execute(
+                        f"SELECT file_path FROM media_hashes "
+                        f"WHERE has_embedding = 1 AND file_path IN ({marks})",
+                        chunk,
+                    )
+                )
+        return found
 
     def move_media_batch(self, pairs: Sequence[Tuple[str, str]]) -> int:
         """``move_media_batch_applied``'s count."""

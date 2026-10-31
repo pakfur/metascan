@@ -49,6 +49,7 @@ from metascan.core.embedding_manager import (
     FaissIndexManager,
 )  # noqa: E402
 from metascan.core.database_sqlite import DatabaseManager  # noqa: E402
+from metascan.core.faiss_renames import apply_pending_renames  # noqa: E402
 from metascan.core.vocabulary import (  # noqa: E402
     Vocabulary,
     build_vocabulary,
@@ -447,6 +448,19 @@ class EmbeddingWorker:
                     embedding_dim=embedding_mgr.embedding_dim,
                     model_key=model_key,
                 )
+
+            # Moved files keep their vectors: rename their rows before this
+            # run adds anything (the worker is the index's one writer).
+            try:
+                renames = apply_pending_renames(
+                    db_mgr, faiss_mgr, delays=STAMP_RETRY_DELAYS_S
+                )
+                if renames.failed:
+                    self.logger.error(
+                        "Pending FAISS renames not applied; they stay pending"
+                    )
+            except Exception:
+                self.logger.exception("Applying pending FAISS renames failed")
 
             self._write_progress(0, total, "processing")
             self.logger.info("Starting file processing loop")
