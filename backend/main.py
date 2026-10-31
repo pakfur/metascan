@@ -274,7 +274,7 @@ def _build_training_manager(
     ``on_completed(adapter_id, render_scorecard)`` runs after a completed
     run (the scorecard service's hook)."""
     from backend.api.storyboard import storyboard_busy
-    from backend.api.vlm import cancel_retag_jobs, refresh_writer_adapters
+    from backend.api.vlm import refresh_writer_adapters
     from backend.services import hindsight_briefs
     from backend.services import scorecard as scorecard_mod
 
@@ -339,7 +339,6 @@ def _build_training_manager(
         # runs on the VLMs, then unload every VLM and the CLIP worker.
         # A post-scan tag drain mid-batch ends at the explicit unload (its
         # files stay queued); one still waiting waits out the lock.
-        cancel_retag_jobs()
         job = hindsight_briefs.peek_briefs_job()
         if job is not None and job.cancel():
             interrupted["briefs"] = True  # restarted when the GPU is free

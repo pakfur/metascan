@@ -91,12 +91,44 @@ def test_tag_endpoint_503_when_no_client():
     assert r.status_code == 503
 
 
-def test_retag_returns_job_id(app_with_stub_vlm, tmp_path: Path):
+@pytest.fixture
+def queue_db(tmp_path: Path, monkeypatch):
+    """A temp library with two images; the retag route reads this DB."""
+    from datetime import datetime
+
+    from metascan.core.database_sqlite import DatabaseManager
+    from metascan.core.media import Media
+
+    db = DatabaseManager(tmp_path / "db")
+    paths = []
+    for name in ("a.jpg", "b.jpg"):
+        p = tmp_path / name
+        p.write_bytes(b"\xff\xd8\xff\xd9")
+        db.save_media(
+            Media(
+                file_path=p,
+                file_size=4,
+                width=1,
+                height=1,
+                format="jpeg",
+                created_at=datetime(2024, 1, 1),
+                modified_at=datetime(2024, 1, 1),
+            )
+        )
+        paths.append(p)
+    monkeypatch.setattr(vlm_api, "get_db", lambda: db)
+    # The drain is covered by test_vlm_tag_pump; keep it off here.
+    from backend.api import similarity
+
+    monkeypatch.setattr(
+        similarity, "_schedule_vlm_drain_after_complete", lambda *a, **k: None
+    )
+    return db, paths
+
+
+def test_retag_returns_job_id(app_with_stub_vlm, queue_db):
     c, _ = app_with_stub_vlm
-    a = tmp_path / "a.jpg"
-    a.write_bytes(b"\xff\xd8\xff\xd9")
-    b = tmp_path / "b.jpg"
-    b.write_bytes(b"\xff\xd8\xff\xd9")
+    db, (a, b) = queue_db
     r = c.post(
         "/api/vlm/retag",
         json={"scope": "paths", "paths": [str(a), str(b)]},
@@ -104,20 +136,22 @@ def test_retag_returns_job_id(app_with_stub_vlm, tmp_path: Path):
     assert r.status_code == 202
     assert "job_id" in r.json()
     assert r.json()["total"] == 2
+    assert db.tag_queue_count() == 2
 
 
-def test_retag_cancel_endpoint(app_with_stub_vlm, tmp_path: Path):
+def test_retag_cancel_endpoint(app_with_stub_vlm, queue_db):
     c, _ = app_with_stub_vlm
-    a = tmp_path / "a.jpg"
-    a.write_bytes(b"\xff\xd8\xff\xd9")
+    db, (a, b) = queue_db
+    db.enqueue_tags([b])  # queued by someone else: not this job's to drop
     r = c.post(
         "/api/vlm/retag",
-        json={"scope": "paths", "paths": [str(a)]},
+        json={"scope": "paths", "paths": [str(a), str(b)]},
     )
     job_id = r.json()["job_id"]
     r2 = c.delete(f"/api/vlm/retag/{job_id}")
     assert r2.status_code == 200
     assert r2.json()["status"] == "cancelled"
+    assert db.next_tag_batch(10) == [str(b)]
 
 
 async def test_active_endpoint_calls_swap(app_with_stub_vlm):

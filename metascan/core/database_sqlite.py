@@ -12,6 +12,7 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -295,6 +296,14 @@ TASTE_SNAPSHOT_VERSION = 3
 # A lineage prune guard that keeps failing is logged at WARNING at most this
 # often (seconds); the failures in between go to DEBUG.
 PRUNE_GUARD_WARN_INTERVAL_S = 3600.0
+
+
+# A queued VLM tagging item that fails this many times is dropped
+# (``fail_tag``); the next retag or scan queues it again.
+MAX_TAG_ATTEMPTS = 3
+# The embedding worker's old tag hand-off, imported by the v8 migration.
+VLM_PENDING_FILENAME = "vlm_pending.jsonl"
+VLM_PENDING_SUBDIR = "similarity"
 
 
 class MigrationError(RuntimeError):
@@ -944,6 +953,19 @@ class DatabaseManager:
             conn.execute("DROP INDEX IF EXISTS idx_indices_file_path")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at)"
+            )
+
+            # Durable VLM tag queue: a row stays until its tags are written.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vlm_tag_queue (
+                    file_path TEXT PRIMARY KEY,
+                    enqueued_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    FOREIGN KEY (file_path) REFERENCES media(file_path) ON DELETE CASCADE
+                )
+            """
             )
 
             # Similarity / embedding tracking table
@@ -2467,7 +2489,79 @@ class DatabaseManager:
                 self._migrate_to_v6(conn)
             if user_version < 7:
                 self._migrate_to_v7(conn)
+            if user_version < 8:
+                self._migrate_to_v8(conn)
             self._tombstone_fill = _legacy_tombstone_fill(conn)
+
+    def _migrate_to_v8(self, conn: sqlite3.Connection) -> None:
+        """user_version 7 -> 8: the embedding worker's ``vlm_pending.jsonl``
+        (``<db dir>/similarity/``, where ``EmbeddingQueue`` keeps it) becomes
+        rows of ``vlm_tag_queue``. ``conn`` must have nothing uncommitted.
+
+        Lines are de-duplicated and only paths that still have a media row
+        are queued; a malformed line is skipped. One transaction, the
+        version re-read under the write lock. The file is removed after the
+        commit. A failure rolls back (still version 7) and raises
+        ``MigrationError``; the next open retries. The counts line (never a
+        path) is INFO, DEBUG when nothing was queued or dropped."""
+        pending = self.db_path / VLM_PENDING_SUBDIR / VLM_PENDING_FILENAME
+        queued = dropped = 0
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= 8:
+                conn.rollback()  # another manager migrated meanwhile
+                return
+            paths: Dict[str, None] = {}
+            try:
+                text = pending.read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                text = ""
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    paths[to_posix_path(json.loads(line)["path"])] = None
+                except (ValueError, KeyError, TypeError):
+                    dropped += 1
+            now = datetime.now(timezone.utc).isoformat()
+            for path in paths:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO vlm_tag_queue (file_path, enqueued_at) "
+                    "SELECT file_path, ? FROM media WHERE file_path = ?",
+                    (now, path),
+                )
+                if cur.rowcount:
+                    queued += 1
+                else:
+                    dropped += 1
+            conn.execute("PRAGMA user_version = 8")
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                logger.exception("Rolling back the failed v8 migration raised")
+            raise MigrationError(
+                "Metascan could not upgrade its database to version 8 (the "
+                f"durable VLM tag queue): {exc}. Nothing was changed and the "
+                "database is still at version 7. To retry, start Metascan "
+                "again; if it fails the same way, report this message."
+            ) from exc
+        try:
+            pending.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Could not remove the imported %s", VLM_PENDING_FILENAME)
+        logger.log(
+            logging.INFO if queued or dropped else logging.DEBUG,
+            "Database upgraded to version 8 (durable VLM tag queue): "
+            "%d pending tag(s) imported, %d line(s) dropped (duplicate, "
+            "malformed or no longer in the library)",
+            queued,
+            dropped,
+        )
 
     def _migrate_to_v7(self, conn: sqlite3.Connection) -> None:
         """user_version 6 -> 7: live files on a deleted file's path are
@@ -6406,6 +6500,110 @@ class DatabaseManager:
                 "  ELSE 'prompt' END",
                 (key, posix_path),
             )
+
+    # ------------------------------------------------------------------
+    # Durable VLM tag queue
+    # ------------------------------------------------------------------
+
+    def enqueue_tags(self, paths: Iterable[Union[str, Path]]) -> int:
+        """Queue ``paths`` (native or POSIX) for VLM tagging. A path already
+        queued, or with no media row, is skipped. Returns how many rows were
+        added."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in paths))
+        if not posix:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        added = 0
+        with self.lock, self._get_connection() as conn:
+            for path in posix:
+                added += conn.execute(
+                    "INSERT OR IGNORE INTO vlm_tag_queue (file_path, enqueued_at) "
+                    "SELECT file_path, ? FROM media WHERE file_path = ?",
+                    (now, path),
+                ).rowcount
+            conn.commit()
+        return added
+
+    def queued_tag_paths(self, paths: Iterable[Union[str, Path]]) -> "set[str]":
+        """The POSIX forms of those of ``paths`` already in the queue."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in paths))
+        found: "set[str]" = set()
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(posix), 500):
+                part = posix[start : start + 500]
+                marks = ",".join("?" * len(part))
+                found.update(
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT file_path FROM vlm_tag_queue "
+                        f"WHERE file_path IN ({marks})",
+                        part,
+                    )
+                )
+        return found
+
+    def next_tag_batch(self, limit: int) -> List[str]:
+        """Up to ``limit`` queued POSIX paths, oldest first, skipping rows
+        that failed ``MAX_TAG_ATTEMPTS`` times."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT file_path FROM vlm_tag_queue WHERE attempts < ? "
+                "ORDER BY enqueued_at, rowid LIMIT ?",
+                (MAX_TAG_ATTEMPTS, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def finish_tag(self, path: Union[str, Path]) -> None:
+        """Remove ``path`` from the queue (its tags are written, or the file
+        is gone)."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM vlm_tag_queue WHERE file_path = ?", (to_posix_path(path),)
+            )
+            conn.commit()
+
+    def fail_tag(self, path: Union[str, Path], error: str) -> bool:
+        """Count a failed attempt on ``path``. Returns True when it was the
+        last allowed one and the row was removed."""
+        posix = to_posix_path(path)
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "UPDATE vlm_tag_queue SET attempts = attempts + 1, last_error = ? "
+                "WHERE file_path = ?",
+                (error[:500], posix),
+            )
+            removed = conn.execute(
+                "DELETE FROM vlm_tag_queue WHERE file_path = ? AND attempts >= ?",
+                (posix, MAX_TAG_ATTEMPTS),
+            ).rowcount
+            conn.commit()
+        return bool(removed)
+
+    def tag_queue_count(self) -> int:
+        """Rows still waiting to be tagged (failed-out rows are gone)."""
+        with self.lock, self._get_connection() as conn:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM vlm_tag_queue WHERE attempts < ?",
+                    (MAX_TAG_ATTEMPTS,),
+                ).fetchone()[0]
+            )
+
+    def images_without_vlm_tags(self) -> List[str]:
+        """POSIX paths of library images with no VLM-sourced tag row."""
+        from metascan.core.vlm_client import VlmClient
+
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT m.file_path FROM media m WHERE NOT EXISTS ("
+                "SELECT 1 FROM indices i WHERE i.file_path = m.file_path "
+                "AND i.index_type = 'tag' AND i.source IN ('vlm', 'vlm+prompt'))"
+            ).fetchall()
+        return [
+            r[0]
+            for r in rows
+            if VlmClient.is_image_path(Path(r[0]))  # videos never enter the queue
+        ]
 
     def add_tag_indices(
         self, file_path: Path, tags: List[str], source: str = "clip"

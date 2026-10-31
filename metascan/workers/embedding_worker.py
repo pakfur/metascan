@@ -245,6 +245,18 @@ class EmbeddingWorker:
         except OSError:
             return -1.0
 
+    def _enqueue_for_vlm(
+        self, db_mgr: DatabaseManager, file_path: str, is_video: bool
+    ) -> None:
+        """Queue an image for the server's VLM tag drain (durable table, so
+        a pause, an unload or a restart keeps it). Videos never enter."""
+        if is_video:
+            return
+        try:
+            db_mgr.enqueue_tags([file_path])
+        except Exception:
+            self.logger.exception("Could not queue %s for VLM tagging", file_path)
+
     def _stamp_rewritten_paths(
         self, db_mgr: DatabaseManager, file_paths: List[str]
     ) -> bool:
@@ -566,13 +578,11 @@ class EmbeddingWorker:
                                     }
                                 )
 
-                        # VLM-tagging path: enqueue the file for VlmTagPump.
+                        # VLM-tagging path: queue the file for VlmTagPump.
                         # Qwen3-VL is image-only — videos would send raw mp4
                         # bytes as ``data:image/jpeg`` and fail with 400.
-                        if tag_with_vlm and not is_video:
-                            pending_path = self.queue_dir / "vlm_pending.jsonl"
-                            with open(pending_path, "a", encoding="utf-8") as fp:
-                                fp.write(json.dumps({"path": str(file_path)}) + "\n")
+                        if tag_with_vlm:
+                            self._enqueue_for_vlm(db_mgr, file_path, is_video)
                     else:
                         skipped_paths.append(file_path)
                         skipped_count += 1

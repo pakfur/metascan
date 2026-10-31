@@ -53,8 +53,8 @@ _vlm_scan_stops: Optional[Tuple[Any, int]] = None
 _server_loop: Optional[asyncio.AbstractEventLoop] = None
 # Touched only on the loop thread (inside _drain), so no lock is needed.
 _vlm_drain_running: bool = False
-# A request that arrived mid-drain: drain_once snapshots the pending file at
-# its start, so lines appended meanwhile need one more pass.
+# A request that arrived mid-drain: one more pass picks up what was queued
+# meanwhile.
 _vlm_drain_rerun: bool = False
 # The in-flight scheduled drain, cancelled on shutdown.
 _vlm_drain_future: Optional["concurrent.futures.Future[None]"] = None
@@ -364,17 +364,20 @@ def _log_faiss_reload_failure(fut: "concurrent.futures.Future[None]") -> None:
         logger.error("Failed to reload FAISS after index build", exc_info=exc)
 
 
-def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
+def _schedule_vlm_drain_after_complete(
+    eq: Optional[EmbeddingQueue] = None, *, fresh: bool = False
+) -> None:
     """Run VlmTagPump.drain_once() on the server loop after an embedding build.
 
     Called from the ``on_complete`` sync callback, which runs on a worker
     thread (the poller uses ``asyncio.to_thread``), so ``get_running_loop``
     would always raise here.  The coroutine is handed to the loop captured at
     startup via ``run_coroutine_threadsafe``.  With no usable loop we warn and
-    leave ``vlm_pending.jsonl`` untouched for the next drain.  Drains never
-    overlap: a request arriving mid-drain sets a rerun flag and the running
-    drain makes one more pass (coalesced), so lines appended meanwhile are
-    not stranded.
+    leave the ``vlm_tag_queue`` rows untouched for the next drain.  Drains
+    never overlap: a request arriving mid-drain sets a rerun flag and the
+    running drain makes one more pass (coalesced).  ``fresh`` (the retag
+    route: the owner just asked) ignores the scan's unload snapshot.  ``eq`` is unused (the
+    queue is a table now); the retag route calls this with none.
     """
 
     async def _drain() -> None:
@@ -415,12 +418,11 @@ def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
             since = (
                 getattr(client, "_explicit_stops", None)
                 if deferred
-                else _vlm_stops_since_scan(client)
+                else (None if fresh else _vlm_stops_since_scan(client))
             )
             if not isinstance(since, int):
                 since = None
             pump = VlmTagPump(
-                queue_dir=eq.index_dir,
                 client=client,
                 db=get_db(),
                 model_id=mid,

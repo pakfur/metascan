@@ -60,7 +60,7 @@ the root CLAUDE.md still applies.
   (CUDA VRAM, MPS unified RAM; unknown = no) minus 2 GB; otherwise they
   **take turns** via `VlmClient.before_spawn` (`VlmRoles._make_room`).
   The mode is per request, from the `background_vlm_work()` contextvar
-  (set by `VlmTagPump.drain_once` and `_run_retag_job`; tasks inherit it).
+  (set by `VlmTagPump.drain_once`; tasks inherit it; retag is a drain of the queue).
   An **interactive** spawn (writer prompting, chat, playground,
   storyboard) waits at most `IDLE_TIMEOUT_S` (30 s) for the other client's
   in-flight requests (`VlmClient.wait_idle`), then evicts it — at once
@@ -125,7 +125,8 @@ the root CLAUDE.md still applies.
   `_explicit_stops`, and `VlmTagPump(unless_stopped_since=…)` passes it to
   `VlmClient.ensure_started(…, unless_stopped_since=…)`, which refuses to
   spawn after an explicit unload since the scan began; the batch stays
-  queued in `vlm_pending.jsonl` for the next drain. The drain also waits
+  queued in the durable `vlm_tag_queue` table (v8; a row leaves only once
+  its tags are written) for the next drain. The drain also waits
   while ComfyUI generation is in flight (`similarity.
   set_generation_busy_probe`, installed from the lifespan with
   `auto_index.generation_busy`; a failing probe counts as busy), polling
@@ -176,7 +177,7 @@ the root CLAUDE.md still applies.
 - **VLM image-only guard.** `VlmClient.generate_tags` short-circuits with
   `[]` for any path whose suffix isn't in `_SUPPORTED_IMAGE_EXTS`. Both
   the scan-time enqueuer (`embedding_worker.py`) and the retag job
-  (`backend/api/vlm.py:_run_retag_job`) filter videos upfront so progress
+  (`POST /api/vlm/retag`) filter videos upfront so progress
   totals are honest. Use `VlmClient.is_image_path(path)` from new call
   sites instead of duplicating the extension list.
 - **VLM image resize.** `_encode_image_b64` decodes via Pillow and
@@ -257,14 +258,14 @@ the root CLAUDE.md still applies.
   model-id string matching in `vlm_client._build_command` or
   `startswith("qwen3vl-")` filters in selection code; use `mid in REGISTRY`.
 - **Qwen3-VL pipeline DB writes must run in a worker thread.**
-  Both `_run_retag_job` (`backend/api/vlm.py`) and `VlmTagPump.drain_once`
-  (`backend/services/vlm_tag_pump.py`) wrap `db.add_tag_indices` with
+  `VlmTagPump.drain_once`
+  (`backend/services/vlm_tag_pump.py`) wraps `db.add_tag_indices` with
   `asyncio.to_thread`. WSL2 `/mnt/<drive>` mounts and slow disks
   produce SQLite fsyncs of 50–100 ms+; running that on the event loop
   serializes concurrent tagging tasks and triggers the `heartbeat:
   event loop stalled` warnings.
-- **Per-request VLM concurrency must match `parallel_slots`.** Both
-  pipelines use a `Semaphore(spec.parallel_slots)` keyed off the
+- **Per-request VLM concurrency must match `parallel_slots`.** The
+  pipeline uses a `Semaphore(spec.parallel_slots)` keyed off the
   registry entry for the active model id (`REGISTRY[mid].parallel_slots`).
   Going below it leaves GPU slots idle in `llama-server`'s
   `--parallel`; going above it forces the server to queue requests and
