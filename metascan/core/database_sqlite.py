@@ -293,6 +293,52 @@ def _ensure_index(
 # on load, and ``restore_taste_state`` only takes version 3.
 TASTE_SNAPSHOT_VERSION = 3
 
+# Moving a media row (``move_media_batch``): every (table, column) that
+# holds a media path and is re-keyed with it. ``media.file_path`` is the
+# parent and is handled first. The ``file_path`` inside ``media.data`` is
+# rewritten too. ``tests/test_move_media.py`` walks the schema and fails on
+# a *path* / *file* column that is on neither list.
+MOVE_PATH_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("media", "file_path"),
+    ("beat_images", "file_path"),
+    ("folder_items", "file_path"),
+    ("hindsight_briefs", "file_path"),
+    ("i2v_videos", "file_path"),
+    ("i2v_videos", "source_path"),
+    ("generation_jobs", "i2v_source_path"),
+    ("indices", "file_path"),
+    ("judgment_events", "file_path"),
+    ("media_categories", "file_path"),
+    ("media_hashes", "file_path"),
+    ("media_judgments", "file_path"),
+    ("panel_videos", "file_path"),
+    ("saved_prompts", "file_path"),
+    ("scenes", "reference_path"),
+    ("storyboard_subjects", "reference_path"),
+    ("storyboard_subjects", "reference_path_2"),
+    ("t2i_images", "file_path"),
+    ("taste_scores", "file_path"),
+    ("vlm_tag_queue", "file_path"),
+)
+
+# Path-like columns that must NOT move with a media row, each for a reason:
+# tombstones are history (and ``thumb_path`` is an archive file);
+# ``path_rewritten`` is a flag; ``params_path`` / ``log_path`` /
+# writer-adapter ``file_path`` name files that are not library media;
+# ``voice_ref_path`` is an audio reference with no FK to ``media``;
+# ``media.file_size`` is a number.
+MOVE_EXCLUDED_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("media_tombstones", "file_path"),
+    ("media_tombstones", "thumb_path"),
+    ("media_tombstones", "path_rewritten"),
+    ("taste_models", "params_path"),
+    ("training_runs", "log_path"),
+    ("writer_adapters", "file_path"),
+    ("storyboard_subjects", "voice_ref_path"),
+    ("media", "file_size"),
+)
+_MOVE_IN_CHUNK = 500
+
 # A lineage prune guard that keeps failing is logged at WARNING at most this
 # often (seconds); the failures in between go to DEBUG.
 PRUNE_GUARD_WARN_INTERVAL_S = 3600.0
@@ -2845,6 +2891,120 @@ class DatabaseManager:
                     conn.rollback()
                     logger.error(f"Batch write failed: {e}")
                     raise
+
+    def _existing_media_paths(
+        self, conn: sqlite3.Connection, paths: Sequence[str]
+    ) -> Set[str]:
+        found: Set[str] = set()
+        uniq = list(dict.fromkeys(paths))
+        for i in range(0, len(uniq), _MOVE_IN_CHUNK):
+            chunk = uniq[i : i + _MOVE_IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            found.update(
+                r[0]
+                for r in conn.execute(
+                    f"SELECT file_path FROM media WHERE file_path IN ({marks})",
+                    chunk,
+                )
+            )
+        return found
+
+    def _lineage_paths(
+        self, conn: sqlite3.Connection, paths: Sequence[str]
+    ) -> Set[str]:
+        """Paths that already hold a T2I / I2V lineage row (both tables key
+        ``file_path`` UNIQUE with no FK, so a dangling row can sit on a path
+        that has no media row)."""
+        found: Set[str] = set()
+        uniq = list(dict.fromkeys(paths))
+        for i in range(0, len(uniq), _MOVE_IN_CHUNK):
+            chunk = uniq[i : i + _MOVE_IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for table in ("t2i_images", "i2v_videos"):
+                found.update(
+                    r[0]
+                    for r in conn.execute(
+                        f"SELECT file_path FROM {table} "
+                        f"WHERE file_path IN ({marks})",
+                        chunk,
+                    )
+                )
+        return found
+
+    def move_media_batch_applied(
+        self, pairs: Sequence[Tuple[str, str]]
+    ) -> List[Tuple[str, str]]:
+        """Move media rows ``(old, new)`` (stored POSIX paths) and everything
+        attached to them, in ONE transaction; returns the pairs applied.
+
+        Skipped: a pair whose source has no row, whose target already has a
+        media row (or a T2I / I2V lineage row), a repeated source or target,
+        old == new, and a cycle (a <-> b) that cannot be ordered. A chain
+        (a -> b, b -> c) is applied in the order that works (b -> c first).
+        Foreign keys stay ON but are deferred: the parent and the children
+        are updated by hand (no ON UPDATE clause) and checked at commit, so
+        any failure rolls the whole batch back. Tombstones are history and
+        are untouched; ``judgment_events`` is re-keyed."""
+        from metascan.utils.path_utils import to_native_path
+
+        cleaned: List[Tuple[str, str]] = []
+        seen_src: Set[str] = set()
+        seen_dst: Set[str] = set()
+        for old, new in pairs:
+            if old == new or old in seen_src or new in seen_dst:
+                continue
+            seen_src.add(old)
+            seen_dst.add(new)
+            cleaned.append((old, new))
+        if not cleaned:
+            return []
+        with self.lock, self._get_connection() as conn:
+            occupied = self._existing_media_paths(
+                conn, [p for pair in cleaned for p in pair]
+            )
+            lineage = self._lineage_paths(conn, [new for _, new in cleaned])
+            todo = [(o, n) for o, n in cleaned if o in occupied and n not in lineage]
+            plan: List[Tuple[str, str]] = []
+            progressed = True
+            while todo and progressed:
+                progressed = False
+                rest = []
+                for o, n in todo:
+                    if n in occupied:
+                        rest.append((o, n))
+                        continue
+                    occupied.discard(o)
+                    occupied.add(n)
+                    plan.append((o, n))
+                    progressed = True
+                todo = rest
+            if not plan:
+                return []
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("PRAGMA defer_foreign_keys = ON")
+                conn.executemany(
+                    "UPDATE media SET file_path = ?, data = CASE WHEN "
+                    "json_valid(data) AND json_type(data, '$.file_path') "
+                    "IS NOT NULL THEN json_set(data, '$.file_path', ?) "
+                    "ELSE data END WHERE file_path = ?",
+                    [(n, to_native_path(n), o) for o, n in plan],
+                )
+                for table, column in MOVE_PATH_COLUMNS[1:]:
+                    conn.executemany(
+                        f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                        [(n, o) for o, n in plan],
+                    )
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Move of {len(plan)} media rows failed: {e}")
+                raise
+            return plan
+
+    def move_media_batch(self, pairs: Sequence[Tuple[str, str]]) -> int:
+        """``move_media_batch_applied``'s count."""
+        return len(self.move_media_batch_applied(pairs))
 
     # True upsert — preserves the row's original ``created_at`` on rescan.
     # ``INSERT OR REPLACE`` is DELETE+INSERT under the hood, which fires the

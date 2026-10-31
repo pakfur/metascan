@@ -57,6 +57,7 @@ from typing import (
     Optional,
     Sequence,
     Set,
+    Tuple,
     cast,
 )
 
@@ -820,3 +821,47 @@ def merge_pending_into_snapshot(
         | {p for p in pending.get("favorites") or [] if p not in fresh_paths}
     )
     return merged
+
+
+def rekey_pending(data_dir: Path, pairs: Sequence[Tuple[str, str]]) -> int:
+    """Re-key the pending file's entries for moved media: each ``(old, new)``
+    changes the ``file_path`` of every entry (judgment, category link, brief,
+    library prompt) and the ★ list item for ``old``. Pairs apply once, not
+    transitively (a -> b with b -> c moves a's entry to b only), and an entry
+    is left alone when its new path already has an entry of the same kind.
+    Returns the number of entries changed; no file means 0 and nothing is
+    written. The file goes back through :func:`write_snapshot_file`
+    (atomic, fsynced), as version 3. An unreadable file raises
+    :class:`PendingSnapshotUnreadable` exactly as :func:`load_pending_snapshot`
+    does (the file is left in place); one that fails its shape is
+    quarantined by the loader and nothing is rewritten."""
+    mapping = {old: new for old, new in pairs if old != new}
+    if not mapping:
+        return 0
+    snap = load_pending_snapshot(data_dir)
+    if snap is None:
+        return 0
+    changed = 0
+    for key in _ROW_LISTS:
+        entries = snap.get(key) or []
+        # Entries that stay put hold their paths; a moving one is left alone
+        # when its new path is held (so a chain a -> b, b -> c moves both).
+        held = {e["file_path"] for e in entries if e["file_path"] not in mapping}
+        for e in entries:
+            new = mapping.get(e["file_path"])
+            if new is not None and new not in held:
+                held.add(new)
+                e["file_path"] = new
+                changed += 1
+    favorites = list(snap.get("favorites") or [])
+    held = {p for p in favorites if p not in mapping}
+    for i, p in enumerate(favorites):
+        new = mapping.get(p)
+        if new is not None and new not in held:
+            held.add(new)
+            favorites[i] = new
+            changed += 1
+    snap["favorites"] = favorites
+    if changed:
+        write_snapshot_file(data_dir, snap)
+    return changed
