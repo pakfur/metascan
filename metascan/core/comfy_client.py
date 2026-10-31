@@ -588,6 +588,10 @@ class ComfyClient:
         queue, being posted or running in ComfyUI)."""
         return sum(1 for j in self._running if self._job_source.get(j) == source)
 
+    def has_gated_jobs(self, source: str) -> bool:
+        """True when jobs of ``source`` sit in the queue (held by its gate)."""
+        return any(self._job_source.get(j) == source for j in self._queue)
+
     def _is_gated(self, job_id: int) -> bool:
         source = self._job_source.get(job_id)
         return source is not None and source in self._gated

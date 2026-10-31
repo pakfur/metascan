@@ -42,12 +42,18 @@ class Comfy:
     def __init__(self):
         self.gated = set()
         self.in_flight = 0
+        self.gated_jobs = False
+        self.log = []
 
     def set_source_paused(self, source, paused):
         (self.gated.add if paused else self.gated.discard)(source)
+        self.log.append(("gate", paused))
 
     def source_in_flight(self, source):
         return self.in_flight
+
+    def has_gated_jobs(self, source):
+        return self.gated_jobs
 
 
 class T2iRunner:
@@ -56,6 +62,14 @@ class T2iRunner:
         self.writing = False
         self.cancelled = []
         self.wait_unpaused = None
+        self.log = []
+        self.unload_gate = None
+
+    async def unload_vlms(self):
+        self.log.append("unload-start")
+        if self.unload_gate is not None:
+            await self.unload_gate.wait()
+        self.log.append("unload-end")
 
     def active_batches(self):
         return list(self.rows)
@@ -324,3 +338,69 @@ async def test_generation_busy_ignores_a_paused_batch(tmp_path):
         assert generation_busy(t2i, comfy) is True
     finally:
         await comfy.aclose()
+
+
+async def test_resume_unloads_before_the_gate_opens_and_holds_meanwhile(env):
+    proc, registry, comfy, runner = env
+    await registry.command("t2i", "pause")
+    assert status(registry, "tagging").state == State.IDLE  # free to reload
+    comfy.gated_jobs = True
+    runner.unload_gate = asyncio.Event()
+    comfy.log.clear()
+    resume = asyncio.create_task(registry.command("t2i", "resume"))
+    await until(lambda: "unload-start" in runner.log)
+    st = status(registry)
+    assert st.state == State.RUNNING and st.activity == "Resuming"
+    assert status(registry, "tagging").state == State.HELD
+    assert ("gate", False) not in comfy.log  # no job can dispatch yet
+    runner.unload_gate.set()
+    await resume
+    assert runner.log == ["unload-start", "unload-end"]
+    assert comfy.log == [("gate", False)]
+    assert comfy.gated == set()
+
+
+async def test_resume_with_nothing_gated_unloads_nothing(env):
+    proc, registry, comfy, runner = env
+    await registry.command("t2i", "pause")
+    await registry.command("t2i", "resume")
+    assert runner.log == []
+    assert comfy.gated == set()
+
+
+async def test_the_runner_unload_is_off_when_the_config_says_so(tmp_path):
+    from metascan.core.i2v_runner import I2vRunner
+
+    class Vlm:
+        model_id = "m"
+        shut = 0
+
+        async def shutdown(self):
+            self.shut += 1
+
+    vlm = Vlm()
+    for flag, expected in ((True, 1), (False, 0)):
+        vlm.shut = 0
+        runner = I2vRunner(
+            db=None,
+            comfy=None,
+            get_vlm=lambda: vlm,
+            output_root=tmp_path,
+            unload_vlm_during_generation=flag,
+        )
+        await runner.unload_vlms()
+        assert vlm.shut == expected
+
+
+async def test_resume_does_not_block_a_new_submission(env):
+    proc, registry, comfy, runner = env
+    await registry.command("t2i", "pause")
+    comfy.gated_jobs = True
+    runner.unload_gate = asyncio.Event()  # a slow unload
+    resume = asyncio.create_task(registry.command("t2i", "resume"))
+    await until(lambda: "unload-start" in runner.log)
+    await asyncio.wait_for(proc.owner_batch_starting(), 1)
+    runner.rows = [row()]
+    proc.poke()
+    runner.unload_gate.set()
+    await resume

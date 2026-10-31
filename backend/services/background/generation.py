@@ -60,6 +60,7 @@ class _GenerationProcess:
         except RuntimeError:
             self._loop = None
         self._paused = False
+        self._resuming = False  # unloading the VLMs before the gate opens
         self._gate = asyncio.Event()
         self._gate.set()
         self._watcher: Optional["asyncio.Task[None]"] = None
@@ -83,6 +84,9 @@ class _GenerationProcess:
         progress = None
         if counts is not None and counts[1]:
             progress = Progress(done=counts[0], total=counts[1], unit=self.unit)
+        if self._resuming:
+            # Holds are back on while the VLMs unload, before any job dispatches.
+            return ProcessReport(State.RUNNING, progress, "Resuming", winding_down=True)
         if self._paused:
             if self._in_flight():
                 return ProcessReport(
@@ -115,8 +119,21 @@ class _GenerationProcess:
         self._notify()
 
     async def resume(self) -> None:
-        self._open_gate()
+        """Hold Tagging and Embedding again, unload the VLMs a pause let
+        Tagging reload (only when jobs are waiting behind the gate), then open
+        the gate. A new submission never waits on this: it only queues."""
+        self._resuming = True
         self._notify()
+        try:
+            if self._comfy.has_gated_jobs(self.id):
+                try:
+                    await self._runner.unload_vlms()
+                except Exception:
+                    logger.warning("%s: VLM unload before resume failed", self.id)
+            self._open_gate()
+        finally:
+            self._resuming = False
+            self._notify()
 
     async def stop(self) -> None:
         self._open_gate()  # whatever is left must be free to be cancelled

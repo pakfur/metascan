@@ -147,3 +147,15 @@ async def test_a_restart_requeue_is_classified_from_the_row(
         assert (await second.wait_for_job(job, timeout=10))["state"] == "done"
     finally:
         await second.shutdown()
+
+
+async def test_cancel_all_cancels_gated_queued_jobs(gated):
+    pid = await gated.register_preset("sdxl", "t2i", t2i_workflow())
+    gated.set_source_paused("t2i", True)
+    ids = [await gated.submit(pid, params(), t2i_batch_id="b1") for _ in range(2)]
+    assert gated.has_gated_jobs("t2i") and not gated.has_gated_jobs("i2v")
+    await gated.cancel_all()
+    assert gated.queue_depth() == 0
+    assert not gated.has_gated_jobs("t2i")
+    for job in ids:
+        assert gated.db.get_generation_job(job)["state"] == "cancelled"

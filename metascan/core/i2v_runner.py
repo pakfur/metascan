@@ -833,7 +833,7 @@ class I2vRunner:
         if b.all_submitted and not b.pending:
             b.all_jobs_ended.set()
 
-    async def _unload_vlm(self, b: _I2vBatch) -> None:
+    async def _unload_vlm(self, b: Optional[_I2vBatch]) -> None:
         """Free the GPU for ComfyUI: shut down each distinct VLM client that
         has a model loaded, except the prompt writer while another run (or a
         T2I Random batch) is still writing prompts with it. Failing to unload
@@ -856,6 +856,13 @@ class I2vRunner:
                 await vlm.shutdown()
             except Exception as exc:
                 logger.warning("could not unload the VLM before rendering: %s", exc)
+
+    async def unload_vlms(self) -> None:
+        """Free the GPU for ComfyUI the way a run does before it renders (only
+        with ``unload_vlm_during_generation`` on; a writer another run is still
+        prompting with is left alone)."""
+        if self.unload_vlm_during_generation:
+            await self._unload_vlm(None)
 
     async def _run(self, b: _I2vBatch) -> None:
         """Write the prompts, then submit the jobs -- in that order when
