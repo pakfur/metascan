@@ -31,6 +31,7 @@ import numpy as np
 from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
+from metascan.core.move_detector import Candidate, parse_mtime
 from metascan.core.writer_adapters import parse_adapter_writer_id
 from metascan.core.judgments import (
     CATEGORY_NAME_MAX,
@@ -2977,29 +2978,35 @@ class DatabaseManager:
         if not cleaned:
             return []
         with self.lock, self._get_connection() as conn:
-            occupied = self._existing_media_paths(
-                conn, [p for pair in cleaned for p in pair]
-            )
-            lineage = self._lineage_paths(conn, [new for _, new in cleaned])
-            todo = [(o, n) for o, n in cleaned if o in occupied and n not in lineage]
-            plan: List[Tuple[str, str]] = []
-            progressed = True
-            while todo and progressed:
-                progressed = False
-                rest = []
-                for o, n in todo:
-                    if n in occupied:
-                        rest.append((o, n))
-                        continue
-                    occupied.discard(o)
-                    occupied.add(n)
-                    plan.append((o, n))
-                    progressed = True
-                todo = rest
-            if not plan:
-                return []
+            # The write lock first, then the plan: a row that appears between
+            # the checks and the update skips its pair instead of failing the
+            # commit's foreign-key check and rolling the whole batch back.
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                occupied = self._existing_media_paths(
+                    conn, [p for pair in cleaned for p in pair]
+                )
+                lineage = self._lineage_paths(conn, [new for _, new in cleaned])
+                todo = [
+                    (o, n) for o, n in cleaned if o in occupied and n not in lineage
+                ]
+                plan: List[Tuple[str, str]] = []
+                progressed = True
+                while todo and progressed:
+                    progressed = False
+                    rest = []
+                    for o, n in todo:
+                        if n in occupied:
+                            rest.append((o, n))
+                            continue
+                        occupied.discard(o)
+                        occupied.add(n)
+                        plan.append((o, n))
+                        progressed = True
+                    todo = rest
+                if not plan:
+                    conn.rollback()
+                    return []
                 conn.execute("PRAGMA defer_foreign_keys = ON")
                 conn.executemany(
                     "UPDATE media SET file_path = ?, data = CASE WHEN "
@@ -3017,7 +3024,7 @@ class DatabaseManager:
                 conn.commit()
             except Exception as e:
                 conn.rollback()
-                logger.error(f"Move of {len(plan)} media rows failed: {e}")
+                logger.error(f"Move of {len(cleaned)} media rows failed: {e}")
                 raise
             return plan
 
@@ -9637,6 +9644,29 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get all phashes: {e}")
             return {}
+
+    def all_media_paths(self) -> List[str]:
+        """Every media row's stored (POSIX) path, without reading the data
+        blob: the import watcher's seed."""
+        with self._get_connection() as conn:
+            return [r[0] for r in conn.execute("SELECT file_path FROM media")]
+
+    def candidate_for(self, path: str) -> Optional[Candidate]:
+        """The row at ``path`` (stored POSIX spelling) as a move candidate:
+        ``file_size`` and ``modified_at`` (either historical shape, read by
+        ``parse_mtime``; the materialised columns, else the JSON blob) and the
+        phash from ``media_hashes``. None when there is no row."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(m.file_size, json_extract(m.data, '$.file_size')),"
+                " COALESCE(m.modified_at, json_extract(m.data, '$.modified_at')),"
+                " h.phash FROM media m LEFT JOIN media_hashes h"
+                " ON h.file_path = m.file_path WHERE m.file_path = ?",
+                (path,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return Candidate(path, int(row[0]), parse_mtime(row[1]), row[2] or None)
 
     def get_unembedded_file_paths(self) -> List[str]:
         """Get file paths that exist in media but don't have CLIP embeddings."""

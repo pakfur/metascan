@@ -104,6 +104,13 @@ useWebSocket('t2i', (event) => {
     void t2iStore.scheduleMediaReload()
   }
 })
+
+// Files the always-on import ingested or moved belong in the grid. Same
+// debounced, silent reload as the T2I events above, so a thousand-file drop
+// makes one reload.
+useWebSocket('library', (event) => {
+  if (event === 'media_added') void t2iStore.scheduleMediaReload()
+})
 </script>
 
 <template>

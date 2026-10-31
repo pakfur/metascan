@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import stat
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +69,11 @@ _progress: Dict[str, Any] = {}
 _scan_error: Optional[str] = None
 
 
+PROGRESS_POKE_INTERVAL_S = 0.25
+_PER_FILE_FIELDS = frozenset({"current", "total", "file"})
+_last_progress_poke = float("-inf")
+
+
 def _poke_import() -> None:
     process = get_import_process()
     if process is not None:
@@ -77,8 +83,14 @@ def _poke_import() -> None:
 def _set_progress(**fields: Any) -> None:
     """Merge into the last payload (a new dict, so the scanner's worker thread
     and the panel never see a half-written one) and tell the panel."""
-    global _progress
+    global _progress, _last_progress_poke
     _progress = {**_progress, **fields}
+    if set(fields) <= _PER_FILE_FIELDS:
+        # The scan's per-file progress: a poke re-evaluates every process.
+        now = time.monotonic()
+        if now - _last_progress_poke < PROGRESS_POKE_INTERVAL_S:
+            return
+        _last_progress_poke = now
     _poke_import()
 
 

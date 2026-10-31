@@ -20,8 +20,18 @@ POSIX spellings, the walk native ones, and they must key equal.
 
 import os
 import time
+import unicodedata
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from metascan.utils.fs_compat import (
     can_open_for_read,
@@ -58,6 +68,10 @@ class PollResult:
     vanished: List[str] = field(default_factory=list)
     changed: List[str] = field(default_factory=list)
     unavailable: List[str] = field(default_factory=list)
+    # (old spelling, new) of a file whose name changed only in case on a
+    # case-insensitive OS: both spellings key equal, so it is neither new nor
+    # vanished.
+    respelled: List[Tuple[str, str]] = field(default_factory=list)
     walk_s: float = 0.0
 
 
@@ -210,8 +224,11 @@ class FolderPoller:
 
         # New files: wait for two equal stamps, non-empty, openable.
         for key, (path, stamp) in disk.items():
+            before = self._spelling.get(key)
             self._spelling[key] = path
             if key in self._known:
+                if before is not None and self._respelled(before, path):
+                    result.respelled.append((before, path))
                 old = self._known[key]
                 if old is None:
                     self._known[key] = stamp
@@ -262,6 +279,16 @@ class FolderPoller:
         self._last_walk_s = time.monotonic() - t0
         result.walk_s = self._last_walk_s
         return result
+
+    def _respelled(self, old: str, new: str) -> bool:
+        # Unicode normalisation alone is not a rename (macOS lists NFD names).
+        a, b = self._normalize(old), self._normalize(new)
+        nfc = unicodedata.normalize
+        return nfc("NFC", a) != nfc("NFC", b)
+
+    def pending_paths(self) -> List[str]:
+        """New files still settling (the consumer's "settling" activity)."""
+        return [p for p, _ in self._pending.values()]
 
     def _skipped_key(self, key: str) -> bool:
         k = key + self._sep

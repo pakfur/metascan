@@ -879,6 +879,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     background_registry.register(tagging)
     set_tagging_process(tagging)
     await tagging.kick_if_queued()
+    # The watcher polls the scan folders from here on (spec 9).
+    import_process.start_loop()
 
     try:
         yield
