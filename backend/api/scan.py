@@ -1055,7 +1055,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
             unembedded = await asyncio.to_thread(db.get_unembedded_file_paths)
             if unembedded:
                 try:
-                    await similarity_api.build_index(rebuild=False)
+                    await similarity_api.build_index(rebuild=False, by_owner=False)
                 except Exception as e:
                     logger.warning(f"Auto-trigger embedding build failed: {e}")
 

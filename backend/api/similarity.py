@@ -593,9 +593,12 @@ async def _reload_inference_client(model_key: str, device: str) -> None:
 
 
 @router.post("/index/build", dependencies=GPU_FREE)
-async def build_index(rebuild: bool = False) -> Dict[str, Any]:
-    """Start an embedding worker subprocess for unembedded (or all) files."""
-    return await _start_index_build(rebuild=rebuild, allow_vlm_tagging=True, owner=True)
+async def build_index(rebuild: bool = False, by_owner: bool = True) -> Dict[str, Any]:
+    """Start an embedding worker subprocess for unembedded (or all) files.
+    ``by_owner=False`` (the post-scan follow-up) never clears a Stop or pause."""
+    return await _start_index_build(
+        rebuild=rebuild, allow_vlm_tagging=True, owner=by_owner
+    )
 
 
 async def start_auto_index_build() -> Dict[str, Any]:

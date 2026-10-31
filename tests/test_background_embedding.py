@@ -170,8 +170,6 @@ async def test_hold_while_idle_release_stays_idle(env):
 
 async def test_kick_does_nothing_while_held_paused_or_stopped(env):
     proc, registry, queue, db, builds, *_ = env
-    with registry.hold(["embedding"], by="x"):
-        assert (await proc.kick(False))["status"] == "blocked"
     await registry.command("embedding", "pause")
     assert (await proc.kick(False))["status"] == "blocked"
     await registry.command("embedding", "resume")
@@ -300,3 +298,38 @@ async def test_auto_index_does_not_start_while_blocked():
     await asyncio.sleep(0.1)
     assert started == [1]
     await sched.aclose()
+
+
+async def test_non_owner_build_leaves_stop_and_pause_and_runs_at_release(env):
+    proc, registry, queue, db, builds, *_ = env
+    await registry.command("embedding", "stop")
+    assert (await proc.request_build(False, True, owner=False))["status"] == "blocked"
+    assert state(registry) == State.STOPPED
+    await registry.command("embedding", "start")
+    queue.finish()
+    await registry.command("embedding", "pause")
+    await until(lambda: state(registry) == State.PAUSED)
+    n = len(builds)
+    assert (await proc.request_build(False, True, owner=False))["status"] == "blocked"
+    assert state(registry) == State.PAUSED and len(builds) == n
+    await registry.command("embedding", "resume")
+    with registry.hold(["embedding"], by="x"):
+        await registry.settle()
+        assert (await proc.request_build(False, True, owner=False))[
+            "status"
+        ] == "queued"
+    await registry.settle()
+    await until(lambda: len(builds) == n + 1)
+
+
+async def test_scan_followup_is_a_non_owner_build(env, monkeypatch):
+    import backend.api.similarity as sim
+
+    proc, registry, queue, db, builds, *_ = env
+    monkeypatch.setattr(dependencies, "_embedding_singleton", proc)
+    await registry.command("embedding", "stop")
+    await sim.build_index(rebuild=False, by_owner=False)
+    assert builds == [] and state(registry) == State.STOPPED
+    await sim.build_index(rebuild=False)  # the owner's POST clears the stop
+    assert builds == [(False, True)]
+    assert state(registry) == State.RUNNING

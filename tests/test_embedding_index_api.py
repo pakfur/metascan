@@ -227,7 +227,7 @@ def test_scan_auto_triggers_when_config_present_and_unembedded(monkeypatch):
 
     triggered = {"called": False, "rebuild": None}
 
-    async def fake_build(rebuild=False):
+    async def fake_build(rebuild=False, by_owner=True):
         triggered["called"] = True
         triggered["rebuild"] = rebuild
         return {"status": "started", "total": 1}
@@ -275,7 +275,7 @@ def test_scan_skips_auto_trigger_when_disabled(monkeypatch):
 
     triggered = {"called": False}
 
-    async def fake_build(rebuild=False):
+    async def fake_build(rebuild=False, by_owner=True):
         triggered["called"] = True
         return {"status": "started"}
 
@@ -318,7 +318,7 @@ def test_scan_skips_auto_trigger_when_no_unembedded(monkeypatch):
 
     triggered = {"called": False}
 
-    async def fake_build(rebuild=False):
+    async def fake_build(rebuild=False, by_owner=True):
         triggered["called"] = True
         return {"status": "started"}
 

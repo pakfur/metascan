@@ -160,8 +160,6 @@ class EmbeddingProcess:
             self._interrupted = None
             await self._registry.command(self.id, "resume")
         elif state == State.HELD:
-            if not owner:
-                return {"status": "blocked", "reason": "held"}
             # Waits for the release, then runs as asked.
             self._queued = (rebuild, allow_vlm_tagging)
             self._notify()
