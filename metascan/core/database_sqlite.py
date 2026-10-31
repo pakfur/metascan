@@ -9651,6 +9651,11 @@ class DatabaseManager:
         with self._get_connection() as conn:
             return [r[0] for r in conn.execute("SELECT file_path FROM media")]
 
+    def media_paths_present(self, paths: Sequence[str]) -> Set[str]:
+        """Which of ``paths`` (stored spelling) have a media row."""
+        with self._get_connection() as conn:
+            return self._existing_media_paths(conn, list(paths))
+
     def candidate_for(self, path: str) -> Optional[Candidate]:
         """The row at ``path`` (stored POSIX spelling) as a move candidate:
         ``file_size`` and ``modified_at`` (either historical shape, read by

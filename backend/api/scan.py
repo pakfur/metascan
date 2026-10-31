@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import stat
+import threading
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -68,6 +69,11 @@ _full_clean_active = False
 _progress: Dict[str, Any] = {}
 _scan_error: Optional[str] = None
 
+
+# Held by the import watcher around "no scan running? then move rows" and by
+# start_scan around the moment it marks a scan running, so a move can't land
+# after a scan's taste snapshot.
+move_gate = threading.Lock()
 
 PROGRESS_POKE_INTERVAL_S = 0.25
 _PER_FILE_FIELDS = frozenset({"current", "total", "file"})
@@ -391,7 +397,14 @@ async def start_scan(body: ScanRequest):
     _scan_error = None
     _progress = {}
     _cancel_requested = False
-    _scan_task = asyncio.create_task(_run_scan(body.full_cleanup, body.full_clean))
+    # A move in flight finishes first (off the loop: it may take a while).
+    await asyncio.to_thread(move_gate.acquire)
+    try:
+        if scan_running():
+            raise HTTPException(status_code=409, detail="Scan already in progress")
+        _scan_task = asyncio.create_task(_run_scan(body.full_cleanup, body.full_clean))
+    finally:
+        move_gate.release()
     return {"status": "started"}
 
 

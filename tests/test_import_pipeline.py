@@ -505,3 +505,279 @@ def test_the_loop_runs_and_stops_with_aclose(rig):
     run(driver())
     assert len(rig.rows()) == 1
     assert rig.proc._task is None
+
+
+# -- fix round 1 ---------------------------------------------------------
+
+
+def test_the_loop_does_not_spin_while_a_scan_runs_with_work_queued(rig):
+    calls = []
+    real = rig.proc._config
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    rig.proc._config = counting
+
+    async def go():
+        await rig.passes(1)
+        rig.proc._todo.append(str(rig.lib / "x.png"))
+        rig.scan["running"] = True
+        calls.clear()
+        rig.proc.start_loop()
+        await asyncio.sleep(0.4)
+        await rig.proc.aclose()
+
+    run(go())
+    assert len(calls) <= 2
+
+
+def test_a_raising_pass_does_not_spin_shows_failed_and_the_loop_survives(rig):
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("/secret boom")
+
+    rig.proc._config = boom
+
+    async def go():
+        rig.proc.start_loop()
+        await asyncio.sleep(0.4)
+        st = rig.registry.status("import")
+        alive = not rig.proc._task.done()
+        await rig.proc.aclose()
+        return st, alive
+
+    st, alive = run(go())
+    assert len(calls) <= 2 and alive
+    assert st.state == State.FAILED and st.error == "RuntimeError"
+    assert "secret" not in (st.error or "")
+
+
+def test_a_transient_error_clears_after_a_clean_pass(rig):
+    async def go():
+        rig.proc._error = "RuntimeError"
+        await rig.passes(1)
+
+    run(go())
+    assert rig.proc._error is None
+
+
+def test_the_poller_is_seeded_with_native_spellings(rig, monkeypatch):
+    from backend.services.background import import_process as ip
+
+    rig.db.save_media(
+        __import__("tests.test_taste_snapshot_scan", fromlist=["_media"])._media(
+            "/mnt/c/Media/a.png"
+        )
+    )
+    seeded = []
+    real_seed = fp.FolderPoller.seed
+    monkeypatch.setattr(
+        ip,
+        "to_native_path",
+        lambda p: p.replace("/mnt/c/", "C:\\").replace("/", "\\"),
+    )
+    monkeypatch.setattr(
+        fp.FolderPoller,
+        "seed",
+        lambda self, known: (seeded.extend(known), real_seed(self, seeded))[1],
+    )
+    run(rig.passes(1))
+    assert seeded == ["C:\\Media\\a.png"]
+
+
+def test_a_windows_seed_keys_equal_to_the_walk(monkeypatch):
+    import ntpath
+
+    poller = fp.FolderPoller(
+        [fp.FolderSpec("C:\\Media", True)],
+        lambda p: fp.PROBE_PRESENT,
+        [],
+        lambda p: True,
+        normalize=lambda p: ntpath.normpath(p),
+        sep="\\",
+    )
+    poller.seed(["C:\\Media\\sub\\a.png"])
+    assert poller._key("C:\\Media\\sub\\a.png") in poller._known
+
+
+def test_a_busy_embedding_answer_is_asked_again(rig):
+    answers = iter([{"status": "refused"}, {"status": "refused"}, {"status": "ok"}])
+    asked = []
+
+    async def kick():
+        asked.append(1)
+        return next(answers)
+
+    rig.proc._kick_embedding = kick
+
+    async def go():
+        rig.image("a.png", 1)
+        await rig.passes(3)
+        await asyncio.sleep(0.2)  # the debounced kick: refused
+        assert len(asked) == 1 and rig.proc._kick_dirty
+        await rig.passes(1)  # next interval: refused again
+        await rig.passes(1)  # then accepted
+        await rig.passes(1)  # nothing left to ask
+
+    run(go())
+    assert len(asked) == 3 and not rig.proc._kick_dirty
+
+
+def test_a_blocked_embedding_answer_is_not_retried(rig):
+    async def kick():
+        return {"status": "blocked", "reason": "paused"}
+
+    rig.proc._kick_embedding = kick
+
+    async def go():
+        rig.image("a.png", 1)
+        await rig.passes(3)
+        await asyncio.sleep(0.2)
+        assert not rig.proc._kick_dirty
+
+    run(go())
+
+
+def test_a_settled_path_that_already_has_a_row_is_not_ingested_or_announced(rig):
+    class Never:
+        def ingest_file(self, p):
+            raise AssertionError("must not ingest")
+
+    proc = rig.make(scanner=Never())
+    rig.registry._procs.pop("import")
+    rig.registry.register(proc)
+
+    async def go():
+        pic = rig.image("a.png", 1)
+        await rig.passes(1, proc)
+        # ComfyClient's own ingest writes the row while the file settles.
+        Scanner(rig.db, None).ingest_file(pic)
+        await rig.passes(3, proc)
+        await asyncio.sleep(0.2)
+
+    run(go())
+    assert rig.events == [] and rig.kicks == 0
+
+
+def test_a_file_gone_mid_queue_neither_announces_nor_kicks(rig):
+    async def go():
+        pic = rig.image("a.png", 1)
+        rig.image("keep.png", 2)
+        await rig.passes(2)
+        os.remove(pic)
+        await rig.passes(1)
+        await asyncio.sleep(0.2)
+
+    rig.proc._scanner = Scanner(rig.db, None)
+    run(go())
+    assert all(e[2]["count"] == 1 for e in rig.events)
+    assert len(rig.events) == 1  # keep.png only
+
+
+def test_vanished_entries_without_a_row_are_pruned(rig):
+    async def go():
+        pic = rig.image("a.png", 1)
+        rig.image("keep.png", 2)
+        await rig.passes(3)
+        os.remove(pic)
+        await rig.passes(1)
+        assert rig.proc.vanished_since(pic.as_posix()) is not None
+        rig.db.delete_media(pic.as_posix()) if hasattr(rig.db, "delete_media") else None
+        rig.proc._last_prune = float("-inf")
+        await rig.passes(1)
+        return pic
+
+    pic = run(go())
+    assert rig.proc.vanished_since(pic.as_posix()) is None
+
+
+def test_a_respelled_pair_that_raised_is_retried(rig, monkeypatch):
+    monkeypatch.setattr(fp, "path_key", lambda p: path_key(p, "win32"))
+    real = rig.db.move_media_batch_applied
+    calls = []
+
+    def flaky(pairs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("locked")
+        return real(pairs)
+
+    monkeypatch.setattr(rig.db, "move_media_batch_applied", flaky)
+
+    async def go():
+        pic = rig.image("Pic.png", 1)
+        await rig.passes(3)
+        os.rename(pic, rig.lib / "pic.png")
+        await rig.passes(3)
+
+    run(go())
+    assert rig.rows() == {(rig.lib / "pic.png").as_posix()} and len(calls) == 2
+
+
+def test_aclose_waits_for_the_file_being_written(rig):
+    import threading as th
+
+    started, release = th.Event(), th.Event()
+    finished = []
+
+    class Slow:
+        def ingest_file(self, p):
+            started.set()
+            release.wait(5)
+            finished.append(1)
+            return object()
+
+    proc = rig.make(scanner=Slow())
+    rig.registry._procs.pop("import")
+    rig.registry.register(proc)
+
+    async def go():
+        rig.image("a.png", 1)
+        proc.start_loop()
+        await asyncio.to_thread(started.wait, 10) if False else None
+        for _ in range(300):
+            if started.is_set():
+                break
+            proc._wake.set()
+            await asyncio.sleep(0.05)
+        assert started.is_set()
+        asyncio.get_running_loop().call_later(0.2, release.set)
+        await proc.aclose()
+        return list(finished)
+
+    assert run(go()) == [1]
+
+
+def test_a_move_is_refused_under_the_gate_while_a_scan_runs(rig):
+    rig.scan["running"] = True
+    assert rig.proc._move_locked([("/a", "/b")]) is None
+    rig.scan["running"] = False
+    assert rig.proc._move_locked([("/a", "/b")]) == []
+
+
+def test_start_scan_waits_for_a_move_in_flight(rig, monkeypatch):
+    gate = scan_api.move_gate
+    gate.acquire()
+    scan_api._scan_task = None
+    monkeypatch.setattr(scan_api, "_run_scan", lambda *a: asyncio.sleep(0))
+    monkeypatch.setattr(scan_api, "get_import_process", lambda: None)
+
+    async def go():
+        task = asyncio.create_task(scan_api.start_scan(scan_api.ScanRequest()))
+        await asyncio.sleep(0.2)
+        waited = not task.done()
+        gate.release()
+        await task
+        await scan_api._scan_task
+        return waited
+
+    try:
+        assert run(go()) is True
+    finally:
+        scan_api._scan_task = None
+        if gate.locked():
+            gate.release()

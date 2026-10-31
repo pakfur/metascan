@@ -303,6 +303,12 @@ class ProcessRegistry:
             raise CommandRefused("unknown_process")
         return snap[pid]
 
+    def failed(self, pid: str) -> bool:
+        """True while ``pid`` shows ``failed`` until it runs or is started
+        again (the sticky error). No report is evaluated."""
+        with self._lock:
+            return pid in self._sticky_error
+
     def blocked(self, pid: str) -> bool:
         """True when the process is held, paused or stopped (don't auto-start)."""
         return self.status(pid).state in (State.HELD, State.PAUSED, State.STOPPED)

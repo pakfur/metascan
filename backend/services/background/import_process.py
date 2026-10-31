@@ -27,9 +27,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from backend.services.background.protocol import (
     Capabilities,
@@ -44,13 +55,17 @@ from metascan.core.folder_poller import (
     FolderSpec,
 )
 from metascan.core.move_detector import MOVE_GRACE_S, Candidate, match_moves
-from metascan.utils.path_utils import to_posix_path
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
 ANNOUNCE_INTERVAL_S = 2.0  # at most one `library` event this often
 EMBED_DEBOUNCE_S = 5.0  # after the last ingest
+CLOSE_WAIT_S = 10.0  # aclose waits this long for a file being written
 SETTLE_REPORT_S = 60.0  # a file still settling counts as work this long
+
+
+INGESTED, SKIPPED, FAILED = "ingested", "skipped", "failed"
 
 
 def _bare(path: str) -> str:
@@ -78,6 +93,7 @@ class ImportProcess:
         kick_embedding: Optional[Callable[[], Awaitable[Any]]] = None,
         after_move: Optional[Callable[[], Awaitable[Any]]] = None,
         compute_phash: Optional[Callable[[Path], Optional[str]]] = None,
+        move_gate: Optional[threading.Lock] = None,
         clock: Callable[[], float] = time.monotonic,
         announce_interval_s: float = ANNOUNCE_INTERVAL_S,
         embed_debounce_s: float = EMBED_DEBOUNCE_S,
@@ -94,6 +110,7 @@ class ImportProcess:
         self._kick_embedding = kick_embedding
         self._after_move = after_move
         self._compute_phash = compute_phash
+        self._move_gate = move_gate
         self._clock = clock
         self._announce_interval_s = announce_interval_s
         self._embed_debounce_s = embed_debounce_s
@@ -120,6 +137,11 @@ class ImportProcess:
         self._moving = 0
         self._inflight = False
         self._error: Optional[str] = None
+        self._respell_retry: List[Tuple[str, str]] = []
+        self._kick_dirty = False
+        self._kick_task: Optional[asyncio.Task] = None
+        self._threads: Set[asyncio.Future] = set()
+        self._last_prune = float("-inf")
         self._announce_pending = 0
         self._last_announce = float("-inf")
         self._announce_handle: Optional[asyncio.TimerHandle] = None
@@ -137,7 +159,7 @@ class ImportProcess:
         full = running and bool(st["full_clean"])
         watching = self._watch_on is True
         intent = self._registry.intent(self.id)
-        failed = bool(st["error"] or self._error)
+        failed = bool(st["error"] or self._error or self._registry.failed(self.id))
         return Capabilities(
             can_start=intent in ("paused", "stopped") or failed,
             can_pause=watching and not full,
@@ -152,10 +174,10 @@ class ImportProcess:
             return self._report_scan(st)
         if st["error"]:
             return ProcessReport(State.FAILED, None, "Scan failed", error=st["error"])
-        if self._watch_on is None:
-            return ProcessReport(State.IDLE, None, "Not running")
         if self._error:
             return ProcessReport(State.FAILED, None, "Import failed", error=self._error)
+        if self._watch_on is None:
+            return ProcessReport(State.IDLE, None, "Not running")
         if not self._watch_on:
             return ProcessReport(State.IDLE, None, "Watching is off")
         warnings = len(self._bad)
@@ -269,15 +291,29 @@ class ImportProcess:
             if handle is not None:
                 handle.cancel()
         self._announce_handle = self._kick_handle = None
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("import loop ended with an error")
+        for t in (self._task, self._kick_task):
+            if t is not None:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("import loop ended with an error")
+        self._task = self._kick_task = None
+        # A file being written must not finish after the database closes.
+        if self._threads:
+            _, late = await asyncio.wait(set(self._threads), timeout=CLOSE_WAIT_S)
+            if late:
+                logger.warning("import: a file was still being written at shutdown")
+
+    async def _thread(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """``to_thread`` that ``aclose`` can wait for: cancelling the loop
+        leaves the thread running, so the future is tracked."""
+        fut = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        self._threads.add(fut)
+        fut.add_done_callback(self._threads.discard)
+        return await asyncio.shield(fut)
 
     # the loop ------------------------------------------------------------
     async def _run(self) -> None:
@@ -294,8 +330,6 @@ class ImportProcess:
                 self.poke()
             poller = self._poller
             wait = poller.next_interval() if poller else WATCH_INTERVAL_S
-            if self._todo and not self._halted():
-                wait = 0.0
             self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=wait)
@@ -357,22 +391,52 @@ class ImportProcess:
         self._unavailable = list(result.unavailable)
         self._track_settling(poller)
         now = self._clock()
+        self._forget(result.vanished)
         for path in result.vanished:
-            self._forget(path)
             self._vanished.setdefault(to_posix_path(path), now)
         for path in result.changed:
             if path in self._bad:
                 del self._bad[path]
                 self._tries.pop(path, None)
                 self._todo.append(path)
-        if result.respelled:
-            await self._apply_moves(
-                [(to_posix_path(o), to_posix_path(n)) for o, n in result.respelled]
-            )
+        await self._respell(result.respelled)
+        await self._prune_vanished()
         await self._intake(result.settled_new)
         self.poke()
         await self._drain()
+        if self._kick_dirty and not self._todo and self._kick_handle is None:
+            await self._kick()
+        self._error = None  # a clean pass ends a transient failure
         self.poke()
+
+    async def _respell(self, found: Sequence[Tuple[str, str]]) -> None:
+        """Case-only renames: the poller records the new spelling once, so a
+        pair that could not be applied is kept for the next pass."""
+        pairs = [*self._respell_retry, *found]
+        self._respell_retry = []
+        if not pairs:
+            return
+        posix = [(to_posix_path(o), to_posix_path(n)) for o, n in pairs]
+        try:
+            done = await self._apply_moves(posix)
+        except Exception:
+            logger.exception("import: a respelled file could not be re-keyed")
+            done = None
+        if done is None:
+            self._respell_retry = pairs
+
+    async def _prune_vanished(self) -> None:
+        """Drop vanished entries whose row is gone (hygiene or a delete took
+        it): the dict holds rows only."""
+        now = self._clock()
+        if not self._vanished or now - self._last_prune < MOVE_GRACE_S:
+            return
+        self._last_prune = now
+        keys = list(self._vanished)
+        present = await self._thread(self._db().media_paths_present, keys)
+        for k in keys:
+            if k not in present:
+                self._vanished.pop(k, None)
 
     def _config(self) -> Dict[str, Any]:
         if self._get_config is not None:
@@ -425,7 +489,9 @@ class ImportProcess:
             roots,
             lambda p: Path(p).suffix.lower() in supported,
         )
-        poller.seed(await asyncio.to_thread(self._db().all_media_paths))
+        # The database holds POSIX spellings; the walk reports native ones.
+        stored = await self._thread(self._db().all_media_paths)
+        poller.seed([to_native_path(p) for p in stored])
         self._poller = poller
         self._signature = signature
         self._folder_count = len(folders)
@@ -449,13 +515,17 @@ class ImportProcess:
             if p not in pending:
                 del self._settle_seen[p]
 
-    def _forget(self, path: str) -> None:
-        """A watched file vanished: whatever was queued or failed for it goes."""
-        self._bad.pop(path, None)
-        self._tries.pop(path, None)
-        self._held.pop(path, None)
-        self._todo = [p for p in self._todo if p != path]
-        self._retry_next = [p for p in self._retry_next if p != path]
+    def _forget(self, paths: Sequence[str]) -> None:
+        """Watched files vanished: whatever was queued or failed for them goes."""
+        gone = set(paths)
+        if not gone:
+            return
+        for p in gone:
+            self._bad.pop(p, None)
+            self._tries.pop(p, None)
+            self._held.pop(p, None)
+        self._todo = [p for p in self._todo if p not in gone]
+        self._retry_next = [p for p in self._retry_next if p not in gone]
 
     # moves ---------------------------------------------------------------
     async def _intake(self, settled: Sequence[str]) -> None:
@@ -473,13 +543,17 @@ class ImportProcess:
             self._inflight = True
             self.poke()
             try:
-                pairs = await asyncio.to_thread(
+                pairs = await self._thread(
                     self._detect_moves, candidates, dict(self._vanished)
                 )
                 applied = await self._apply_moves(pairs)
             finally:
                 self._moving = 0
                 self._inflight = False
+            if applied is None:
+                # A scan took the library meanwhile: look again afterwards.
+                self._held = {p: None for p in candidates}
+                return
             moved = [new for _, new in applied]
         moved_set = set(moved)
         fresh_set = set(fresh)
@@ -537,35 +611,52 @@ class ImportProcess:
 
     async def _apply_moves(
         self, pairs: Sequence[Tuple[str, str]]
-    ) -> List[Tuple[str, str]]:
+    ) -> Optional[List[Tuple[str, str]]]:
         """Re-key the rows (one batch), then the pending snapshot, the FAISS
-        rows and the grid. Nothing is applied while a scan or Full clean runs:
-        it owns the library and the pending file."""
-        if not pairs or self._scan_running():
+        rows and the grid. The applied pairs, or None when a scan or Full
+        clean runs: it owns the library and the pending file."""
+        if not pairs:
             return []
-        db = self._db()
-        applied: List[Tuple[str, str]] = await asyncio.to_thread(
-            db.move_media_batch_applied, list(pairs)
+        applied: Optional[List[Tuple[str, str]]] = await self._thread(
+            self._move_locked, list(pairs)
         )
         if not applied:
-            return []
-        for old, new in applied:
+            return applied
+        for old, _ in applied:
             self._vanished.pop(old, None)
-        await asyncio.to_thread(self._rekey_pending, db, applied)
         await self._after_media_move()
         self._announce(len(applied))
         return applied
 
-    def _rekey_pending(self, db: Any, applied: Sequence[Tuple[str, str]]) -> None:
+    def _gate(self) -> threading.Lock:
+        if self._move_gate is None:
+            from backend.api.scan import move_gate
+
+            self._move_gate = move_gate
+        return self._move_gate
+
+    def _move_locked(
+        self, pairs: List[Tuple[str, str]]
+    ) -> Optional[List[Tuple[str, str]]]:
+        """Thread. The scan-running check and the move are one critical
+        section with the moment the scan route marks itself running (it takes
+        the same gate), so a move cannot land after a scan's snapshot."""
         from backend.services import taste_snapshot
 
-        if self._scan_running():
-            return
-        try:
-            taste_snapshot.rekey_pending(Path(db.db_path), applied)
-        except Exception as exc:
-            # The rows moved; the pending file is read again by the next scan.
-            logger.warning("pending snapshot not re-keyed: %s", type(exc).__name__)
+        with self._gate():
+            if self._scan_running():
+                return None
+            db = self._db()
+            applied: List[Tuple[str, str]] = db.move_media_batch_applied(pairs)
+            if applied:
+                try:
+                    taste_snapshot.rekey_pending(Path(db.db_path), applied)
+                except Exception as exc:
+                    # The rows moved; the pending file is read by the next scan.
+                    logger.warning(
+                        "pending snapshot not re-keyed: %s", type(exc).__name__
+                    )
+            return applied
 
     async def _after_media_move(self) -> None:
         try:
@@ -586,23 +677,26 @@ class ImportProcess:
             self._inflight = True
             self.poke()
             try:
-                ok = await asyncio.to_thread(self._ingest_one, path)
+                outcome = await self._thread(self._ingest_one, path)
             finally:
                 self._inflight = False
                 self._current = None
             self._batch_done += 1
-            if ok:
+            if outcome == INGESTED:
                 self._tries.pop(path, None)
                 self._announce(1)
                 self._schedule_kick()
-            else:
+            elif outcome == FAILED:
                 self._failed(path)
+            else:
+                self._tries.pop(path, None)
             self.poke()
         if not self._todo and not self._retry_next:
             self._batch_done = self._batch_total = 0
 
-    def _ingest_one(self, path: str) -> bool:
-        """Thread. True when the file is in the library."""
+    def _ingest_one(self, path: str) -> str:
+        """Thread. ``INGESTED``, ``SKIPPED`` (gone, or already in the library:
+        ComfyClient's own ingest wrote its row with lineage) or ``FAILED``."""
         if self._scanner is None:
             if self._make_scanner is not None:
                 self._scanner = self._make_scanner()
@@ -612,12 +706,15 @@ class ImportProcess:
 
                 self._scanner = Scanner(self._db(), get_thumbnail_cache())
         if not os.path.exists(path):
-            return True  # gone again: the poller reports it vanished
+            return SKIPPED  # gone again: the poller reports it vanished
         try:
-            return self._scanner.ingest_file(Path(path)) is not None
+            if self._db().candidate_for(to_posix_path(path)) is not None:
+                return SKIPPED
+            ok = self._scanner.ingest_file(Path(path)) is not None
         except Exception as exc:
             logger.warning("import of a file failed: %s", type(exc).__name__)
-            return False
+            return FAILED
+        return INGESTED if ok else FAILED
 
     def _failed(self, path: str) -> None:
         """Retried once on the next pass, then counted and left until the file
@@ -669,14 +766,23 @@ class ImportProcess:
         loop = self._loop or _running_loop()
         if loop is None or self._closed:
             return
+        self._kick_dirty = True
         if self._kick_handle is not None:
             self._kick_handle.cancel()
-        self._kick_handle = loop.call_later(
-            self._embed_debounce_s, lambda: loop.create_task(self._kick())
-        )
+        self._kick_handle = loop.call_later(self._embed_debounce_s, self._start_kick)
+
+    def _start_kick(self) -> None:
+        self._kick_handle = None
+        loop = self._loop or _running_loop()
+        if loop is not None and not self._closed:
+            self._kick_task = loop.create_task(self._kick())
 
     async def _kick(self) -> None:
-        self._kick_handle = None
+        """Ask Embedding for an incremental build. Its answer matters: while a
+        build runs (or the GPU is unavailable) it says busy or refused and the
+        new files would wait for the next drop, so the request stays pending
+        and the next pass asks again. Blocked (held, paused, stopped) needs no
+        retry: resume and release build when files remain."""
         if self._closed:
             return
         if self._todo or self._inflight:
@@ -684,15 +790,17 @@ class ImportProcess:
             return
         try:
             if self._kick_embedding is not None:
-                await self._kick_embedding()
+                answer = await self._kick_embedding()
             else:
                 from backend.dependencies import get_embedding_process
 
                 embedding = get_embedding_process()
-                if embedding is not None:
-                    await embedding.kick(True)
+                answer = await embedding.kick(True) if embedding else None
         except Exception:
             logger.exception("embedding kick failed")
+            return
+        status = answer.get("status") if isinstance(answer, dict) else None
+        self._kick_dirty = status in ("busy", "refused")
 
 
 def _running_loop() -> Optional[asyncio.AbstractEventLoop]:
