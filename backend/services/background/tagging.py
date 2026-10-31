@@ -8,7 +8,14 @@ use) leaves them queued; the panel then says ``waiting`` and a slow timer
 tries again. A registry release (``resume``) kicks too.
 
 Everything runs on the server loop; ``kick`` and ``report`` are safe from
-any thread (the embedding poller's worker thread kicks after a build)."""
+any thread (the embedding poller's worker thread kicks after a build).
+
+Stop is a queue stop: no new images, the ones in flight finish (the panel
+says ``running`` with ``winding_down`` until they have), the rows stay queued
+and nothing runs until the owner presses play. The intent persists in the
+registry, so a restart, a retry timer or an embedding run's kick all do
+nothing while it is set; rows keep accumulating. An owner retag
+(``kick(by_owner=True)``) clears it, since that is the owner's own wish."""
 
 from __future__ import annotations
 
@@ -74,6 +81,7 @@ class TaggingProcess:
         self._phase = _PHASE_IDLE
         self._paused = False
         self._unloaded = False  # the owner unloaded the model: says why paused
+        self._stopping = False  # told to stop: finish what is in flight
         self._error: Optional[str] = None
         self._queued = 0
         self._last_progress: Optional[Progress] = None
@@ -87,9 +95,23 @@ class TaggingProcess:
 
     # protocol ----------------------------------------------------------
     def capabilities(self) -> Capabilities:
-        return Capabilities(can_start=True, can_pause=True, can_stop=False)
+        # Stop needs something to stop: queued rows or a drain in flight.
+        can_stop = bool(self._queued) or self._running
+        return Capabilities(can_start=True, can_pause=True, can_stop=can_stop)
+
+    def _suspended(self) -> bool:
+        return self._paused or self._stopping
 
     def report(self) -> ProcessReport:
+        if self._stopping and self._running and self._phase == _PHASE_RUNNING:
+            # Always winding_down: the registry must keep Tagging's holds
+            # until the images in flight have ended (no GPU overlap).
+            return ProcessReport(
+                State.RUNNING,
+                self._progress(),
+                "Stopping after the current images",
+                winding_down=True,
+            )
         if self._error:
             return ProcessReport(State.FAILED, None, "Tagging failed", self._error)
         if self._paused or self._unloaded:
@@ -111,12 +133,21 @@ class TaggingProcess:
             )
         if self._phase == _PHASE_CLIP_ONLY:
             return ProcessReport(State.IDLE, None, "CLIP tagging is in use")
+        if self._stopping or self._registry.intent(self.id) == "stopped":
+            return ProcessReport(State.IDLE, None, f"Stopped, {self._queued} queued")
         if self._queued:
             return ProcessReport(State.IDLE, None, f"{self._queued} queued")
         return ProcessReport(State.IDLE, None, "Nothing to tag")
 
     async def start(self) -> None:
+        """Play: clear a stop (and a stale pause) and drain."""
+        self._stopping = False
+        self._paused = False
+        self._unloaded = False
+        if self._pump is not None:
+            self._pump.resume()
         self.kick(fresh=True)
+        self._notify()
 
     async def pause(self) -> None:
         """Finish the images in flight and take no more."""
@@ -134,8 +165,12 @@ class TaggingProcess:
         self._notify()
 
     async def stop(self) -> None:
-        # Not stoppable (can_stop is False): the queue is durable, pause is the stop.
-        return None
+        """No new images; the rows stay queued until the owner plays."""
+        self._stopping = True
+        self._cancel_retry()
+        if self._pump is not None:
+            self._pump.pause()
+        self._notify()
 
     # the owner's actions -----------------------------------------------
     async def owner_unloaded(self) -> None:
@@ -148,26 +183,43 @@ class TaggingProcess:
             logger.debug("tagging owner pause refused: %s", exc.code)
 
     # driving -----------------------------------------------------------
-    def kick(self, *, fresh: bool = False, scan_stops: ScanStops = None) -> bool:
+    def kick(
+        self,
+        *,
+        fresh: bool = False,
+        scan_stops: ScanStops = None,
+        by_owner: bool = False,
+    ) -> bool:
         """Start a drain on the server loop unless Tagging is blocked.
 
         ``scan_stops``: the (client, ``_explicit_stops``) taken when the scan
         began, so an unload since then wins over the post-scan drain. Any
         other kick re-snapshots the stops when it runs. Returns whether a
-        drain was scheduled (a running one coalesces into a rerun)."""
-        try:
-            if self._registry.blocked(self.id):
-                logger.debug("tagging kick skipped: held, paused or stopped")
-                return False
-        except CommandRefused:
-            logger.warning("tagging kick skipped: process not registered")
-            return False
+        drain was scheduled (a running one coalesces into a rerun).
+
+        ``by_owner`` (the retag route): the owner's own request clears a Stop
+        (a pause stays). Any other kick does nothing while blocked, apart from
+        counting the rows that keep arriving."""
         loop = self._loop
         if loop is None or loop.is_closed() or self._closed:
             logger.warning(
                 "VLM drain not scheduled: server event loop unavailable; "
                 "pending tags stay queued for the next drain"
             )
+            return False
+        try:
+            if by_owner and self._registry.intent(self.id) == "stopped":
+                # Play: clears the stop and drains (start()).
+                asyncio.run_coroutine_threadsafe(
+                    self._registry.command(self.id, "start"), loop
+                )
+                return True
+            if self._registry.blocked(self.id):
+                logger.debug("tagging kick skipped: held, paused or stopped")
+                asyncio.run_coroutine_threadsafe(self._count_and_notify(), loop)
+                return False
+        except CommandRefused:
+            logger.warning("tagging kick skipped: process not registered")
             return False
         coro = self._drain(fresh, scan_stops)
         try:
@@ -215,6 +267,10 @@ class TaggingProcess:
 
     def _set_phase(self, phase: str) -> None:
         self._phase = phase
+        self._notify()
+
+    async def _count_and_notify(self) -> None:
+        await self._refresh_queue()
         self._notify()
 
     async def _refresh_queue(self) -> None:
@@ -297,9 +353,9 @@ class TaggingProcess:
                 unless_stopped_since=since,
             )
             self._pump = pump
-            if self._paused:
+            if self._suspended():
                 pump.pause()
-            while not self._paused:
+            while not self._suspended():
                 self._rerun = False
                 if await self._wait_for_generation_to_settle():
                     pump._unless_stopped_since = self._stops(client)
@@ -309,7 +365,7 @@ class TaggingProcess:
                 if not self._rerun:
                     break
             await self._refresh_queue()
-            if self._queued and not self._paused:
+            if self._queued and not self._suspended():
                 # The pump stopped with rows left: the VLM is not ready.
                 self._last_progress = pump.progress()
                 self._phase = _PHASE_WAITING

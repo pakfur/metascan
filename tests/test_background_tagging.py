@@ -341,3 +341,79 @@ async def test_aclose_cancels_an_inflight_drain(env):
     await until(lambda: Pump.instances and Pump.instances[0].passes)
     await proc.aclose()
     await until(lambda: not proc._running)
+
+
+async def test_can_stop_is_false_when_idle_and_empty(env):
+    proc, registry, db, *_ = env
+    assert registry.status("tagging").capabilities.can_stop is False
+    db.queued = 3
+    await proc._refresh_queue()
+    assert registry.status("tagging").capabilities.can_stop is True
+
+
+async def test_stop_mid_drain_winds_down_and_leaves_the_rows(env):
+    proc, registry, db, *_ = env
+    db.queued = 5
+    Pump.gate = asyncio.Event()
+    proc.kick()
+    await until(lambda: Pump.instances and Pump.instances[0].passes)
+    await registry.command("tagging", "stop")
+    st = registry.status("tagging")
+    assert st.state == State.RUNNING  # winding down, holds kept
+    assert st.activity == "Stopping after the current images"
+    assert Pump.instances[0].paused is True
+    Pump.gate.set()
+    await until(lambda: registry.status("tagging").state == State.STOPPED)
+    await asyncio.sleep(0.1)
+    assert len(Pump.instances) == 1 and Pump.instances[0].passes == 1
+    assert db.queued == 5  # nothing dropped
+
+
+async def test_nothing_runs_a_stopped_tagging(env, tmp_path):
+    proc, registry, db, client, busy, clock = env
+    db.queued = 4
+    await proc._refresh_queue()
+    await registry.command("tagging", "stop")
+    assert proc.kick() is False  # an embedding run's kick
+    assert proc.kick(fresh=True) is False
+    proc._arm_retry()  # a retry timer that was armed
+    await asyncio.sleep(0.15)
+    assert Pump.instances == []
+    # A restart: the persisted stop keeps the startup kick off.
+    registry2 = ProcessRegistry(tmp_path / "bg.json", lambda s: None, clock)
+    proc2 = TaggingProcess(registry2, lambda: client, lambda: db, lambda: False)
+    registry2.register(proc2)
+    assert await proc2.kick_if_queued() is False
+    await asyncio.sleep(0.05)
+    assert registry2.status("tagging").state == State.STOPPED
+    assert Pump.instances == []
+    # Rows keep accumulating and show on the panel.
+    db.queued = 9
+    proc2.kick()
+    await until(lambda: "9 queued" in registry2.status("tagging").activity)
+
+
+async def test_play_drains_the_rest_after_a_stop(env):
+    proc, registry, db, *_ = env
+    db.queued = 3
+    await proc._refresh_queue()
+    await registry.command("tagging", "stop")
+    await registry.command("tagging", "start")
+    await until(lambda: Pump.instances and Pump.instances[0].passes)
+    assert registry.status("tagging").state != State.STOPPED
+
+
+async def test_an_owner_retag_clears_a_stop_but_not_a_pause(env):
+    proc, registry, db, *_ = env
+    db.queued = 3
+    await proc._refresh_queue()
+    await registry.command("tagging", "stop")
+    assert proc.kick(fresh=True, by_owner=True)
+    await until(lambda: Pump.instances and Pump.instances[0].passes)
+    assert registry.intent("tagging") == "none"
+    await registry.command("tagging", "pause")
+    n = len(Pump.instances)
+    assert proc.kick(fresh=True, by_owner=True) is False
+    await asyncio.sleep(0.05)
+    assert registry.status("tagging").state == State.PAUSED
+    assert len(Pump.instances) == n

@@ -341,7 +341,10 @@ def _log_faiss_reload_failure(fut: "concurrent.futures.Future[None]") -> None:
 
 
 def _schedule_vlm_drain_after_complete(
-    eq: Optional[EmbeddingQueue] = None, *, fresh: bool = False
+    eq: Optional[EmbeddingQueue] = None,
+    *,
+    fresh: bool = False,
+    by_owner: bool = False,
 ) -> None:
     """Ask the Tagging process to drain the tag queue.
 
@@ -349,7 +352,8 @@ def _schedule_vlm_drain_after_complete(
     the retag route; ``TaggingProcess.kick`` is thread-safe, skips a held,
     paused or stopped process (the rows stay queued; a release resumes
     them) and coalesces overlapping requests. ``fresh`` (the retag route:
-    the owner just asked) ignores the scan's unload snapshot.  ``eq`` is
+    the owner just asked) ignores the scan's unload snapshot; ``by_owner``
+    also clears a Stop (an automatic kick never does).  ``eq`` is
     unused (the queue is a table now).
     """
     process = get_tagging_process()
@@ -359,7 +363,11 @@ def _schedule_vlm_drain_after_complete(
             "pending tags stay queued for the next drain"
         )
         return
-    process.kick(fresh=fresh, scan_stops=None if fresh else _vlm_scan_stops)
+    process.kick(
+        fresh=fresh,
+        scan_stops=None if fresh else _vlm_scan_stops,
+        by_owner=by_owner,
+    )
 
 
 async def _embed_poll_loop() -> None:

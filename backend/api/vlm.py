@@ -208,7 +208,8 @@ async def retag(body: RetagRequest) -> Dict[str, Any]:
     after = await asyncio.to_thread(db.queued_tag_paths, targets)
     job_id = str(uuid.uuid4())
     _jobs[job_id] = sorted(after - before)
-    similarity._schedule_vlm_drain_after_complete(fresh=True)
+    # The owner's own request: it clears a Stop of Tagging (a pause stays).
+    similarity._schedule_vlm_drain_after_complete(fresh=True, by_owner=True)
     return {"job_id": job_id, "total": added}
 
 

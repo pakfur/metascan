@@ -26,7 +26,7 @@ A process told to pause or stop may need a moment to finish what it is saving. I
 
 - **Import**: stop only. Stopping a Full clean & rescan is the same as cancelling it: your ratings stay safe and pending, and nothing is deleted.
 - **Embedding**: pause saves what is done and exits; the rest stays queued. Resuming reloads the CLIP model, which takes a little while.
-- **Tagging**: pauses between batches. The queue is kept on disk, so a restart loses nothing.
+- **Tagging**: pause and stop both take no new images and let the ones in flight finish (the panel says "Stopping after the current images" until they have). Stop keeps the queue on disk, and nothing is tagged until you press play, not even after a restart or a finished index build; new images keep joining the queue. Starting a retag yourself also clears a stop. A retag while paused stays paused.
 - **Text to image, Image to video, Storyboard**: pause lets the job already in ComfyUI finish ("Pausing after the current job") and holds the rest. Stop cancels the batch.
 - **Upscaling**: pause stops the file being worked on, and it starts again from the beginning on resume.
 - **Taste training**: pause lets the run in progress finish, then stops automatic retraining. Training from the Config window still works.
