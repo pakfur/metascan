@@ -37,14 +37,24 @@ def test_case_folding(platform, equal):
         ".DS_Store",
         "._x.png",
         ".Spotlight-V100",
-        ".hidden",
     ],
 )
 def test_ignored(name):
     assert is_ignored_name(name)
 
 
-@pytest.mark.parametrize("name", ["a.png", "thumbs.png", "my~$a.png", "x.mp4"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".hidden.png",
+        ".sketch.png",
+        ".hidden",
+        "a.png",
+        "thumbs.png",
+        "my~$a.png",
+        "x.mp4",
+    ],
+)
 def test_not_ignored(name):
     assert not is_ignored_name(name)
 
@@ -92,3 +102,11 @@ def test_handle_closed_and_contents_unread(monkeypatch, tmp_path):
     monkeypatch.setattr("builtins.open", spy)
     assert can_open_for_read(str(f))
     assert opened and all(h.closed for h in opened)
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_casefold_result_is_nfc(platform):
+    # U+0390 casefolds to a decomposed sequence; the key must be NFC again.
+    key = path_key("\u0390", platform)
+    assert unicodedata.is_normalized("NFC", key)
+    assert key == path_key("\u03b9\u0308\u0301", platform)

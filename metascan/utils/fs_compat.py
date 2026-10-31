@@ -8,8 +8,8 @@ import unicodedata
 
 _CASE_INSENSITIVE_PLATFORMS = ("win32", "darwin")
 
-# Windows shell droppings, compared case-insensitively.
-_IGNORED_NAMES = frozenset({"thumbs.db", "desktop.ini"})
+# OS junk names, compared case-insensitively.
+_IGNORED_NAMES = frozenset({"thumbs.db", "desktop.ini", ".ds_store", ".spotlight-v100"})
 
 # Same set on every OS; ".download" is macOS (Safari) but harmless elsewhere.
 _PARTIAL_SUFFIXES = (".crdownload", ".part", ".tmp", ".download")
@@ -19,18 +19,16 @@ def path_key(path: str, platform: str = sys.platform) -> str:
     """Comparison key for a path: NFC everywhere, casefolded on win32/darwin."""
     key = unicodedata.normalize("NFC", path)
     if platform in _CASE_INSENSITIVE_PLATFORMS:
-        key = key.casefold()
+        # casefold can leave the string un-normalised, so normalise again.
+        key = unicodedata.normalize("NFC", key.casefold())
     return key
 
 
 def is_ignored_name(name: str) -> bool:
-    """True for OS metadata files: dotfiles (.DS_Store, ._*, .Spotlight-V100),
-    Thumbs.db, desktop.ini and Office lock files (~$*)."""
-    return (
-        name.startswith(".")
-        or name.startswith("~$")
-        or name.casefold() in _IGNORED_NAMES
-    )
+    """True for OS junk on every OS: .DS_Store, ._* (AppleDouble),
+    .Spotlight-V100, Thumbs.db, desktop.ini (case-insensitive) and ~$* lock
+    files. Other dotfiles (.sketch.png) are real media and are not ignored."""
+    return name.startswith(("._", "~$")) or name.casefold() in _IGNORED_NAMES
 
 
 def is_partial_download(name: str) -> bool:
