@@ -71,7 +71,9 @@ function stop() {
   flex-direction: column;
   gap: 5px;
 }
-.card.idle { opacity: 0.62; }
+.card.idle .name,
+.card.idle .sub,
+.card.idle .dot { opacity: 0.62; }
 .top { display: flex; align-items: center; gap: 5px; }
 .name {
   font-weight: 600;

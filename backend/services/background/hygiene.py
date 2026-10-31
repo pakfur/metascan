@@ -13,7 +13,7 @@ from backend.services.background.protocol import (
 
 class HygieneProcess:
     id = "hygiene"
-    label = "Hygiene"
+    label = "Library hygiene"
     order = 80
     holds: Tuple[str, ...] = ()
 

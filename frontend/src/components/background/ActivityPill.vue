@@ -7,6 +7,20 @@ const store = useBackgroundStore()
 const open = ref(false)
 const root = ref<HTMLElement | null>(null)
 const pillBtn = ref<HTMLButtonElement | null>(null)
+// Fixed, not absolute: the library's centre column clips overflow, and at
+// 768-900 px it is narrower than the grid. Placed under the pill, clamped to
+// the viewport. Below 768 px the stylesheet's full-width rule applies.
+const dropStyle = ref<Record<string, string>>({})
+function place() {
+  const r = pillBtn.value?.getBoundingClientRect()
+  if (!r || window.innerWidth < 768) {
+    dropStyle.value = {}
+    return
+  }
+  const width = Math.min(640, window.innerWidth - 24)
+  const left = Math.max(12, Math.min(r.left, window.innerWidth - width - 12))
+  dropStyle.value = { left: `${left}px`, top: `${r.bottom + 6}px`, width: `${width}px` }
+}
 
 function onDocPointer(e: Event) {
   if (root.value && !root.value.contains(e.target as Node)) open.value = false
@@ -19,14 +33,18 @@ function onKey(e: KeyboardEvent) {
 }
 watch(open, (v) => {
   if (v) {
+    place()
+    window.addEventListener('resize', place)
     document.addEventListener('pointerdown', onDocPointer)
     document.addEventListener('keydown', onKey)
   } else {
+    window.removeEventListener('resize', place)
     document.removeEventListener('pointerdown', onDocPointer)
     document.removeEventListener('keydown', onKey)
   }
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', place)
   document.removeEventListener('pointerdown', onDocPointer)
   document.removeEventListener('keydown', onKey)
 })
@@ -50,7 +68,7 @@ onBeforeUnmount(() => {
       <span v-if="store.summary.spinning" class="count">{{ store.runningCount }}</span>
       <span v-if="store.anyFailed" class="faildot" aria-label="A process failed" />
     </button>
-    <div v-if="open" class="drop" role="region" aria-label="Background processes">
+    <div v-if="open" class="drop" :style="dropStyle" role="region" aria-label="Background processes">
       <ActivityGrid />
     </div>
   </div>
@@ -92,9 +110,9 @@ onBeforeUnmount(() => {
   .spin { animation: none; border-top-color: var(--primary-color); }
 }
 .drop {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
+  position: fixed;
+  top: 48px;
+  left: 12px;
   width: 640px;
   max-width: calc(100vw - 24px);
   max-height: 70vh;
@@ -107,6 +125,6 @@ onBeforeUnmount(() => {
   z-index: 1500;
 }
 @media (max-width: 767px) {
-  .drop { position: fixed; top: auto; left: 12px; right: 12px; width: auto; max-width: none; margin-top: 6px; }
+  .drop { top: auto; left: 12px; right: 12px; width: auto; max-width: none; margin-top: 6px; }
 }
 </style>
