@@ -819,7 +819,7 @@ def test_v7_resets_only_live_paths_that_have_a_tombstone(env, caplog):
     caplog.set_level(logging.DEBUG, logger="metascan.core.database_sqlite")
     db = DatabaseManager(env["data"])
 
-    assert _user_version(db) == 7
+    assert _user_version(db) >= 7
     assert _flags(db) == {reused: 0, skipped: 0, kept: 1}
     # The mark kept (no tombstone at its path) predates the fix: no time.
     assert _mark_times(db)[kept] is None
@@ -884,5 +884,5 @@ def test_v7_failure_changes_nothing_and_stops_the_open(env):
     finally:
         conn.close()
     DatabaseManager(env["data"])  # the next start retries
-    assert _user_version(db) == 7
+    assert _user_version(db) >= 7
     assert _flags(db) == {"/lib/reused.png": 0}

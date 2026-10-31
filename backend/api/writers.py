@@ -151,6 +151,7 @@ async def run_briefs() -> Dict[str, Any]:
     from backend.services.hindsight_briefs import BriefsJobError, get_briefs_job
 
     job = get_briefs_job()
+    await _owner_run_starting()
     try:
         job.start()
     except BriefsJobError as exc:
@@ -253,9 +254,19 @@ async def training_status(
     }
 
 
+async def _owner_run_starting() -> None:
+    """An owner's start / resume / scorecard clears a Stop on the panel."""
+    from backend.dependencies import get_training_process
+
+    process = get_training_process()
+    if process is not None:
+        await process.owner_run_starting()
+
+
 @router.post("/training/start")
 async def start_training(body: TrainingStartRequest) -> Dict[str, Any]:
     manager = _manager()
+    await _owner_run_starting()
     run_id = await _training_call(
         manager.start(
             scope=body.scope,
@@ -290,6 +301,7 @@ async def resume_training(body: TrainingRunRequest) -> Dict[str, Any]:
     manager = _manager()
     if body.run_id is None:
         raise HTTPException(status_code=422, detail={"code": "run_id_required"})
+    await _owner_run_starting()
     run_id = await _training_call(manager.resume(body.run_id))
     return {"run_id": run_id, **manager.status()}
 
@@ -346,6 +358,7 @@ async def render_scorecard(
     from backend.services.scorecard import ScorecardError
 
     req = body or ScorecardRequest()
+    await _owner_run_starting()
     try:
         result: Dict[str, Any] = await _scorecard_service().start(
             adapter_id,

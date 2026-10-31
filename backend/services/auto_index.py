@@ -29,10 +29,13 @@ class AutoIndexScheduler:
         is_indexing: Callable[[], bool],
         is_busy: Callable[[], bool],
         delay_s: float = DEFAULT_DELAY_S,
+        is_blocked: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._start_build = start_build
         self._is_indexing = is_indexing
         self._is_busy = is_busy
+        # Embedding held, paused or stopped in the background registry.
+        self._is_blocked = is_blocked
         self.delay_s = float(delay_s)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         try:
@@ -86,7 +89,11 @@ class AutoIndexScheduler:
 
     def _blocked(self) -> bool:
         try:
-            return bool(self._is_indexing()) or bool(self._is_busy())
+            return (
+                bool(self._is_indexing())
+                or bool(self._is_busy())
+                or (self._is_blocked is not None and bool(self._is_blocked()))
+            )
         except Exception:
             # A probe that cannot answer counts as busy: try again later.
             logger.debug("auto index busy probe failed", exc_info=True)
@@ -129,9 +136,20 @@ class AutoIndexScheduler:
 def generation_busy(t2i_runner: Any, comfy_client: Any, i2v_runner: Any = None) -> bool:
     """True while a T2I batch is registered (prompting or rendering), an I2V
     run is still writing prompts, or ComfyUI still has any job queued or
-    running (I2V, storyboards too)."""
+    running (I2V, storyboards too). A source the owner has paused counts only
+    for what is still moving: a job in ComfyUI or a prompt mid-call."""
+
+    def paused(source: str) -> bool:
+        return comfy_client is not None and comfy_client.is_source_paused(source)
+
     if t2i_runner is not None and t2i_runner.active_batches():
-        return True
+        if not paused("t2i") or t2i_runner.is_writing():
+            return True
     if i2v_runner is not None and i2v_runner.is_prompting():
-        return True
-    return bool(comfy_client is not None and comfy_client.has_pending_jobs())
+        if not paused("i2v") or i2v_runner.is_writing():
+            return True
+    if comfy_client is None:
+        return False
+    # has_active_jobs ignores gated queued jobs: a paused batch is pending work
+    # but must not keep Tagging and AutoIndex waiting for ever.
+    return bool(comfy_client.has_active_jobs())

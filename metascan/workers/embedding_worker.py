@@ -49,6 +49,7 @@ from metascan.core.embedding_manager import (
     FaissIndexManager,
 )  # noqa: E402
 from metascan.core.database_sqlite import DatabaseManager  # noqa: E402
+from metascan.core.faiss_renames import apply_pending_renames  # noqa: E402
 from metascan.core.vocabulary import (  # noqa: E402
     Vocabulary,
     build_vocabulary,
@@ -56,6 +57,7 @@ from metascan.core.vocabulary import (  # noqa: E402
 )
 from metascan.utils.app_paths import get_base_path, get_data_dir  # noqa: E402
 from metascan.utils.log_files import rotating_file_handler  # noqa: E402
+from metascan.utils.path_utils import to_posix_path  # noqa: E402
 
 
 # Maximum time to spend on a single file (seconds).
@@ -244,6 +246,18 @@ class EmbeddingWorker:
             return os.path.getsize(file_path) / (1024 * 1024)
         except OSError:
             return -1.0
+
+    def _enqueue_for_vlm(
+        self, db_mgr: DatabaseManager, file_path: str, is_video: bool
+    ) -> None:
+        """Queue an image for the server's VLM tag drain (durable table, so
+        a pause, an unload or a restart keeps it). Videos never enter."""
+        if is_video:
+            return
+        try:
+            db_mgr.enqueue_tags([file_path])
+        except Exception:
+            self.logger.exception("Could not queue %s for VLM tagging", file_path)
 
     def _stamp_rewritten_paths(
         self, db_mgr: DatabaseManager, file_paths: List[str]
@@ -436,6 +450,19 @@ class EmbeddingWorker:
                     model_key=model_key,
                 )
 
+            # Moved files keep their vectors: rename their rows before this
+            # run adds anything (the worker is the index's one writer).
+            try:
+                renames = apply_pending_renames(
+                    db_mgr, faiss_mgr, delays=STAMP_RETRY_DELAYS_S
+                )
+                if renames.failed:
+                    self.logger.error(
+                        "Pending FAISS renames not applied; they stay pending"
+                    )
+            except Exception:
+                self.logger.exception("Applying pending FAISS renames failed")
+
             self._write_progress(0, total, "processing")
             self.logger.info("Starting file processing loop")
 
@@ -528,6 +555,9 @@ class EmbeddingWorker:
                         # Appends a new path's row or overwrites an existing
                         # one; either way its tombstones are stamped with
                         # this batch, before the next save.
+                        # A rename pending from this path would hand the
+                        # moved file the vector of the file embedded here.
+                        db_mgr.drop_pending_rename_from(to_posix_path(file_path))
                         faiss_mgr.add(file_path, embedding)
                         batch_paths.append(file_path)
                         embedded_count += 1
@@ -566,13 +596,11 @@ class EmbeddingWorker:
                                     }
                                 )
 
-                        # VLM-tagging path: enqueue the file for VlmTagPump.
+                        # VLM-tagging path: queue the file for VlmTagPump.
                         # Qwen3-VL is image-only — videos would send raw mp4
                         # bytes as ``data:image/jpeg`` and fail with 400.
-                        if tag_with_vlm and not is_video:
-                            pending_path = self.queue_dir / "vlm_pending.jsonl"
-                            with open(pending_path, "a", encoding="utf-8") as fp:
-                                fp.write(json.dumps({"path": str(file_path)}) + "\n")
+                        if tag_with_vlm:
+                            self._enqueue_for_vlm(db_mgr, file_path, is_video)
                     else:
                         skipped_paths.append(file_path)
                         skipped_count += 1

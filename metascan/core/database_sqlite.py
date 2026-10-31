@@ -12,6 +12,7 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
+    Iterable,
     List,
     Mapping,
     Optional,
@@ -30,6 +31,7 @@ import numpy as np
 from metascan.utils.startup_profiler import log_startup
 from metascan.utils.path_utils import to_posix_path, to_native_path
 from metascan.core.media import Media
+from metascan.core.move_detector import Candidate, parse_mtime
 from metascan.core.writer_adapters import parse_adapter_writer_id
 from metascan.core.judgments import (
     CATEGORY_NAME_MAX,
@@ -292,9 +294,67 @@ def _ensure_index(
 # on load, and ``restore_taste_state`` only takes version 3.
 TASTE_SNAPSHOT_VERSION = 3
 
+# Moving a media row (``move_media_batch``): every (table, column) that
+# holds a media path and is re-keyed with it. ``media.file_path`` is the
+# parent and is handled first. The ``file_path`` inside ``media.data`` is
+# rewritten too. ``tests/test_move_media.py`` walks the schema and fails on
+# a *path* / *file* column that is on neither list.
+MOVE_PATH_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("media", "file_path"),
+    ("beat_images", "file_path"),
+    ("folder_items", "file_path"),
+    ("hindsight_briefs", "file_path"),
+    ("i2v_videos", "file_path"),
+    ("i2v_videos", "source_path"),
+    ("generation_jobs", "i2v_source_path"),
+    ("indices", "file_path"),
+    ("judgment_events", "file_path"),
+    ("media_categories", "file_path"),
+    ("media_hashes", "file_path"),
+    ("media_judgments", "file_path"),
+    ("panel_videos", "file_path"),
+    ("saved_prompts", "file_path"),
+    ("scenes", "reference_path"),
+    ("storyboard_subjects", "reference_path"),
+    ("storyboard_subjects", "reference_path_2"),
+    ("t2i_images", "file_path"),
+    ("taste_scores", "file_path"),
+    ("vlm_tag_exhausted", "file_path"),
+    ("vlm_tag_queue", "file_path"),
+)
+
+# Path-like columns that must NOT move with a media row, each for a reason:
+# tombstones are history (and ``thumb_path`` is an archive file);
+# ``path_rewritten`` is a flag; ``params_path`` / ``log_path`` /
+# writer-adapter ``file_path`` name files that are not library media;
+# ``voice_ref_path`` is an audio reference with no FK to ``media``;
+# ``faiss_pending_renames`` IS the record of moves (written by the move);
+# ``media.file_size`` is a number.
+MOVE_EXCLUDED_COLUMNS: Tuple[Tuple[str, str], ...] = (
+    ("media_tombstones", "file_path"),
+    ("media_tombstones", "thumb_path"),
+    ("media_tombstones", "path_rewritten"),
+    ("taste_models", "params_path"),
+    ("training_runs", "log_path"),
+    ("writer_adapters", "file_path"),
+    ("storyboard_subjects", "voice_ref_path"),
+    ("media", "file_size"),
+    ("faiss_pending_renames", "old_path"),
+    ("faiss_pending_renames", "new_path"),
+)
+_MOVE_IN_CHUNK = 500
+
 # A lineage prune guard that keeps failing is logged at WARNING at most this
 # often (seconds); the failures in between go to DEBUG.
 PRUNE_GUARD_WARN_INTERVAL_S = 3600.0
+
+
+# A queued VLM tagging item that fails this many times is dropped
+# (``fail_tag``); the next retag or scan queues it again.
+MAX_TAG_ATTEMPTS = 3
+# The embedding worker's old tag hand-off, imported by the v8 migration.
+VLM_PENDING_FILENAME = "vlm_pending.jsonl"
+VLM_PENDING_SUBDIR = "similarity"
 
 
 class MigrationError(RuntimeError):
@@ -944,6 +1004,30 @@ class DatabaseManager:
             conn.execute("DROP INDEX IF EXISTS idx_indices_file_path")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at)"
+            )
+
+            # Durable VLM tag queue: a row stays until its tags are written.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vlm_tag_queue (
+                    file_path TEXT PRIMARY KEY,
+                    enqueued_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    FOREIGN KEY (file_path) REFERENCES media(file_path) ON DELETE CASCADE
+                )
+            """
+            )
+
+            # Images the VLM gave up on (or tagged with nothing): hygiene does
+            # not queue them again; a forced retag clears the row.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vlm_tag_exhausted (
+                    file_path TEXT PRIMARY KEY,
+                    FOREIGN KEY (file_path) REFERENCES media(file_path) ON DELETE CASCADE
+                )
+            """
             )
 
             # Similarity / embedding tracking table
@@ -2055,6 +2139,21 @@ class DatabaseManager:
                 )
                 """
             )
+            # FAISS rows to rename after a media move (move_media_batch
+            # writes them in its own transaction): the file's vector stays,
+            # only the path it is stored under changes. Applied by the
+            # embedding worker at the start of a run, or by the server while
+            # no worker is alive; a row is cleared once the renamed index is
+            # saved (or its old path is not in the index at all).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS faiss_pending_renames (
+                    old_path TEXT PRIMARY KEY,
+                    new_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_scenes_storyboard "
                 "ON scenes(storyboard_id)"
@@ -2467,7 +2566,79 @@ class DatabaseManager:
                 self._migrate_to_v6(conn)
             if user_version < 7:
                 self._migrate_to_v7(conn)
+            if user_version < 8:
+                self._migrate_to_v8(conn)
             self._tombstone_fill = _legacy_tombstone_fill(conn)
+
+    def _migrate_to_v8(self, conn: sqlite3.Connection) -> None:
+        """user_version 7 -> 8: the embedding worker's ``vlm_pending.jsonl``
+        (``<db dir>/similarity/``, where ``EmbeddingQueue`` keeps it) becomes
+        rows of ``vlm_tag_queue``. ``conn`` must have nothing uncommitted.
+
+        Lines are de-duplicated and only paths that still have a media row
+        are queued; a malformed line is skipped. One transaction, the
+        version re-read under the write lock. The file is removed after the
+        commit. A failure rolls back (still version 7) and raises
+        ``MigrationError``; the next open retries. The counts line (never a
+        path) is INFO, DEBUG when nothing was queued or dropped."""
+        pending = self.db_path / VLM_PENDING_SUBDIR / VLM_PENDING_FILENAME
+        queued = dropped = 0
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= 8:
+                conn.rollback()  # another manager migrated meanwhile
+                return
+            paths: Dict[str, None] = {}
+            try:
+                text = pending.read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                text = ""
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    paths[to_posix_path(json.loads(line)["path"])] = None
+                except (ValueError, KeyError, TypeError):
+                    dropped += 1
+            now = datetime.now(timezone.utc).isoformat()
+            for path in paths:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO vlm_tag_queue (file_path, enqueued_at) "
+                    "SELECT file_path, ? FROM media WHERE file_path = ?",
+                    (now, path),
+                )
+                if cur.rowcount:
+                    queued += 1
+                else:
+                    dropped += 1
+            conn.execute("PRAGMA user_version = 8")
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                logger.exception("Rolling back the failed v8 migration raised")
+            raise MigrationError(
+                "Metascan could not upgrade its database to version 8 (the "
+                f"durable VLM tag queue): {exc}. Nothing was changed and the "
+                "database is still at version 7. To retry, start Metascan "
+                "again; if it fails the same way, report this message."
+            ) from exc
+        try:
+            pending.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Could not remove the imported %s", VLM_PENDING_FILENAME)
+        logger.log(
+            logging.INFO if queued or dropped else logging.DEBUG,
+            "Database upgraded to version 8 (durable VLM tag queue): "
+            "%d pending tag(s) imported, %d line(s) dropped (duplicate, "
+            "malformed or no longer in the library)",
+            queued,
+            dropped,
+        )
 
     def _migrate_to_v7(self, conn: sqlite3.Connection) -> None:
         """user_version 6 -> 7: live files on a deleted file's path are
@@ -2751,6 +2922,263 @@ class DatabaseManager:
                     conn.rollback()
                     logger.error(f"Batch write failed: {e}")
                     raise
+
+    def _existing_media_paths(
+        self, conn: sqlite3.Connection, paths: Sequence[str]
+    ) -> Set[str]:
+        found: Set[str] = set()
+        uniq = list(dict.fromkeys(paths))
+        for i in range(0, len(uniq), _MOVE_IN_CHUNK):
+            chunk = uniq[i : i + _MOVE_IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            found.update(
+                r[0]
+                for r in conn.execute(
+                    f"SELECT file_path FROM media WHERE file_path IN ({marks})",
+                    chunk,
+                )
+            )
+        return found
+
+    def _lineage_paths(
+        self, conn: sqlite3.Connection, paths: Sequence[str]
+    ) -> Set[str]:
+        """Paths that already hold a T2I / I2V lineage row (both tables key
+        ``file_path`` UNIQUE with no FK, so a dangling row can sit on a path
+        that has no media row)."""
+        found: Set[str] = set()
+        uniq = list(dict.fromkeys(paths))
+        for i in range(0, len(uniq), _MOVE_IN_CHUNK):
+            chunk = uniq[i : i + _MOVE_IN_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            for table in ("t2i_images", "i2v_videos"):
+                found.update(
+                    r[0]
+                    for r in conn.execute(
+                        f"SELECT file_path FROM {table} "
+                        f"WHERE file_path IN ({marks})",
+                        chunk,
+                    )
+                )
+        return found
+
+    def move_media_batch_applied(
+        self, pairs: Sequence[Tuple[str, str]]
+    ) -> List[Tuple[str, str]]:
+        """Move media rows ``(old, new)`` (stored POSIX paths) and everything
+        attached to them, in ONE transaction; returns the pairs applied.
+
+        Skipped: a pair whose source has no row, whose target already has a
+        media row (or a T2I / I2V lineage row), a repeated source or target,
+        old == new, and a cycle (a <-> b) that cannot be ordered. A chain
+        (a -> b, b -> c) is applied in the order that works (b -> c first).
+        Foreign keys stay ON but are deferred: the parent and the children
+        are updated by hand (no ON UPDATE clause) and checked at commit, so
+        any failure rolls the whole batch back. Tombstones are history and
+        are untouched; ``judgment_events`` is re-keyed."""
+        from metascan.utils.path_utils import to_native_path
+
+        cleaned: List[Tuple[str, str]] = []
+        seen_src: Set[str] = set()
+        seen_dst: Set[str] = set()
+        for old, new in pairs:
+            if old == new or old in seen_src or new in seen_dst:
+                continue
+            seen_src.add(old)
+            seen_dst.add(new)
+            cleaned.append((old, new))
+        if not cleaned:
+            return []
+        with self.lock, self._get_connection() as conn:
+            # The write lock first, then the plan: a row that appears between
+            # the checks and the update skips its pair instead of failing the
+            # commit's foreign-key check and rolling the whole batch back.
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                occupied = self._existing_media_paths(
+                    conn, [p for pair in cleaned for p in pair]
+                )
+                lineage = self._lineage_paths(conn, [new for _, new in cleaned])
+                todo = [
+                    (o, n) for o, n in cleaned if o in occupied and n not in lineage
+                ]
+                plan: List[Tuple[str, str]] = []
+                progressed = True
+                while todo and progressed:
+                    progressed = False
+                    rest = []
+                    for o, n in todo:
+                        if n in occupied:
+                            rest.append((o, n))
+                            continue
+                        occupied.discard(o)
+                        occupied.add(n)
+                        plan.append((o, n))
+                        progressed = True
+                    todo = rest
+                if not plan:
+                    conn.rollback()
+                    return []
+                conn.execute("PRAGMA defer_foreign_keys = ON")
+                conn.executemany(
+                    "UPDATE media SET file_path = ?, data = CASE WHEN "
+                    "json_valid(data) AND json_type(data, '$.file_path') "
+                    "IS NOT NULL THEN json_set(data, '$.file_path', ?) "
+                    "ELSE data END WHERE file_path = ?",
+                    [(n, to_native_path(n), o) for o, n in plan],
+                )
+                for table, column in MOVE_PATH_COLUMNS[1:]:
+                    conn.executemany(
+                        f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                        [(n, o) for o, n in plan],
+                    )
+                self._queue_faiss_renames(conn, plan)
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Move of {len(cleaned)} media rows failed: {e}")
+                raise
+            return plan
+
+    @staticmethod
+    def _queue_faiss_renames(
+        conn: sqlite3.Connection, plan: Sequence[Tuple[str, str]]
+    ) -> None:
+        """Record ``plan`` (applied moves, in order) in
+        ``faiss_pending_renames``, inside the move's transaction. A chain
+        collapses: a pending a -> b meets b -> c and becomes a -> c (the old
+        row, a, is the one in the index), and a pending row that ends where
+        it started is dropped. A source that is already pending keeps its
+        first target (the file now there is not the one the row belongs to)."""
+        for old, new in plan:
+            pending_here = conn.execute(
+                "SELECT new_path FROM faiss_pending_renames WHERE old_path = ?",
+                (old,),
+            ).fetchone()
+            chained = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT old_path FROM faiss_pending_renames WHERE new_path = ?",
+                    (old,),
+                ).fetchall()
+            ]
+            if not chained:
+                if pending_here is not None:
+                    # ``old`` is the index row of the file that moved off it
+                    # (pending), yet the file here now moves too: which
+                    # file's vector the row holds is unknown. Neither file
+                    # may take it; both are embedded again.
+                    conn.execute(
+                        "DELETE FROM faiss_pending_renames WHERE old_path = ?",
+                        (old,),
+                    )
+                    DatabaseManager._reset_embedded(conn, [str(pending_here[0]), new])
+                else:
+                    conn.execute(
+                        "INSERT INTO faiss_pending_renames "
+                        "(old_path, new_path) VALUES (?, ?)",
+                        (old, new),
+                    )
+                continue
+            for first in chained:
+                if first == new:
+                    conn.execute(
+                        "DELETE FROM faiss_pending_renames WHERE old_path = ?",
+                        (first,),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE faiss_pending_renames SET new_path = ? "
+                        "WHERE old_path = ?",
+                        (new, first),
+                    )
+
+    @staticmethod
+    def _reset_embedded(conn: sqlite3.Connection, posix_paths: Sequence[str]) -> None:
+        """Mark files not embedded (as ``clear_embeddings`` does), so the
+        next build embeds them; they never read a row by their path."""
+        conn.executemany(
+            "UPDATE media_hashes SET has_embedding = 0, clip_model = NULL, "
+            "embedding_updated_at = NULL WHERE file_path = ?",
+            [(p,) for p in posix_paths],
+        )
+
+    def reset_embedded(self, file_paths: Sequence[str]) -> None:
+        """``_reset_embedded`` for stored POSIX paths, in one transaction."""
+        if not file_paths:
+            return
+        with self.lock, self._get_connection() as conn:
+            self._reset_embedded(conn, file_paths)
+            conn.commit()
+
+    def drop_pending_rename_from(self, file_path: str) -> bool:
+        """The embedding worker is about to write ``file_path``'s FAISS row
+        (stored POSIX path). When a rename is pending *from* it, the row no
+        longer belongs to the file that moved: drop the rename and mark that
+        file not embedded, so it is embedded again rather than given the
+        vector of the file now at this path. True when a row was dropped."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT new_path FROM faiss_pending_renames WHERE old_path = ?",
+                (file_path,),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "DELETE FROM faiss_pending_renames WHERE old_path = ?", (file_path,)
+            )
+            self._reset_embedded(conn, [str(row[0])])
+            conn.commit()
+            return True
+
+    def list_faiss_pending_renames(self) -> List[Tuple[str, str]]:
+        """Pending FAISS renames ``(old, new)`` (stored POSIX paths)."""
+        with self.lock, self._get_connection() as conn:
+            return [
+                (r[0], r[1])
+                for r in conn.execute(
+                    "SELECT old_path, new_path FROM faiss_pending_renames "
+                    "ORDER BY created_at, rowid"
+                ).fetchall()
+            ]
+
+    def clear_faiss_pending_renames(self, pairs: Sequence[Tuple[str, str]]) -> int:
+        """Drop the pending rows exactly equal to ``pairs``: a row a later
+        move re-pointed while the rename ran stays."""
+        cleared = 0
+        with self.lock, self._get_connection() as conn:
+            for old, new in pairs:
+                cur = conn.execute(
+                    "DELETE FROM faiss_pending_renames "
+                    "WHERE old_path = ? AND new_path = ?",
+                    (old, new),
+                )
+                cleared += max(cur.rowcount, 0)
+            conn.commit()
+        return cleared
+
+    def embedded_paths(self, file_paths: Sequence[str]) -> Set[str]:
+        """Of the stored POSIX ``file_paths``, those whose ``media_hashes``
+        row says the file is embedded (``has_embedding = 1``)."""
+        found: Set[str] = set()
+        paths = list(dict.fromkeys(file_paths))
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(paths), 500):
+                chunk = paths[start : start + 500]
+                marks = ",".join("?" * len(chunk))
+                found.update(
+                    r[0]
+                    for r in conn.execute(
+                        f"SELECT file_path FROM media_hashes "
+                        f"WHERE has_embedding = 1 AND file_path IN ({marks})",
+                        chunk,
+                    )
+                )
+        return found
+
+    def move_media_batch(self, pairs: Sequence[Tuple[str, str]]) -> int:
+        """``move_media_batch_applied``'s count."""
+        return len(self.move_media_batch_applied(pairs))
 
     # True upsert — preserves the row's original ``created_at`` on rescan.
     # ``INSERT OR REPLACE`` is DELETE+INSERT under the hood, which fires the
@@ -6407,6 +6835,154 @@ class DatabaseManager:
                 (key, posix_path),
             )
 
+    # ------------------------------------------------------------------
+    # Durable VLM tag queue
+    # ------------------------------------------------------------------
+
+    def enqueue_tags(self, paths: Iterable[Union[str, Path]]) -> int:
+        """Queue ``paths`` (native or POSIX) for VLM tagging. A path already
+        queued, or with no media row, is skipped. Returns how many rows were
+        added."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in paths))
+        if not posix:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        added = 0
+        with self.lock, self._get_connection() as conn:
+            for path in posix:
+                added += conn.execute(
+                    "INSERT OR IGNORE INTO vlm_tag_queue (file_path, enqueued_at) "
+                    "SELECT file_path, ? FROM media WHERE file_path = ?",
+                    (now, path),
+                ).rowcount
+            conn.commit()
+        return added
+
+    def queued_tag_paths(self, paths: Iterable[Union[str, Path]]) -> "set[str]":
+        """The POSIX forms of those of ``paths`` already in the queue."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in paths))
+        found: "set[str]" = set()
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(posix), 500):
+                part = posix[start : start + 500]
+                marks = ",".join("?" * len(part))
+                found.update(
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT file_path FROM vlm_tag_queue "
+                        f"WHERE file_path IN ({marks})",
+                        part,
+                    )
+                )
+        return found
+
+    def next_tag_batch(self, limit: int) -> List[str]:
+        """Up to ``limit`` queued POSIX paths, oldest first, skipping rows
+        that failed ``MAX_TAG_ATTEMPTS`` times."""
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT file_path FROM vlm_tag_queue WHERE attempts < ? "
+                "ORDER BY enqueued_at, rowid LIMIT ?",
+                (MAX_TAG_ATTEMPTS, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def finish_tag(self, path: Union[str, Path]) -> None:
+        """Remove ``path`` from the queue (its tags are written, or the file
+        is gone)."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM vlm_tag_queue WHERE file_path = ?", (to_posix_path(path),)
+            )
+            conn.commit()
+
+    def fail_tag(self, path: Union[str, Path], error: str) -> bool:
+        """Count a failed attempt on ``path``. Returns True when it was the
+        last allowed one and the row was removed."""
+        posix = to_posix_path(path)
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "UPDATE vlm_tag_queue SET attempts = attempts + 1, last_error = ? "
+                "WHERE file_path = ?",
+                (error[:500], posix),
+            )
+            removed = conn.execute(
+                "DELETE FROM vlm_tag_queue WHERE file_path = ? AND attempts >= ?",
+                (posix, MAX_TAG_ATTEMPTS),
+            ).rowcount
+            if removed:
+                conn.execute(
+                    "INSERT OR IGNORE INTO vlm_tag_exhausted (file_path) "
+                    "SELECT file_path FROM media WHERE file_path = ?",
+                    (posix,),
+                )
+            conn.commit()
+        return bool(removed)
+
+    def mark_tag_exhausted(self, path: Union[str, Path]) -> None:
+        """Record that tagging ``path`` produced nothing: hygiene leaves it
+        alone until a forced retag."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO vlm_tag_exhausted (file_path) "
+                "SELECT file_path FROM media WHERE file_path = ?",
+                (to_posix_path(path),),
+            )
+            conn.commit()
+
+    def clear_tag_exhausted(self, paths: Iterable[Union[str, Path]]) -> int:
+        """Forget that tagging gave up on ``paths`` (a forced retag)."""
+        posix = list(dict.fromkeys(to_posix_path(p) for p in paths))
+        cleared = 0
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(posix), 500):
+                part = posix[start : start + 500]
+                marks = ",".join("?" * len(part))
+                cleared += conn.execute(
+                    f"DELETE FROM vlm_tag_exhausted WHERE file_path IN ({marks})",
+                    part,
+                ).rowcount
+            conn.commit()
+        return cleared
+
+    def tag_queue_count(self) -> int:
+        """Rows still waiting to be tagged (failed-out rows are gone)."""
+        with self.lock, self._get_connection() as conn:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM vlm_tag_queue WHERE attempts < ?",
+                    (MAX_TAG_ATTEMPTS,),
+                ).fetchone()[0]
+            )
+
+    def images_without_vlm_tags(self, *, for_hygiene: bool = False) -> List[str]:
+        """POSIX paths of library images with no VLM-sourced tag row.
+
+        ``for_hygiene`` is the background check's list: it leaves out T2I /
+        I2V output (generated images are not retro-tagged) and the images
+        tagging gave up on (``vlm_tag_exhausted``)."""
+        from metascan.core.vlm_client import VlmClient
+
+        extra = (
+            " AND m.file_path NOT IN (SELECT file_path FROM t2i_images)"
+            " AND m.file_path NOT IN (SELECT file_path FROM i2v_videos)"
+            " AND m.file_path NOT IN (SELECT file_path FROM vlm_tag_exhausted)"
+            if for_hygiene
+            else ""
+        )
+        with self.lock, self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT m.file_path FROM media m WHERE NOT EXISTS ("
+                "SELECT 1 FROM indices i WHERE i.file_path = m.file_path "
+                "AND i.index_type = 'tag' AND i.source IN ('vlm', 'vlm+prompt'))"
+                + extra
+            ).fetchall()
+        return [
+            r[0]
+            for r in rows
+            if VlmClient.is_image_path(Path(r[0]))  # videos never enter the queue
+        ]
+
     def add_tag_indices(
         self, file_path: Path, tags: List[str], source: str = "clip"
     ) -> None:
@@ -9124,6 +9700,97 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get all phashes: {e}")
             return {}
+
+    def all_media_paths(self) -> List[str]:
+        """Every media row's stored (POSIX) path, without reading the data
+        blob: the import watcher's seed."""
+        with self._get_connection() as conn:
+            return [r[0] for r in conn.execute("SELECT file_path FROM media")]
+
+    def media_paths_present(self, paths: Sequence[str]) -> Set[str]:
+        """Which of ``paths`` (stored spelling) have a media row."""
+        with self._get_connection() as conn:
+            return self._existing_media_paths(conn, list(paths))
+
+    def candidate_for(self, path: str) -> Optional[Candidate]:
+        """The row at ``path`` (stored POSIX spelling) as a move candidate:
+        ``file_size`` and ``modified_at`` (either historical shape, read by
+        ``parse_mtime``; the materialised columns, else the JSON blob) and the
+        phash from ``media_hashes``. None when there is no row."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(m.file_size, json_extract(m.data, '$.file_size')),"
+                " COALESCE(m.modified_at, json_extract(m.data, '$.modified_at')),"
+                " h.phash FROM media m LEFT JOIN media_hashes h"
+                " ON h.file_path = m.file_path WHERE m.file_path = ?",
+                (path,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return Candidate(path, int(row[0]), parse_mtime(row[1]), row[2] or None)
+
+    def media_stat_page(
+        self, after: str, limit: int
+    ) -> List[Tuple[str, Optional[int], Optional[float]]]:
+        """Up to ``limit`` rows after the stored path ``after``, in path
+        order: ``(path, file_size, modified_at as epoch seconds)`` (the
+        materialised columns, else the JSON blob; either historical shape).
+        Each call is its own short read, so a caller pages off the lock."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT m.file_path,"
+                " COALESCE(m.file_size, json_extract(m.data, '$.file_size')),"
+                " COALESCE(m.modified_at, json_extract(m.data, '$.modified_at'))"
+                " FROM media m WHERE m.file_path > ? ORDER BY m.file_path LIMIT ?",
+                (after, limit),
+            ).fetchall()
+        return [
+            (r[0], None if r[1] is None else int(r[1]), parse_mtime(r[2])) for r in rows
+        ]
+
+    def mark_unembedded(self, paths: Iterable[str]) -> int:
+        """``has_embedding = 0`` for ``paths`` (stored spelling): the next
+        incremental build embeds them again. Ratings are not touched."""
+        posix = [to_posix_path(p) for p in paths]
+        n = 0
+        with self.lock, self._get_connection() as conn:
+            for start in range(0, len(posix), 500):
+                part = posix[start : start + 500]
+                marks = ",".join("?" * len(part))
+                n += conn.execute(
+                    "UPDATE media_hashes SET has_embedding = 0 "
+                    f"WHERE has_embedding != 0 AND file_path IN ({marks})",
+                    part,
+                ).rowcount
+            conn.commit()
+        return n
+
+    def set_phash(self, path: str, phash: str) -> None:
+        """Store a phash without touching the embedding mark (a row that has
+        none is created unembedded)."""
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO media_hashes (file_path, phash, has_embedding) "
+                "SELECT file_path, ?, 0 FROM media WHERE file_path = ? "
+                "ON CONFLICT(file_path) DO UPDATE SET phash = excluded.phash",
+                (phash, to_posix_path(path)),
+            )
+            conn.commit()
+
+    def media_missing_derived(self, after: str, limit: int) -> List[str]:
+        """Up to ``limit`` stored paths after ``after`` whose ``media_hashes``
+        row has no phash (or is missing)."""
+        with self._get_connection() as conn:
+            return [
+                r[0]
+                for r in conn.execute(
+                    "SELECT m.file_path FROM media m LEFT JOIN media_hashes h"
+                    " ON h.file_path = m.file_path"
+                    " WHERE m.file_path > ? AND (h.phash IS NULL OR h.phash = '')"
+                    " ORDER BY m.file_path LIMIT ?",
+                    (after, limit),
+                )
+            ]
 
     def get_unembedded_file_paths(self) -> List[str]:
         """Get file paths that exist in media but don't have CLIP embeddings."""

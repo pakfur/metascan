@@ -1,13 +1,19 @@
 """FastAPI dependency injection for shared resources."""
 
+import contextlib
 from threading import Lock
-from typing import Optional
+from typing import TYPE_CHECKING, Any, ContextManager, Dict, Optional
 
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.utils.app_paths import get_data_dir, get_thumbnail_cache_dir
 
 from backend.config import load_app_config
+from backend.services.background.registry import INTERACTIVE_GRACE_S, ProcessRegistry
+
+if TYPE_CHECKING:
+    from backend.services.background.embedding import EmbeddingProcess
+    from backend.services.background.tagging import TaggingProcess
 
 # `functools.lru_cache` has a race: it releases the cache lock before
 # calling the wrapped function, so two concurrent misses with the same
@@ -54,3 +60,128 @@ def get_thumbnail_cache() -> ThumbnailCache:
                 get_thumbnail_cache_dir(), thumbnail_size=size
             )
     return _thumbnail_cache_singleton
+
+
+_registry_singleton: Optional[ProcessRegistry] = None
+
+
+def set_registry(registry: Optional[ProcessRegistry]) -> None:
+    """Install the background-process registry (FastAPI lifespan)."""
+    global _registry_singleton
+    _registry_singleton = registry
+
+
+def get_registry() -> ProcessRegistry:
+    if _registry_singleton is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail="registry not initialized")
+    return _registry_singleton
+
+
+def installed_registry() -> Optional[ProcessRegistry]:
+    """The registry, or None where none is installed (route tests)."""
+    return _registry_singleton
+
+
+_import_singleton: Optional[Any] = None
+
+
+def set_import_process(process: Optional[Any]) -> None:
+    """Install the Import process (FastAPI lifespan)."""
+    global _import_singleton
+    _import_singleton = process
+
+
+def get_import_process() -> Optional[Any]:
+    return _import_singleton
+
+
+def interactive_vlm_hold(by: str) -> ContextManager[None]:
+    """Hold Tagging for one interactive VLM request plus its grace (spec 7).
+
+    A no-op when no registry is installed (tests, a half-started server)."""
+    registry = _registry_singleton
+    if registry is None:
+        return contextlib.nullcontext()
+    return registry.hold_for(["tagging"], by=by, grace_s=INTERACTIVE_GRACE_S)
+
+
+_tagging_singleton: Optional["TaggingProcess"] = None
+
+
+def set_tagging_process(process: Optional["TaggingProcess"]) -> None:
+    """Install the Tagging process (FastAPI lifespan)."""
+    global _tagging_singleton
+    _tagging_singleton = process
+
+
+def get_tagging_process() -> Optional["TaggingProcess"]:
+    return _tagging_singleton
+
+
+_embedding_singleton: Optional["EmbeddingProcess"] = None
+
+
+def set_embedding_process(process: Optional["EmbeddingProcess"]) -> None:
+    """Install the Embedding process (FastAPI lifespan)."""
+    global _embedding_singleton
+    _embedding_singleton = process
+
+
+def get_embedding_process() -> Optional["EmbeddingProcess"]:
+    return _embedding_singleton
+
+
+_generation_singletons: Dict[str, Any] = {}
+
+
+def set_generation_process(process_id: str, process: Optional[Any]) -> None:
+    """Install (or, with None, remove) the T2I or I2V process (FastAPI lifespan)."""
+    if process is None:
+        _generation_singletons.pop(process_id, None)
+    else:
+        _generation_singletons[process_id] = process
+
+
+def get_generation_process(process_id: str) -> Optional[Any]:
+    return _generation_singletons.get(process_id)
+
+
+_upscale_singleton: Optional[Any] = None
+
+
+def set_upscale_process(process: Optional[Any]) -> None:
+    """Install the Upscaling process (FastAPI lifespan)."""
+    global _upscale_singleton
+    _upscale_singleton = process
+
+
+def get_upscale_process() -> Optional[Any]:
+    return _upscale_singleton
+
+
+_taste_singleton: Optional[Any] = None
+
+
+def set_taste_process(process: Optional[Any]) -> None:
+    """Install the Taste process (FastAPI lifespan)."""
+    global _taste_singleton
+    _taste_singleton = process
+
+
+def get_taste_process() -> Optional[Any]:
+    return _taste_singleton
+
+
+_training_singleton: Optional[Any] = None
+
+
+def set_training_process(process: Optional[Any]) -> None:
+    """Install the Writer training process (FastAPI lifespan)."""
+    global _training_singleton
+    _training_singleton = process
+
+
+def get_training_process() -> Optional[Any]:
+    return _training_singleton

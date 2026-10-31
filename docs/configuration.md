@@ -47,7 +47,7 @@ Configuration is stored in `config.json` in the application directory.
 ## Top-Level Options
 
 - **`directories`** — list of scan directories with subfolder toggle
-- **`watch_directories`** — enable real-time directory monitoring
+- **`watch_directories`** — enable always-on import of new and moved files in the scan directories (default on)
 - **`thumbnail_size`** — thumbnail dimensions `[width, height]` in pixels
 - **`cache_size_mb`** — maximum thumbnail cache size in megabytes
 - **`sort_order`** — default sorting (`"date_added"`, `"file_name"`, `"date_modified"`)

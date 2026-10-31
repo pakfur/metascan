@@ -111,6 +111,9 @@ class TasteService:
         self._rescoring = False
         self._rescore_pending = False
         self._closed = False
+        # Set by the Taste background process (owner pause or stop): the
+        # retrain loop starts nothing. An owner's POST /train still works.
+        self.auto_paused = False
 
     # ------------------------------------------------------------------
     # helpers
@@ -175,6 +178,29 @@ class TasteService:
         return bool(self.runner.training) or (
             self._train_task is not None and not self._train_task.done()
         )
+
+    @property
+    def is_rescoring(self) -> bool:
+        return self._rescoring
+
+    @property
+    def last_error(self) -> Optional[str]:
+        return self._last_error
+
+    def reembed_progress(self) -> Optional[Dict[str, Any]]:
+        """The tombstone re-embedder's ``{running, done, total}`` or None."""
+        return self._reembed()
+
+    async def cancel_training(self) -> bool:
+        """Cancel a running train (the runner kills its worker on cancel).
+        True when one was running. A rescore is left to finish."""
+        task = self._train_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._emit("training_failed", {"error": "cancelled"})
+        return True
 
     def mark_due(self, reason: str) -> None:
         """Make the next auto-retrain check treat the model as due, without
@@ -411,7 +437,9 @@ class TasteService:
 
     async def maybe_retrain(self, now: Optional[datetime] = None) -> bool:
         """One auto-retrain check; True when a training run was started."""
-        if self.is_training or self._closed or not await self._auto_retrain():
+        if self.auto_paused or self.is_training or self._closed:
+            return False
+        if not await self._auto_retrain():
             return False
         # The index is being written (every 100 files on a rebuild): its
         # fingerprint keeps changing and it holds a fraction of the vectors.

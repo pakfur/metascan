@@ -44,15 +44,15 @@ Metascan now features a modern Vue.js web frontend with a FastAPI backend server
 - **Virtual-scrolling thumbnail grid** for smooth browsing of large collections (12,000+ items)
 - **Full-screen media viewer** with image zoom/pan, video player (speed control, frame stepping, volume)
 - **Slideshow** with ordered/random modes, fade transitions, configurable timing
-- **Multi-phase scan dialog** with real-time WebSocket progress (file-by-file updates)
+- **Multi-phase Full clean & rescan dialog** (Config → Maintenance) with real-time WebSocket progress (file-by-file updates)
 - **CLIP-powered content search** (text-to-image) and FAISS similarity search with threshold slider
 - **Duplicate finder** with pHash grouping, thumbnail previews, and batch deletion
 - **Upscale queue** with Real-ESRGAN options, GFPGAN face enhancement, RIFE frame interpolation, pause/resume
 - **Similarity settings** dialog with CLIP model/device selection, embedding index build with live progress
 - **Configuration dialog** for directory management
-- **File watcher** integration with auto-refresh via WebSocket
+- **Always-on import**: files added to the scan folders appear in the grid on their own
 - **Right-click context menu** on thumbnails (Open, Find Similar, Upscale, Delete)
-- **Keyboard shortcuts** for fast navigation (Esc, F5, Ctrl+S, Ctrl+D, arrows, Space, etc.)
+- **Keyboard shortcuts** for fast navigation (Esc, F5, Ctrl+D, arrows, Space, etc.)
 - **Dark/light mode** via system `prefers-color-scheme`
 - **API key authentication** for secure remote access
 
@@ -128,7 +128,7 @@ The library organizes itself two ways. Static folders are manually curated colle
 
 3. **Add directories:** Click **Config** in the toolbar to add folders containing your AI-generated media.
 
-4. **Scan media:** Click **Scan** to index files and extract metadata.
+4. **Import is automatic:** files in those folders are imported and indexed on their own; watch it in the activity grid.
 
 5. **Browse and filter:** Use the left panel filters, double-click thumbnails to view full-size, right-click for context menu actions.
 
@@ -157,6 +157,7 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[Configuration](docs/configuration.md)** — `config.json` reference, including the `similarity`, `ui`, `models`, `comfy`, `i2v`, and `t2i` sections
 - **[Image-to-Video Workflow Setup](docs/i2v-workflow-setup.md)** — step-by-step ComfyUI build and registration for the MiniMax H3 turbo and high-quality presets
 - **[Image-to-Video cadence templates](docs/i2v-templates.md)** — the JSON découpage-template format that fixes an i2v clip's shot structure
+- **[Background activity](docs/background-activity.md)** — the activity pill and grid: what runs in the background, held vs paused vs stopped, and what pause and stop do for each process
 - **[Text to Image](docs/t2i.md)** — the Text to Image dialog: caption sources, character and wildcard files, prompt styles per model, server-side batches, and workflow requirements
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
 - **[Architecture](docs/architecture.md)** — client–server layout, database schema, backend/frontend layouts, key design decisions

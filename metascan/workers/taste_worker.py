@@ -25,6 +25,10 @@ only the vector stored with it, for the index's CLIP model. It never takes
 the index's vector for its old path: that path may hold another file now.
 Only a row explicitly marked live (``tombstone: false``) is looked up by
 path; when unsure, the row has no vector.
+
+A live file moved but not yet renamed in the index (``faiss_pending_renames``)
+has no row at its new path and counts as having no vector (``n_no_vector``)
+until the rename is applied; accepted.
 """
 
 import base64

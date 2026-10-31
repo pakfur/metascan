@@ -21,7 +21,7 @@ from typing import Any, Dict, Final, List, Literal, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.dependencies import get_db
+from backend.dependencies import get_db, interactive_vlm_hold
 
 from backend.api import vlm as vlm_api
 from backend.services.gpu_lock import GPU_FREE
@@ -173,13 +173,15 @@ async def _run_generation(
     """
     start = time.monotonic()
     try:
-        text = await client.generate_text(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            image_path=image_path,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        # Tagging yields for the request plus a grace (spec 7).
+        with interactive_vlm_hold("Prompt playground"):
+            text = await client.generate_text(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_path=image_path,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
     except VlmError as e:
         raise HTTPException(status_code=502, detail=str(e))
     elapsed = int((time.monotonic() - start) * 1000)

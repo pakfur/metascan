@@ -81,7 +81,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | GET | `/api/i2v/output-preview` | Resolve where a clip would be saved for a root + prefix (config tab live preview) |
 | GET | `/api/i2v/config` | Get the `i2v` config section (fast/quality presets, durations, megapixel ladder) |
 | GET | `/api/config/browse` | List one level of the server's directories (directory picker; directories only) |
-| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `watcher`, `models`, `folders`, `comfy`, `storyboard`, `i2v` |
+| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `models`, `folders`, `comfy`, `storyboard`, `i2v` |
 
 ## Similarity Search Endpoints
 
@@ -153,7 +153,7 @@ last folder included):
   server's working directory) and in the server's native form; a root is
   listed once however the configuration spells it.
 - With nothing to report they are `[]`, `[]`, `0` and `false`: after every
-  ordinary scan while no full clean is unfinished, and after a scan cancelled
+  scan without `full_clean` (the UI starts none) while no full clean is unfinished, and after a scan cancelled
   during the import, whose findings are partial.
 
 Any of them keeps the full clean unfinished: no deleted file is recorded and

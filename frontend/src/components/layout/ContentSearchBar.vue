@@ -3,9 +3,9 @@ import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useModelsStore } from '../../stores/models'
 import { useTrainingStore } from '../../stores/training'
+import ActivityPill from '../background/ActivityPill.vue'
 
 const emit = defineEmits<{
-  scan: []
   refresh: []
   'upscale-queue': []
   'find-duplicates': []
@@ -33,6 +33,7 @@ function openStoryboards() {
 
 <template>
   <div class="content-search-bar">
+    <ActivityPill />
     <button
       v-if="training.chipText"
       class="training-chip"
@@ -43,15 +44,6 @@ function openStoryboards() {
       {{ training.chipText }}
     </button>
     <div class="action-group">
-      <Button
-        v-tooltip.bottom="'Import'"
-        icon="pi pi-file-import" 
-        severity="secondary"
-        text
-        rounded
-        aria-label="Import"
-        @click="emit('scan')"
-      />
       <Button
         v-tooltip.bottom="'Refresh (F5)'"
         icon="pi pi-refresh"
@@ -144,10 +136,6 @@ function openStoryboards() {
   cursor: pointer;
 }
 .training-chip:hover { filter: brightness(1.15); }
-
-.scan-btn {
-  flex-shrink: 0;
-}
 
 .action-group {
   display: flex;

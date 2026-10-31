@@ -12,8 +12,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.config import load_app_config, save_app_config
-from backend.dependencies import get_db
-from backend.services.scan_dispatch import preferred_vlm_model_id, should_tag_with_vlm
+from backend.dependencies import get_db, get_embedding_process, get_tagging_process
+from backend.services.scan_dispatch import should_tag_with_vlm
 from backend.ws.manager import ws_manager
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.embedding_manager import FaissIndexManager
@@ -22,7 +22,8 @@ from metascan.core.gpu_guard import gpu_reserved
 from metascan.core.hardware import detect_hardware
 from metascan.core.inference_client import InferenceClient, InferenceError
 from metascan.utils.app_paths import get_data_dir
-from metascan.utils.path_utils import to_native_path
+from metascan.core.faiss_renames import apply_pending_renames
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,8 @@ _embedding_queue: Optional[EmbeddingQueue] = None
 _embed_poll_task: Optional[asyncio.Task] = None
 _inference_client: Optional[InferenceClient] = None
 _EMBED_POLL_INTERVAL_SECONDS = 0.5
+# The last progress payload the worker reported (the Embedding process reads it).
+_last_embedding_progress: Dict[str, Any] = {}
 
 # Called (from the embedding poller's worker thread) after every completed
 # embedding run; the lifespan installs the taste scorer's rescore here.
@@ -51,18 +54,10 @@ _vlm_scan_stops: Optional[Tuple[Any, int]] = None
 # callbacks fire on a worker thread (the poller uses asyncio.to_thread), so
 # coroutines they need must be handed to this loop thread-safely.
 _server_loop: Optional[asyncio.AbstractEventLoop] = None
-# Touched only on the loop thread (inside _drain), so no lock is needed.
-_vlm_drain_running: bool = False
-# A request that arrived mid-drain: drain_once snapshots the pending file at
-# its start, so lines appended meanwhile need one more pass.
-_vlm_drain_rerun: bool = False
-# The in-flight scheduled drain, cancelled on shutdown.
-_vlm_drain_future: Optional["concurrent.futures.Future[None]"] = None
 # True while ComfyUI generation work is in flight (installed from the
 # lifespan: auto_index.generation_busy). The post-embedding VLM drain waits
 # for it to settle -- no VLM tagging competes with a render for the GPU.
 _generation_busy: Optional[Callable[[], bool]] = None
-_VLM_DRAIN_DEFER_POLL_S = 5.0
 
 
 def _capture_vlm_scan_stops() -> Optional[Tuple[Any, int]]:
@@ -74,25 +69,6 @@ def _capture_vlm_scan_stops() -> Optional[Tuple[Any, int]]:
     if client is None or not isinstance(stops, int):
         return None
     return (client, stops)
-
-
-def _vlm_stops_since_scan(client: Any) -> Optional[int]:
-    """The ``_explicit_stops`` value the drain must still see to (re)start
-    ``client``, or None (no snapshot, or the role rebuilt the client since,
-    so the scan never saw it unloaded)."""
-    snap = _vlm_scan_stops
-    if snap is None or snap[0] is not client:
-        return None
-    return snap[1]
-
-
-def cancel_vlm_drain() -> None:
-    """Shutdown hook: cancel an in-flight post-embedding drain."""
-    global _vlm_drain_future
-    fut = _vlm_drain_future
-    _vlm_drain_future = None
-    if fut is not None and not fut.done():
-        fut.cancel()
 
 
 def set_server_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
@@ -124,20 +100,6 @@ def generation_in_flight() -> bool:
     """Public form of the generation-busy probe (other background VLM jobs
     wait on the same signal)."""
     return _generation_in_flight()
-
-
-async def _wait_for_generation_to_settle() -> bool:
-    """Wait (on the loop) while generation work is in flight. True when it
-    had to wait."""
-    if not _generation_in_flight():
-        return False
-    logger.info(
-        "VLM drain after scan deferred: ComfyUI generation in flight; "
-        "it runs when the generation settles"
-    )
-    while _generation_in_flight():
-        await asyncio.sleep(_VLM_DRAIN_DEFER_POLL_S)
-    return True
 
 
 def set_embedding_complete_hook(hook: Optional[Callable[[], None]]) -> None:
@@ -197,6 +159,7 @@ def _get_faiss_manager() -> FaissIndexManager:
         fm = FaissIndexManager(_get_embedding_queue().index_dir)
         fm.load()  # No-op if no on-disk index exists
         _faiss_manager = fm
+        refresh_pending_map()
         if fm.is_loaded:
             _start_tombstone_backfill(fm)
     return _faiss_manager
@@ -223,6 +186,81 @@ def _start_tombstone_backfill(fm: FaissIndexManager) -> None:
     ).start()
 
 
+# ----- Pending FAISS renames (a moved file keeps its vector) -----
+
+# Held while the server renames rows on disk and around a build's start, so
+# a build can never start while the server step is saving.
+_rename_lock = threading.Lock()
+_pending_map: Dict[str, str] = {}
+
+
+def refresh_pending_map() -> None:
+    """Re-read ``faiss_pending_renames`` into the in-memory map. Blocking
+    (one small query). An entry the table no longer has stays while the
+    in-memory index still holds its old path (a worker or the server step
+    renamed the disk first): it goes once the index is reloaded, so a
+    search never returns a path that no longer exists."""
+    global _pending_map
+    try:
+        fresh = dict(get_db().list_faiss_pending_renames())
+    except Exception:
+        logger.warning("Could not read the pending FAISS renames", exc_info=True)
+        return
+    fm = _faiss_manager
+    if fm is not None:
+        for old, new in _pending_map.items():
+            if (
+                old not in fresh
+                and fm.has_file(to_native_path(old))
+                and not fm.has_file(to_native_path(new))
+            ):
+                fresh[old] = new
+    _pending_map = fresh
+
+
+def map_pending(path: str) -> str:
+    """The path a search result should show: a moved file's row is still
+    stored under its old path until the rename is applied."""
+    new = _pending_map.get(to_posix_path(path))
+    return to_native_path(new) if new is not None else path
+
+
+def apply_pending_faiss_renames() -> int:
+    """Rename the on-disk index's rows for moved files, then reload the
+    in-memory index. Blocking. Does nothing while the embedding worker
+    process is alive (it is the index's writer and applies the renames
+    itself at its start). Returns the rows renamed."""
+    eq = _get_embedding_queue()
+    with _rename_lock:
+        if eq.is_indexing():
+            return 0
+        fm = FaissIndexManager(eq.index_dir)
+        fm.load()
+        result = apply_pending_renames(get_db(), fm)
+    if result.renamed:
+        # Memory still holds the old paths: the map stays until the reload
+        # swaps the renamed index in (``_rebuild_faiss_manager`` refreshes).
+        _reload_faiss_after_index_build()
+    else:
+        refresh_pending_map()
+    return result.renamed
+
+
+async def after_media_move() -> None:
+    """Contract: whoever calls ``move_media_batch*`` awaits this afterwards
+    (Task 16). Searches show the new paths at once; the rows are renamed now
+    if no worker is running. If one is, the worker applies them at its
+    start, or the next idle call does. An idle server applies renames only
+    through this hook."""
+    await asyncio.to_thread(refresh_pending_map)
+    await asyncio.to_thread(apply_pending_faiss_renames)
+
+
+def _start_indexing_locked(eq: EmbeddingQueue, *args: Any) -> bool:
+    with _rename_lock:
+        return eq.start_indexing(*args)
+
+
 def embedding_index_dir() -> Path:
     """Directory holding the FAISS index the embedding worker writes."""
     return _get_embedding_queue().index_dir
@@ -246,25 +284,36 @@ def _get_embedding_queue() -> EmbeddingQueue:
     return _embedding_queue
 
 
+def embedding_progress() -> Dict[str, Any]:
+    """The last progress the embedding worker reported (empty before any)."""
+    return dict(_last_embedding_progress)
+
+
+def _poke_embedding_process() -> None:
+    process = get_embedding_process()
+    if process is not None:
+        process.poke()
+
+
 def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
     def on_progress(current: int, total: int, label: str) -> None:
         # The label is human-formatted; raw structured fields live in
         # eq._last_progress (exposed via get_last_progress()).
         raw = eq.get_last_progress()
-        ws_manager.broadcast_sync(
-            "embedding",
-            "progress",
-            {
-                "current": current,
-                "total": total,
-                "label": label,
-                "status": raw.get("status", ""),
-                "current_file": raw.get("current_file", ""),
-                "errors_count": raw.get("errors_count", 0),
-                "vocab_current": raw.get("vocab_current", 0),
-                "vocab_total": raw.get("vocab_total", 0),
-            },
-        )
+        payload = {
+            "current": current,
+            "total": total,
+            "label": label,
+            "status": raw.get("status", ""),
+            "current_file": raw.get("current_file", ""),
+            "errors_count": raw.get("errors_count", 0),
+            "vocab_current": raw.get("vocab_current", 0),
+            "vocab_total": raw.get("vocab_total", 0),
+        }
+        _last_embedding_progress.clear()
+        _last_embedding_progress.update(payload)
+        ws_manager.broadcast_sync("embedding", "progress", payload)
+        _poke_embedding_process()
 
     def on_complete(total: int) -> None:
         # Reload the FAISS index so search endpoints see the new vectors.
@@ -273,6 +322,7 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
         except Exception as e:
             logger.exception(f"Failed to reload FAISS after index build: {e}")
         ws_manager.broadcast_sync("embedding", "complete", {"total": total})
+        _poke_embedding_process()
         hook = _on_embedding_complete
         if hook is not None:
             try:
@@ -283,7 +333,15 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
             _schedule_vlm_drain_after_complete(eq)
 
     def on_error(msg: str) -> None:
+        # A run that failed may still have renamed rows on disk at its start.
+        try:
+            _reload_faiss_after_index_build()
+        except Exception:
+            logger.exception("Failed to reload FAISS after a failed index build")
         ws_manager.broadcast_sync("embedding", "error", {"message": msg})
+        process = get_embedding_process()
+        if process is not None:
+            process.record_error(msg)
 
     eq.on_progress = on_progress
     eq.on_complete = on_complete
@@ -322,6 +380,7 @@ def _rebuild_faiss_manager(seq: int) -> None:
             return  # a newer reload already installed its manager
         _faiss_installed_seq = seq
         _faiss_manager = fm
+    refresh_pending_map()  # the worker may have cleared the renames it applied
     if fm.is_loaded:
         _start_tombstone_backfill(fm)
 
@@ -364,108 +423,34 @@ def _log_faiss_reload_failure(fut: "concurrent.futures.Future[None]") -> None:
         logger.error("Failed to reload FAISS after index build", exc_info=exc)
 
 
-def _schedule_vlm_drain_after_complete(eq: EmbeddingQueue) -> None:
-    """Run VlmTagPump.drain_once() on the server loop after an embedding build.
+def _schedule_vlm_drain_after_complete(
+    eq: Optional[EmbeddingQueue] = None,
+    *,
+    fresh: bool = False,
+    by_owner: bool = False,
+) -> None:
+    """Ask the Tagging process to drain the tag queue.
 
-    Called from the ``on_complete`` sync callback, which runs on a worker
-    thread (the poller uses ``asyncio.to_thread``), so ``get_running_loop``
-    would always raise here.  The coroutine is handed to the loop captured at
-    startup via ``run_coroutine_threadsafe``.  With no usable loop we warn and
-    leave ``vlm_pending.jsonl`` untouched for the next drain.  Drains never
-    overlap: a request arriving mid-drain sets a rerun flag and the running
-    drain makes one more pass (coalesced), so lines appended meanwhile are
-    not stranded.
+    Called from the ``on_complete`` sync callback (a worker thread) and from
+    the retag route; ``TaggingProcess.kick`` is thread-safe, skips a held,
+    paused or stopped process (the rows stay queued; a release resumes
+    them) and coalesces overlapping requests. ``fresh`` (the retag route:
+    the owner just asked) ignores the scan's unload snapshot; ``by_owner``
+    also clears a Stop (an automatic kick never does).  ``eq`` is
+    unused (the queue is a table now).
     """
-
-    async def _drain() -> None:
-        global _vlm_drain_running, _vlm_drain_rerun
-        if _vlm_drain_running:
-            _vlm_drain_rerun = True
-            logger.info("VLM drain after scan: one already running, will rerun after")
-            return
-        _vlm_drain_running = True
-        try:
-            # Never tag while ComfyUI renders: wait for the generation to
-            # settle (requests arriving meanwhile coalesce into the rerun).
-            deferred = await _wait_for_generation_to_settle()
-            from backend.api.vlm import get_vlm_client
-            from backend.services.vlm_tag_pump import VlmTagPump
-
-            from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
-            from metascan.core.vlm_select import vlm_model_installed
-
-            client = get_vlm_client()  # the general role's client
-            if client is None:
-                logger.debug("VLM drain skipped: no VlmClient installed")
-                return
-            # The general role's model when it is installed, else the
-            # installed hardware pick (tagging never waits on a download).
-            mid = getattr(client, "model_id", None) or getattr(
-                client, "preferred_model_id", None
-            )
-            if not mid or not await asyncio.to_thread(vlm_model_installed, mid):
-                mid = preferred_vlm_model_id(detect_hardware())
-            if not mid:
-                logger.debug("VLM drain skipped: no preferred VLM model for this host")
-                return
-            spec = VLM_REGISTRY.get(mid)
-            # A drain that waited for a render: the render's own VLM unload
-            # (an explicit stop) is behind it, so snapshot again now that
-            # the GPU is free; otherwise an unload since the scan began wins.
-            since = (
-                getattr(client, "_explicit_stops", None)
-                if deferred
-                else _vlm_stops_since_scan(client)
-            )
-            if not isinstance(since, int):
-                since = None
-            pump = VlmTagPump(
-                queue_dir=eq.index_dir,
-                client=client,
-                db=get_db(),
-                model_id=mid,
-                concurrency=spec.parallel_slots if spec is not None else 2,
-                # An explicit unload (ComfyUI render, /unload) since the
-                # scan started wins: the drain must not bring the VLM back.
-                unless_stopped_since=since,
-            )
-            while True:
-                _vlm_drain_rerun = False
-                if await _wait_for_generation_to_settle():
-                    stops = getattr(client, "_explicit_stops", None)
-                    pump._unless_stopped_since = (
-                        stops if isinstance(stops, int) else None
-                    )
-                drained = await pump.drain_once()
-                logger.info(f"VLM drain after scan: tagged {drained} file(s)")
-                if not _vlm_drain_rerun:
-                    break
-        except Exception:
-            logger.exception("VLM drain after scan failed")
-        finally:
-            _vlm_drain_running = False
-            _vlm_drain_rerun = False
-
-    global _vlm_drain_future
-    loop = _server_loop
-    if loop is None or loop.is_closed():
+    process = get_tagging_process()
+    if process is None:
         logger.warning(
-            "VLM drain after scan not scheduled: server event loop unavailable; "
+            "VLM drain after scan not scheduled: tagging process unavailable; "
             "pending tags stay queued for the next drain"
         )
         return
-    coro = _drain()
-    try:
-        fut = asyncio.run_coroutine_threadsafe(coro, loop)
-        # A coalesced request returns at once; keep tracking the real drain.
-        if _vlm_drain_future is None or _vlm_drain_future.done():
-            _vlm_drain_future = fut
-    except RuntimeError:
-        coro.close()
-        logger.warning(
-            "VLM drain after scan not scheduled: server event loop closed; "
-            "pending tags stay queued for the next drain"
-        )
+    process.kick(
+        fresh=fresh,
+        scan_stops=None if fresh else _vlm_scan_stops,
+        by_owner=by_owner,
+    )
 
 
 async def _embed_poll_loop() -> None:
@@ -495,7 +480,6 @@ def init_embedding_queue() -> None:
 async def shutdown_embedding_queue() -> None:
     """Shutdown hook: cancel poller and any running worker."""
     global _embed_poll_task
-    cancel_vlm_drain()
     if _embed_poll_task is not None:
         _embed_poll_task.cancel()
         try:
@@ -600,7 +584,7 @@ async def search_similar(
     raw = await asyncio.to_thread(fm.search, vec, k)
 
     return [
-        {"file_path": to_native_path(p), "similarity_score": float(s)}
+        {"file_path": to_native_path(map_pending(p)), "similarity_score": float(s)}
         for p, s in raw
         if float(s) >= body.threshold
     ]
@@ -632,7 +616,7 @@ async def content_search(
     raw = await asyncio.to_thread(fm.search, vec, k)
 
     return [
-        {"file_path": to_native_path(p), "similarity_score": float(s)}
+        {"file_path": to_native_path(map_pending(p)), "similarity_score": float(s)}
         for p, s in raw
         if float(s) >= body.threshold
     ]
@@ -700,9 +684,12 @@ async def _reload_inference_client(model_key: str, device: str) -> None:
 
 
 @router.post("/index/build", dependencies=GPU_FREE)
-async def build_index(rebuild: bool = False) -> Dict[str, Any]:
-    """Start an embedding worker subprocess for unembedded (or all) files."""
-    return await _start_index_build(rebuild=rebuild, allow_vlm_tagging=True)
+async def build_index(rebuild: bool = False, by_owner: bool = True) -> Dict[str, Any]:
+    """Start an embedding worker subprocess for unembedded (or all) files.
+    ``by_owner=False`` (the post-scan follow-up) never clears a Stop or pause."""
+    return await _start_index_build(
+        rebuild=rebuild, allow_vlm_tagging=True, owner=by_owner
+    )
 
 
 async def start_auto_index_build() -> Dict[str, Any]:
@@ -710,7 +697,7 @@ async def start_auto_index_build() -> Dict[str, Any]:
     see ``backend/services/auto_index.py``). It never queues VLM tagging:
     that would load the VLM on the GPU behind the owner's back between
     generation batches; the new files get CLIP tags instead."""
-    return await _start_index_build(rebuild=False, allow_vlm_tagging=False)
+    return await _start_index_build(rebuild=False, allow_vlm_tagging=False, owner=False)
 
 
 def is_indexing() -> bool:
@@ -718,8 +705,20 @@ def is_indexing() -> bool:
     return _get_embedding_queue().is_indexing()
 
 
-async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str, Any]:
+async def _start_index_build(
+    rebuild: bool, allow_vlm_tagging: bool, owner: bool = True
+) -> Dict[str, Any]:
+    """Every build goes through the Embedding process, which refuses (or
+    queues) one while Embedding is stopped, paused or held."""
+    process = get_embedding_process()
+    if process is None:
+        return await launch_index_build(rebuild, allow_vlm_tagging)
+    return await process.request_build(rebuild, allow_vlm_tagging, owner=owner)
+
+
+async def launch_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str, Any]:
     global _current_scan_tag_with_vlm, _vlm_scan_stops
+    _last_embedding_progress.clear()
 
     if gpu_reserved():
         # Writer training holds the GPU (every entry point: the route, the
@@ -751,7 +750,8 @@ async def _start_index_build(rebuild: bool, allow_vlm_tagging: bool) -> Dict[str
     _vlm_scan_stops = _capture_vlm_scan_stops() if tag_with_vlm else None
 
     started = await asyncio.to_thread(
-        eq.start_indexing,
+        _start_indexing_locked,
+        eq,
         paths,
         sim.get("clip_model", "small"),
         sim.get("device", "auto"),

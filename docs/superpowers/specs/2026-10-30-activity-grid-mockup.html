@@ -1,0 +1,96 @@
+<h2>Activity grid: one panel per process</h2>
+<p class="subtitle">The widget at the top left opens this 3 × 3 grid. All numbers are sample data, and the process list is my guess.</p>
+
+<style>
+  .g-bar { display:flex; align-items:center; gap:10px; background:#17191f; color:#e6e8ee; padding:8px 12px; border-radius:6px 6px 0 0; font:13px system-ui, sans-serif; }
+  .g-pill { display:inline-flex; align-items:center; gap:7px; background:#262a33; border:1px solid #4b7bec; border-radius:999px; padding:3px 11px; font-weight:600; }
+  .g-spin { width:11px; height:11px; border:2px solid #4b7bec; border-top-color:transparent; border-radius:50%; display:inline-block; animation:g-rot 1s linear infinite; }
+  @keyframes g-rot { to { transform:rotate(360deg); } }
+  .g-search { flex:1; background:#262a33; color:#8d93a1; padding:5px 10px; border-radius:4px; }
+  .g-drop { width:640px; max-width:100%; background:#1e2128; color:#e6e8ee; padding:10px; border-radius:0 0 8px 8px; font:13px system-ui, sans-serif; display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; box-sizing:border-box; }
+  .g-card { background:#262a33; border-radius:6px; padding:8px 9px; min-width:0; display:flex; flex-direction:column; gap:5px; }
+  .g-card.idle { opacity:.62; }
+  .g-top { display:flex; align-items:center; gap:5px; }
+  .g-name { font-weight:600; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .g-dot { width:8px; height:8px; border-radius:50%; background:#6b7180; flex:none; }
+  .g-dot.run { background:#4fd08f; } .g-dot.wait { background:#6ea3ff; } .g-dot.paused { background:#f2cc6b; } .g-dot.err { background:#ff7b7b; }
+  .g-btn { background:#3a3f4b; color:#e6e8ee; border-radius:4px; width:20px; height:20px; font-size:10px; display:inline-flex; align-items:center; justify-content:center; flex:none; }
+  .g-btn.off { opacity:.35; }
+  .g-track { height:4px; background:#3a3f4b; border-radius:2px; overflow:hidden; }
+  .g-fill { height:100%; background:#4b7bec; }
+  .g-sub { color:#a2a8b5; font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .g-legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; font:12px system-ui, sans-serif; align-items:center; }
+  .g-legend span { display:inline-flex; align-items:center; gap:5px; }
+</style>
+
+<div class="mockup">
+  <div class="mockup-header">Open state, at the top left of the main window</div>
+  <div class="mockup-body" style="padding:0">
+    <div class="g-bar"><span class="g-pill"><span class="g-spin"></span>4</span><span class="g-search">Search…</span></div>
+    <div class="g-drop">
+
+      <div class="g-card">
+        <div class="g-top"><span class="g-dot run"></span><span class="g-name">Import</span><span class="g-btn">❚❚</span><span class="g-btn">■</span></div>
+        <div class="g-track"><div class="g-fill" style="width:40%"></div></div>
+        <div class="g-sub">12 of 30 · krea2_00412_.png</div>
+      </div>
+
+      <div class="g-card">
+        <div class="g-top"><span class="g-dot wait"></span><span class="g-name">Embedding</span><span class="g-btn">❚❚</span><span class="g-btn">■</span></div>
+        <div class="g-track"><div class="g-fill" style="width:0%"></div></div>
+        <div class="g-sub">18 queued · waiting for GPU</div>
+      </div>
+
+      <div class="g-card">
+        <div class="g-top"><span class="g-dot paused"></span><span class="g-name">Tagging</span><span class="g-btn">▶</span><span class="g-btn">■</span></div>
+        <div class="g-track"><div class="g-fill" style="width:33%"></div></div>
+        <div class="g-sub">Paused · 2,725 of 8,285</div>
+      </div>
+
+      <div class="g-card">
+        <div class="g-top"><span class="g-dot run"></span><span class="g-name">Text to image</span><span class="g-btn">❚❚</span><span class="g-btn">■</span></div>
+        <div class="g-track"><div class="g-fill" style="width:60%"></div></div>
+        <div class="g-sub">Image 3 of 5 · rendering</div>
+      </div>
+
+      <div class="g-card">
+        <div class="g-top"><span class="g-dot err"></span><span class="g-name">Image to video</span><span class="g-btn">▶</span><span class="g-btn off">■</span></div>
+        <div class="g-track"><div class="g-fill" style="width:50%;background:#ff7b7b"></div></div>
+        <div class="g-sub">Failed · ComfyUI not responding</div>
+      </div>
+
+      <div class="g-card">
+        <div class="g-top"><span class="g-dot run"></span><span class="g-name">Upscaling</span><span class="g-btn">❚❚</span><span class="g-btn">■</span></div>
+        <div class="g-track"><div class="g-fill" style="width:75%"></div></div>
+        <div class="g-sub">3 of 4 · portrait_009.png</div>
+      </div>
+
+      <div class="g-card idle">
+        <div class="g-top"><span class="g-dot"></span><span class="g-name">Library hygiene</span><span class="g-btn">▶</span><span class="g-btn off">■</span></div>
+        <div class="g-track"></div>
+        <div class="g-sub">In sync · checked 41 min ago</div>
+      </div>
+
+      <div class="g-card idle">
+        <div class="g-top"><span class="g-dot"></span><span class="g-name">Taste training</span><span class="g-btn">▶</span><span class="g-btn off">■</span></div>
+        <div class="g-track"></div>
+        <div class="g-sub">Idle · trained 2 hours ago</div>
+      </div>
+
+      <div class="g-card idle">
+        <div class="g-top"><span class="g-dot"></span><span class="g-name">Writer training</span><span class="g-btn off">▶</span><span class="g-btn off">■</span></div>
+        <div class="g-track"></div>
+        <div class="g-sub">Idle · no run in progress</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="g-legend">
+  <span><span class="g-dot run"></span>Running</span>
+  <span><span class="g-dot wait"></span>Waiting</span>
+  <span><span class="g-dot paused"></span>Paused</span>
+  <span><span class="g-dot err"></span>Failed</span>
+  <span><span class="g-dot"></span>Idle</span>
+</div>

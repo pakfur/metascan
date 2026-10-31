@@ -43,9 +43,37 @@ from backend.api import (
     i2v,
     t2i,
     taste as taste_api,
+    background as background_api,
     websocket,
 )
-from backend.dependencies import get_db, get_thumbnail_cache
+from backend.dependencies import (
+    get_db,
+    get_thumbnail_cache,
+    interactive_vlm_hold,
+    set_generation_process,
+    set_import_process,
+    set_taste_process,
+    set_training_process,
+    set_upscale_process,
+    get_training_process,
+    set_registry,
+    set_embedding_process,
+    set_tagging_process,
+)
+from backend.services.background.embedding import EmbeddingProcess
+from backend.services.background.generation import (
+    I2vProcess,
+    StoryboardProcess,
+    T2iProcess,
+)
+from backend.services.background.hygiene import HygieneProcess
+from backend.services.background.idle import ActivityMiddleware, idle_tracker
+from backend.services.background.import_process import ImportProcess
+from backend.services.background.registry import ProcessRegistry
+from backend.services.background.tagging import TaggingProcess
+from backend.services.background.taste import TasteProcess
+from backend.services.background.training import WriterTrainingProcess
+from backend.services.background.upscale import UpscaleProcess
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
@@ -258,6 +286,15 @@ async def _apply_pending_taste_snapshot(db: Any, data_dir: Path) -> None:
         logger.exception("Applying the pending taste snapshot failed")
 
 
+def _training_broadcast(event: str, data: Dict[str, Any]) -> None:
+    """The manager's events: the ``training`` channel, and the Writer
+    training process (a failed run sticks until the next one)."""
+    ws_manager.broadcast_sync("training", event, data)
+    process = get_training_process()
+    if process is not None:
+        process.record_event(event, data)
+
+
 def _build_training_manager(
     *,
     db: Any,
@@ -267,12 +304,13 @@ def _build_training_manager(
     inference_client: Any,
     vlm_roles: Any,
     on_completed: Optional[Callable[[int, bool], Awaitable[None]]] = None,
+    hold_background: Optional[Callable[[], Any]] = None,
 ) -> TrainingManager:
     """Wire the writer training manager to the live services.
     ``on_completed(adapter_id, render_scorecard)`` runs after a completed
     run (the scorecard service's hook)."""
     from backend.api.storyboard import storyboard_busy
-    from backend.api.vlm import cancel_retag_jobs, refresh_writer_adapters
+    from backend.api.vlm import refresh_writer_adapters
     from backend.services import hindsight_briefs
     from backend.services import scorecard as scorecard_mod
 
@@ -337,7 +375,6 @@ def _build_training_manager(
         # runs on the VLMs, then unload every VLM and the CLIP worker.
         # A post-scan tag drain mid-batch ends at the explicit unload (its
         # files stay queued); one still waiting waits out the lock.
-        cancel_retag_jobs()
         job = hindsight_briefs.peek_briefs_job()
         if job is not None and job.cancel():
             interrupted["briefs"] = True  # restarted when the GPU is free
@@ -354,15 +391,14 @@ def _build_training_manager(
         gpu_busy=gpu_busy,
         release_gpu=release_gpu,
         refresh_adapters=refresh_writer_adapters,
-        broadcast=lambda event, data: ws_manager.broadcast_sync(
-            "training", event, data
-        ),
+        broadcast=_training_broadcast,
         paths=lambda: training_paths_from_config(load_app_config(), data_dir),
         vram_cap=lambda: (load_app_config().get("models") or {}).get(
             "writer_train_vram_cap_gb"
         ),
         on_gpu_released=on_gpu_released,
         on_completed=on_completed,
+        hold_background=hold_background,
     )
     manager.add_close_hook(on_close)
     return manager
@@ -474,6 +510,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # here, and nothing has been started yet that would need stopping.
     await _open_database()
 
+    background_registry = ProcessRegistry(
+        get_data_dir() / "background_state.json", background_api.publish_status
+    )
+    set_registry(background_registry)
+
     ws_manager.attach_loop(asyncio.get_running_loop())
     similarity.set_server_loop(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
@@ -539,6 +580,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lambda event, payload: ws_manager.broadcast_sync("comfy", event, payload)
     )
     set_comfy_client(comfy_client)
+    # An owner pause from the last run holds its queued jobs from the first
+    # pump pass; the process re-applies it through pause() once registered.
+    for _source in ("t2i", "i2v", "storyboard"):
+        if background_registry.persisted_intent(_source) == "paused":
+            comfy_client.set_source_paused(_source, True)
     # start() never blocks on an unreachable ComfyUI — the reader loop
     # retries with backoff, so a server that is not running yet simply
     # connects later.
@@ -567,6 +613,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         writer_adapter=get_writer_adapter_path,
         get_all_vlms=get_all_vlm_clients,
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+        vlm_activity_hold=interactive_vlm_hold,
     )
     i2v_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
@@ -590,6 +637,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_root=Path(comfy_cfg["output_root"]),
         get_config=lambda: get_t2i_config(load_app_config()),
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+        vlm_activity_hold=interactive_vlm_hold,
         # "base+taste": favorite prompts as examples, CLIP only when ready.
         taste_examples=TasteExamplesService(get_db()).examples_for,
         # "adapter:<id>": the writer's llama-server serves the adapter.
@@ -630,6 +678,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         inference_client=client,
         vlm_roles=vlm_roles,
         on_completed=scorecard_service.on_training_completed,
+        hold_background=lambda: background_registry.hold(
+            ["tagging", "embedding"], by="Writer training"
+        ),
     )
     await _install_training(training_manager)
 
@@ -694,6 +745,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         asyncio.create_task(_preload_vlm())
 
+    # An owner pause from the last run gates the queue before its poller
+    # claims anything; the process re-applies it through pause() once registered.
+    if background_registry.persisted_intent("upscale") == "paused":
+        upscale._get_queue().gated = True
     upscale.init_upscale_queue()
     similarity.init_embedding_queue()
 
@@ -738,15 +793,109 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         is_indexing=similarity.is_indexing,
         is_busy=lambda: gpu_reserved()
         or generation_busy(t2i_runner, comfy_client, i2v_runner),
+        is_blocked=lambda: background_registry.blocked("embedding"),
     )
     t2i_runner.on_event(auto_index.on_t2i_event)
+
     # The post-embedding VLM tag drain waits for the same "no generation in
     # flight" so a 27B never loads into a render.
     # Writer training holds the GPU: the drain (and the hindsight briefs,
     # which wait on the same probe) wait it out too.
-    similarity.set_generation_busy_probe(
-        lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client, i2v_runner)
+    def _generation_or_training_busy() -> bool:
+        return gpu_reserved() or generation_busy(t2i_runner, comfy_client, i2v_runner)
+
+    similarity.set_generation_busy_probe(_generation_or_training_busy)
+
+    embedding = EmbeddingProcess(
+        background_registry,
+        similarity._get_embedding_queue,
+        get_db,
+        similarity.launch_index_build,
+        similarity.embedding_progress,
     )
+    background_registry.register(embedding)
+    set_embedding_process(embedding)
+
+    t2i_process = T2iProcess(background_registry, t2i_runner, comfy_client)
+    i2v_process = I2vProcess(background_registry, i2v_runner, comfy_client)
+    storyboard_process = StoryboardProcess(
+        background_registry, storyboard_runner, comfy_client
+    )
+
+    def _poke_on_job_update(process: Any) -> Callable[[str, Dict[str, Any]], None]:
+        def handler(event: str, payload: Dict[str, Any]) -> None:
+            if event == "job_update":
+                process.poke()
+
+        return handler
+
+    for process in (t2i_process, i2v_process, storyboard_process):
+        background_registry.register(process)
+        set_generation_process(process.id, process)
+        # Batch and job events move the panel (progress, ends, jobs leaving
+        # ComfyUI while a pause winds down).
+        comfy_client.on_job_event(_poke_on_job_update(process))
+    t2i_runner.on_event(lambda channel, event, data: t2i_process.poke())
+    i2v_runner.on_event(lambda channel, event, data: i2v_process.poke())
+
+    from backend.services import hindsight_briefs as _briefs_mod
+
+    upscale_process = UpscaleProcess(
+        background_registry,
+        upscale._get_queue,
+        upscale.pause_upscale_queue,
+        upscale.resume_upscale_queue,
+    )
+    taste_process = TasteProcess(background_registry, taste_service)
+    training_process = WriterTrainingProcess(
+        background_registry,
+        lambda: training_manager,
+        get_db,
+        _briefs_mod.get_briefs_job,
+        scorecard_service.running,
+    )
+    await training_process.refresh()
+    import_process = ImportProcess(
+        background_registry, scan.scan_status, scan.request_cancel
+    )
+    hygiene_process = HygieneProcess(
+        background_registry,
+        idle_tracker,
+        get_db=get_db,
+        get_config=load_app_config,
+        get_data_dir=scan._data_dir,
+        import_process=lambda: import_process,
+    )
+    bg_processes: List[Any] = [
+        upscale_process,
+        taste_process,
+        training_process,
+        import_process,
+        hygiene_process,
+    ]
+    for proc in bg_processes:
+        background_registry.register(proc)
+    set_upscale_process(upscale_process)
+    set_taste_process(taste_process)
+    set_training_process(training_process)
+    set_import_process(import_process)
+
+    # The tag queue outlives the process: Tagging resumes what remains once
+    # everything it waits on is wired (a persisted owner pause keeps it paused).
+    tagging = TaggingProcess(
+        background_registry,
+        get_vlm_client,
+        get_db,
+        _generation_or_training_busy,
+    )
+    background_registry.register(tagging)
+    set_tagging_process(tagging)
+    await tagging.kick_if_queued()
+    # The watcher polls the scan folders from here on (spec 9).
+    import_process.start_loop()
+    # A slow start-up must not count as idle: the quiet clock starts now.
+    idle_tracker.note_request()
+    hygiene_process.start_loop()
 
     try:
         yield
@@ -756,6 +905,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
+        # No hold is reconciled from here on: pausing training below must
+        # not restart Tagging or Embedding.
+        background_registry.begin_shutdown()
         # The re-embedder before training lets go of the GPU lock: its
         # pending retry must not start CLIP in the middle of the shutdown.
         await _close_reembedder(reembedder, taste_service)
@@ -769,6 +921,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("Scorecard service shutdown raised")
         set_scorecard_service(None)
+        for set_proc in (
+            set_upscale_process,
+            set_taste_process,
+            set_training_process,
+            set_import_process,
+        ):
+            set_proc(None)
+        # Hygiene before Import: it reads and moves through Import.
+        for proc in (
+            hygiene_process,
+            *(q for q in bg_processes if q is not hygiene_process),
+        ):
+            await proc.aclose()
         await upscale.shutdown_upscale_queue()
         # The auto build starts embedding runs: stop it before the queue.
         try:
@@ -777,7 +942,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Auto index scheduler shutdown raised")
         # The embedding queue is the rescore trigger: stop it (and unhook)
         # before closing the taste service that consumes it.
-        await similarity.shutdown_embedding_queue()  # cancels any VLM drain
+        for process in (t2i_process, i2v_process, storyboard_process):
+            set_generation_process(process.id, None)
+            await process.aclose()
+        await tagging.aclose()  # cancels any VLM drain
+        set_tagging_process(None)
+        await embedding.aclose()
+        set_embedding_process(None)
+        await similarity.shutdown_embedding_queue()
         try:
             from backend.services import hindsight_briefs
 
@@ -809,6 +981,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # means no more job_outputs events can fire once we reach
         # storyboard_runner.aclose(), so it only has to drain tasks that
         # are already in flight.
+        try:
+            await background_registry.aclose()
+        except Exception:
+            logger.exception("Background registry shutdown raised")
+        set_registry(None)
         try:
             await comfy_client.shutdown()
         except Exception:
@@ -850,6 +1027,10 @@ def create_app() -> FastAPI:  # noqa: C901
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Counts non-read requests for Hygiene's idle rule (pure ASGI: streaming
+    # responses pass through unbuffered).
+    app.add_middleware(ActivityMiddleware, tracker=idle_tracker)
 
     # API key authentication middleware
     if server_config.api_key:
@@ -906,6 +1087,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(i2v.router)
     app.include_router(t2i.router)
     app.include_router(taste_api.router)
+    app.include_router(background_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)

@@ -15,12 +15,24 @@ import asyncio
 import json
 import logging
 import random
+import contextlib
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    ContextManager,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
 from metascan.core.generation_categories import tag_generated_media
@@ -121,6 +133,14 @@ SEED_MAX = 2**31 - 1
 
 # How many ended runs stay known, so a late cancel answers "over", not 404.
 _FINISHED_KEEP = 50
+
+
+async def _nothing_to_wait_for() -> None:
+    return None
+
+
+def _no_hold(by: str) -> ContextManager[None]:
+    return contextlib.nullcontext()
 
 
 def _random_seed() -> int:
@@ -236,9 +256,13 @@ class I2vRunner:
         writer_adapter: Optional[Callable[[int], Optional[Path]]] = None,
         get_all_vlms: Optional[Callable[[], Iterable[Any]]] = None,
         unload_vlm_during_generation: bool = True,
+        vlm_activity_hold: Optional[Callable[[str], ContextManager[None]]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
+        # Holds Tagging while the writer prompts (injected by the lifespan:
+        # metascan/core never imports backend); default: no hold.
+        self._vlm_hold = vlm_activity_hold or _no_hold
         self.get_vlm = get_vlm  # the prompt-writer client
         # Adapter id -> its GGUF when the writer's llama-server serves it;
         # None: no adapter can be used.
@@ -262,6 +286,11 @@ class I2vRunner:
         # True while the other runner (T2I) is writing prompts with the
         # shared VLM; wired in lifespan. Keeps this run from unloading it.
         self.prompting_elsewhere: Callable[[], bool] = lambda: False
+        # Awaited before each prompt the run writes; the I2V background process
+        # blocks it while the owner has paused I2V (wired in lifespan).
+        self.wait_unpaused: Callable[[], Awaitable[None]] = _nothing_to_wait_for
+        # Prompt steps mid-call to the writer right now (a pause waits them out).
+        self._writing = 0
         self._batches: Dict[str, _I2vBatch] = {}
         # Ids of runs that ended (oldest first, bounded).
         self._finished: Dict[str, None] = {}
@@ -348,17 +377,18 @@ class I2vRunner:
         extra: Dict[str, Any] = {}
         if lora_path is not None:
             extra["lora_path"] = lora_path
-        await vlm.ensure_started(model_id)
-        try:
-            return await self._write(
-                vlm, path, idea, duration_s, template, model_id, extra
-            )
-        except AdapterLoadingError as exc:
-            raise WriterAdapterUnavailable(
-                writer, str(exc), code=ADAPTER_LOADING
-            ) from exc
-        except AdapterNotLoadedError as exc:
-            raise WriterAdapterUnavailable(writer, str(exc)) from exc
+        with self._vlm_hold("Prompt writer"):
+            await vlm.ensure_started(model_id)
+            try:
+                return await self._write(
+                    vlm, path, idea, duration_s, template, model_id, extra
+                )
+            except AdapterLoadingError as exc:
+                raise WriterAdapterUnavailable(
+                    writer, str(exc), code=ADAPTER_LOADING
+                ) from exc
+            except AdapterNotLoadedError as exc:
+                raise WriterAdapterUnavailable(writer, str(exc)) from exc
 
     async def _adapter_lora(self, writer: str) -> Optional[Path]:
         """None for ``base``; the GGUF of a servable I2V adapter for
@@ -632,6 +662,18 @@ class I2vRunner:
         """True while any batch run is still writing prompts with the VLM."""
         return any(b.prompting for b in self._batches.values())
 
+    def is_writing(self) -> bool:
+        """True while a prompt step is mid-call to the writer VLM."""
+        return self._writing > 0
+
+    def progress_counts(self) -> Tuple[int, int, str]:
+        """(videos ended, videos planned, phase) summed over the active runs;
+        the phase is "writing" while any run still writes prompts."""
+        ended = sum(b.submitted - len(b.pending) for b in self._batches.values())
+        total = sum(b.total_videos for b in self._batches.values())
+        phase = "writing" if self.is_prompting() else "rendering"
+        return ended, total, phase
+
     def active_batches(self) -> List[Dict[str, Any]]:
         return [self._row(b) for b in self._batches.values()]
 
@@ -699,9 +741,14 @@ class I2vRunner:
                 "draft_prompt": req.draft_prompt,
                 "writer_model": req.writer_model,
             }
-        text, warnings, model = await self.write_prompt(
-            req.source_path, req.idea, req.duration_s, req.template_id, req.writer
-        )
+        await self.wait_unpaused()  # a pause stops the writing between steps
+        self._writing += 1
+        try:
+            text, warnings, model = await self.write_prompt(
+                req.source_path, req.idea, req.duration_s, req.template_id, req.writer
+            )
+        finally:
+            self._writing -= 1
         b.warnings.extend(w for w in warnings if w not in b.warnings)
         self._progress(b)
         return text, {
@@ -786,7 +833,7 @@ class I2vRunner:
         if b.all_submitted and not b.pending:
             b.all_jobs_ended.set()
 
-    async def _unload_vlm(self, b: _I2vBatch) -> None:
+    async def _unload_vlm(self, b: Optional[_I2vBatch]) -> None:
         """Free the GPU for ComfyUI: shut down each distinct VLM client that
         has a model loaded, except the prompt writer while another run (or a
         T2I Random batch) is still writing prompts with it. Failing to unload
@@ -809,6 +856,13 @@ class I2vRunner:
                 await vlm.shutdown()
             except Exception as exc:
                 logger.warning("could not unload the VLM before rendering: %s", exc)
+
+    async def unload_vlms(self) -> None:
+        """Free the GPU for ComfyUI the way a run does before it renders (only
+        with ``unload_vlm_during_generation`` on; a writer another run is still
+        prompting with is left alone)."""
+        if self.unload_vlm_during_generation:
+            await self._unload_vlm(None)
 
     async def _run(self, b: _I2vBatch) -> None:
         """Write the prompts, then submit the jobs -- in that order when

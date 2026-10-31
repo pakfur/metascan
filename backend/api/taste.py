@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from backend.dependencies import get_taste_process
 from backend.services.taste_service import TasteService, TrainConflict
 
 router = APIRouter(prefix="/api", tags=["taste"])
@@ -44,6 +45,9 @@ async def taste_status(
 
 @router.post("/taste/train", status_code=202)
 async def taste_train(service: TasteService = Depends(_get_service)) -> Any:
+    process = get_taste_process()
+    if process is not None:
+        await process.owner_train_starting()  # an owner train clears a stop
     try:
         await service.start_training()
     except TrainConflict as exc:

@@ -13,6 +13,7 @@
     </div>
     <div v-else class="sb-root">
       <header class="sb-header">
+        <ActivityPill />
         <RouterLink to="/" class="sb-back">← Library</RouterLink>
         <h2>{{ store.tree?.name }}</h2>
         <span
@@ -131,6 +132,7 @@ import type { MenuItem } from 'primevue/menuitem'
 import { useViewport } from '../composables/useViewport'
 import { useStoryboardStore } from '../stores/storyboard'
 import { copyToClipboard } from '../utils/clipboard'
+import ActivityPill from '../components/background/ActivityPill.vue'
 import ModalShell from '../components/storyboard/ModalShell.vue'
 import StoryboardLanding from '../components/storyboard/StoryboardLanding.vue'
 import OutlineRail from '../components/storyboard/OutlineRail.vue'

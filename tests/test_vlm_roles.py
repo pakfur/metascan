@@ -355,13 +355,12 @@ def test_t2i_uses_writer_tagging_uses_general() -> None:
     # ask for the default (general) client.
     import backend.api.chat as chat
     import backend.api.prompt as prompt
-    import backend.api.similarity as similarity
 
     for mod in (chat, prompt):
         assert "get_vlm_client()" in inspect.getsource(mod._require_ready_client)
-    assert "get_vlm_client()" in inspect.getsource(
-        similarity._schedule_vlm_drain_after_complete
-    )
+    # The tag drain (TaggingProcess) is built on the general client.
+    tagging = source[source.index("TaggingProcess(") :]
+    assert "get_vlm_client," in tagging.split(")", 1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -753,12 +752,42 @@ async def test_activate_persists_only_after_the_swap_succeeds() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _BlockingDb:
+class _QueueDb:
+    """A real DatabaseManager (the durable tag queue) whose tag writes the
+    subclasses record. Everything else is the real thing."""
+
+    def __init__(self, tmp_path: Path, images: List[Path]) -> None:
+        from datetime import datetime
+
+        from metascan.core.database_sqlite import DatabaseManager
+        from metascan.core.media import Media
+
+        self._real = DatabaseManager(tmp_path / "queue_db")
+        for p in images:
+            self._real.save_media(
+                Media(
+                    file_path=p,
+                    file_size=1,
+                    width=8,
+                    height=8,
+                    format="png",
+                    created_at=datetime(2024, 1, 1),
+                    modified_at=datetime(2024, 1, 1),
+                )
+            )
+        self._real.enqueue_tags(images)
+        self.tagged: List[tuple] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _BlockingDb(_QueueDb):
     """Records tag writes; the first write blocks (in its worker thread)
     until the test lets it go, so the writer can take over mid-batch."""
 
-    def __init__(self) -> None:
-        self.tagged: List[tuple] = []
+    def __init__(self, tmp_path: Path, images: List[Path]) -> None:
+        super().__init__(tmp_path, images)
         self.first = threading.Event()
         self.resume = threading.Event()
 
@@ -781,9 +810,6 @@ async def test_writer_taking_over_mid_tag_batch_loses_no_items(
         p = tmp_path / f"img{i}.png"
         Image.new("RGB", (8, 8), (i * 40, 0, 0)).save(p)
         images.append(p)
-    (tmp_path / "vlm_pending.jsonl").write_text(
-        "".join(json.dumps({"path": str(p)}) + "\n" for p in images)
-    )
     tags = '["red car", "blue sky"]'
     async with FakeLlamaServer(canned_response=tags) as w, FakeLlamaServer(
         canned_response=tags
@@ -799,9 +825,8 @@ async def test_writer_taking_over_mid_tag_batch_loses_no_items(
             background_grace_s=0.0,
         )
         writer, general = roles.client("writer"), roles.client("general")
-        db = _BlockingDb()
+        db = _BlockingDb(tmp_path, images)
         pump = VlmTagPump(
-            queue_dir=tmp_path,
             client=general,
             db=db,
             model_id="qwen38-27b",
@@ -1440,12 +1465,14 @@ async def test_a_request_whose_re_ensure_was_evicted_after_ready_retries() -> No
 # ---------------------------------------------------------------------------
 
 
-class _SlowDb:
+class _SlowDb(_QueueDb):
     """Records tag writes; each takes a moment (in its worker thread) so a
     tag batch spans the writer's run."""
 
-    def __init__(self, delay_s: float = 0.05) -> None:
-        self.tagged: List[tuple] = []
+    def __init__(
+        self, tmp_path: Path, images: List[Path], delay_s: float = 0.05
+    ) -> None:
+        super().__init__(tmp_path, images)
         self.delay_s = delay_s
 
     def add_tag_indices(self, path: Any, tags: List[str], source: str) -> None:
@@ -1461,9 +1488,6 @@ def _pending_images(tmp_path: Path, n: int) -> List[Path]:
         p = tmp_path / f"img{i}.png"
         Image.new("RGB", (8, 8), (i * 20 % 255, 0, 0)).save(p)
         images.append(p)
-    (tmp_path / "vlm_pending.jsonl").write_text(
-        "".join(json.dumps({"path": str(p)}) + "\n" for p in images)
-    )
     return images
 
 
@@ -1495,9 +1519,8 @@ async def test_a_writer_run_overlapping_a_tag_batch_swaps_at_most_twice(
             idle_timeout_s=0.2,
         )
         writer, general = roles.client("writer"), roles.client("general")
-        db = _SlowDb()
+        db = _SlowDb(tmp_path, images)
         pump = VlmTagPump(
-            queue_dir=tmp_path,
             client=general,
             db=db,
             model_id="qwen38-27b",

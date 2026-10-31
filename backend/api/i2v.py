@@ -20,7 +20,7 @@ from pydantic import AfterValidator, BaseModel, Field
 from backend.config import get_i2v_config, load_app_config
 from backend.api.categories import checked_category_ids
 from backend.api.errors import trash_failed_error
-from backend.dependencies import get_db
+from backend.dependencies import get_db, get_generation_process
 from backend.services.i2v_service import I2vService
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.comfy_bindings import BindingError
@@ -324,6 +324,11 @@ async def start_batch(body: BatchRequestBody) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except GpuBusyError as exc:
         raise gpu_busy_http_error() from exc
+    process = get_generation_process("i2v")
+    if process is not None:
+        # The owner started a batch: that clears a stop; the panel updates now.
+        await process.owner_batch_starting()
+        process.poke()
     return {
         "batch_id": started.batch_id,
         "total_videos": started.total_videos,

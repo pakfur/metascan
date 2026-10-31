@@ -8,7 +8,7 @@ const scanStore = useScanStore()
 const steps = [
   { key: 'preparing', label: 'Prepare' },
   { key: 'confirming', label: 'Confirm' },
-  { key: 'scanning', label: 'Import' },
+  { key: 'scanning', label: 'Rescan' },
   { key: 'embedding', label: 'Embed' },
   { key: 'complete', label: 'Done' },
 ]
@@ -149,7 +149,7 @@ function handleClose() {
       </ol>
 
       <template v-if="scanStore.phase === 'preparing'">
-        <h3>Preparing Import...</h3>
+        <h3>Preparing Full Clean...</h3>
         <p class="muted">Counting files in configured directories</p>
         <div class="progress-bar indeterminate"><div class="progress-fill" /></div>
       </template>
@@ -172,31 +172,13 @@ function handleClose() {
           <span>In DB: <strong>{{ scanStore.prepareResult.existing_in_db }}</strong></span>
         </div>
 
-        <fieldset class="mode-fieldset">
-          <legend>Mode</legend>
-          <label class="mode-radio">
-            <input type="radio" value="incremental" v-model="scanStore.scanMode" />
-            <span>
-              <strong>Incremental</strong>
-              <em>Skip files already in the database</em>
-            </span>
-          </label>
-          <label class="mode-radio">
-            <input type="radio" value="full_clean" v-model="scanStore.scanMode" />
-            <span>
-              <strong>Full clean &amp; rescan</strong>
-              <em>Wipe the database and reimport every file. Ratings (★ favorites and ✓ pass / ✗ fail grades), reasons and categories are preserved; if the rescan is cancelled or interrupted, they come back when the next scan or restart finds the files again.</em>
-            </span>
-          </label>
-        </fieldset>
-
-        <label class="cleanup-toggle">
-          <input type="checkbox" v-model="scanStore.fullCleanup" />
-          Also remove DB entries for files that no longer exist on disk
-        </label>
+        <div class="mode-note">
+          <strong>Full clean &amp; rescan</strong>
+          <em>Wipe the database and reimport every file. Ratings (★ favorites and ✓ pass / ✗ fail grades), reasons and categories are preserved; if the rescan is cancelled or interrupted, they come back when the next scan or restart finds the files again.</em>
+        </div>
 
         <div class="dialog-actions">
-          <button class="btn-primary" @click="scanStore.start()">Start Import</button>
+          <button class="btn-primary" @click="scanStore.start()">Start Full Clean</button>
           <button class="btn-secondary" @click="handleClose">Cancel</button>
         </div>
       </template>
@@ -221,7 +203,7 @@ function handleClose() {
           {{ currentFileName }}
         </p>
         <div class="dialog-actions">
-          <button class="btn-danger" @click="scanStore.cancel()">Cancel Import</button>
+          <button class="btn-danger" @click="scanStore.cancel()">Cancel Full Clean</button>
         </div>
       </template>
 
@@ -428,17 +410,13 @@ h3 { margin: 0 0 12px; font-size: 18px; color: var(--text-color); }
 .stats-row { display: flex; gap: 24px; margin-bottom: 12px; font-size: 14px; color: var(--text-color-secondary); }
 .stats-row strong { color: var(--text-color); }
 
-.mode-fieldset {
+.mode-note {
   border: 1px solid var(--surface-border); border-radius: 8px;
   padding: 10px 14px; margin: 8px 0; background: var(--surface-ground);
+  display: flex; flex-direction: column;
 }
-.mode-fieldset legend { padding: 0 6px; font-size: 12px; color: var(--text-color-secondary); }
-.mode-radio { display: flex; gap: 10px; padding: 4px 0; cursor: pointer; }
-.mode-radio span { display: flex; flex-direction: column; }
-.mode-radio strong { font-size: 13px; color: var(--text-color); }
-.mode-radio em { font-size: 11px; color: var(--text-color-secondary); font-style: normal; }
-
-.cleanup-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-color); cursor: pointer; margin-bottom: 8px; }
+.mode-note strong { font-size: 13px; color: var(--text-color); }
+.mode-note em { font-size: 11px; color: var(--text-color-secondary); font-style: normal; }
 
 .step-indicator { font-size: 13px; color: var(--text-color-secondary); margin-bottom: 8px; }
 .current-dir, .current-file {

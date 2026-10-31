@@ -102,6 +102,10 @@ class ProcessUpscaleQueue:
         self.on_task_removed: Optional[Callable[[str], None]] = None
         self.on_queue_changed: Optional[Callable[[], None]] = None
 
+        # Set while the queue is paused by its owner: nothing new is claimed
+        # (tasks added meanwhile stay pending, durable on disk).
+        self.gated = False
+
         # Queue directory setup
         if queue_dir is None:
             queue_dir = Path.home() / ".metascan" / "queue"
@@ -441,6 +445,8 @@ class ProcessUpscaleQueue:
         Returns:
             The claimed task, or None if no pending tasks
         """
+        if self.gated:
+            return None
         lock_fh = None
         try:
             lock_fh = self._acquire_lock(timeout=5.0)

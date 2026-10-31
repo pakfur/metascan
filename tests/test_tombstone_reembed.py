@@ -203,6 +203,13 @@ class FakeComfy:
     def has_pending_jobs(self) -> bool:
         return self.pending
 
+    # generation_busy asks for active (not gated) jobs and per-source pauses
+    def has_active_jobs(self) -> bool:
+        return self.pending
+
+    def is_source_paused(self, source: str) -> bool:
+        return False
+
 
 class Env:
     """A re-embedder wired the way the lifespan wires it, with fakes for CLIP,

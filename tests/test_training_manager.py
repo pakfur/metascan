@@ -1870,3 +1870,112 @@ def test_lifespan_recovers_training_before_preloading_models():
     assert tail.index("await _uninstall_training(training_manager)") < tail.index(
         "await scorecard_service.aclose()"
     )
+
+
+# ---- the background hold spans start ---------------------------------------------
+
+
+class _LogStub:
+    """Tagging / Embedding stand-in that logs what the registry tells it."""
+
+    holds: tuple = ()
+    order = 1
+
+    def __init__(self, pid: str, log: List[Tuple[str, str]]) -> None:
+        self.id = self.label = pid
+        self.log = log
+
+    def capabilities(self):
+        from backend.services.background.protocol import Capabilities
+
+        return Capabilities(True, True, True)
+
+    def report(self):
+        from backend.services.background.protocol import ProcessReport, State
+
+        return ProcessReport(State.IDLE, None, "")
+
+    async def start(self) -> None: ...
+
+    async def pause(self) -> None:
+        self.log.append((self.id, "pause"))
+
+    async def resume(self) -> None:
+        self.log.append((self.id, "resume"))
+
+    async def stop(self) -> None: ...
+
+
+def _background(tmp_path, m_box):
+    from backend.services.background.registry import ProcessRegistry
+    from backend.services.background.training import WriterTrainingProcess
+
+    log: List[Tuple[str, str]] = []
+    reg = ProcessRegistry(tmp_path / "bg.json", lambda st: None)
+    reg.register(_LogStub("tagging", log))
+    reg.register(_LogStub("embedding", log))
+    idle = SimpleNamespace(status=lambda: {"running": False}, cancel=lambda: False)
+    proc = WriterTrainingProcess(
+        reg,
+        lambda: m_box[0],
+        lambda: SimpleNamespace(list_training_runs=lambda s: []),
+        lambda: idle,
+        lambda: None,
+        poll_s=60,
+    )
+    reg.register(proc)
+    return reg, proc, log
+
+
+async def test_no_resume_reaches_tagging_or_embedding_while_a_run_starts(
+    db, tmp_path, dataset
+):
+    box: List[Any] = [None]
+    reg, proc, log = _background(tmp_path, box)
+    m = _manager(
+        db,
+        tmp_path,
+        Recorder(),
+        fake=SLOW,
+        hold_background=lambda: reg.hold(
+            ["tagging", "embedding"], by="Writer training"
+        ),
+    )
+    box[0] = m
+    dataset["n"] = 120
+    await m.start("all", "quick")
+    await reg.settle()
+    # the hold was released as the run's declared hold took over
+    assert ("tagging", "resume") not in log and ("embedding", "resume") not in log
+    assert reg.status("tagging").held_by == ["Writer training"]
+    assert reg.status("embedding").held_by == ["Writer training"]
+    await m.cancel()
+    await _idle(m)
+    proc.poke()  # main's broadcast wrapper does this on run_cancelled
+    await reg.settle()
+    assert ("tagging", "resume") in log and ("embedding", "resume") in log
+    await proc.aclose()
+    await reg.aclose()
+
+
+async def test_a_start_that_fails_releases_the_background_hold(db, tmp_path, dataset):
+    box: List[Any] = [None]
+    reg, proc, log = _background(tmp_path, box)
+    m = _manager(
+        db,
+        tmp_path,
+        Recorder(),
+        busy=["comfy_jobs"],
+        hold_background=lambda: reg.hold(
+            ["tagging", "embedding"], by="Writer training"
+        ),
+    )
+    box[0] = m
+    dataset["n"] = 120
+    with pytest.raises(TrainingError):
+        await m.start("all", "quick")
+    await reg.settle()
+    assert reg.status("tagging").held_by == [] and reg.status("embedding").held_by == []
+    assert log.count(("tagging", "resume")) == log.count(("tagging", "pause"))
+    await proc.aclose()
+    await reg.aclose()

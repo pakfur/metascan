@@ -9,6 +9,7 @@ import { useScanStore } from '../stores/scan'
 import { useSearchStore } from '../stores/search'
 import { useTrainingStore } from '../stores/training'
 import { useKeyboard } from '../composables/useKeyboard'
+import { useDebounceFn } from '@vueuse/core'
 import { useWebSocket } from '../composables/useWebSocket'
 import ThreePanel from '../components/layout/ThreePanel.vue'
 import ContentSearchBar from '../components/layout/ContentSearchBar.vue'
@@ -77,16 +78,23 @@ onMounted(async () => {
   ])
 })
 
-// File watcher: auto-refresh when files change on disk
-let watcherDebounce: ReturnType<typeof setTimeout> | null = null
-useWebSocket('watcher', () => {
-  // Debounce rapid file changes into a single refresh
-  if (watcherDebounce) clearTimeout(watcherDebounce)
-  watcherDebounce = setTimeout(() => {
-    mediaStore.loadAllMedia()
-    filterStore.loadFilterData()
-    foldersStore.loadTagPaths({ force: true })
-  }, 2000)
+// Always-on import: files it added or moved belong in the grid, the filter
+// counts and the tag list. Trailing debounce with a max wait, so a big drop
+// reloads a few times and the grid still moves during it. The media reload
+// is silent (no loading flag), which keeps scroll position and selection.
+const reloadAfterImport = useDebounceFn(
+  () => {
+    mediaStore
+      .loadAllMedia({ silent: true })
+      .catch((e) => console.warn('Library: could not reload the grid', e))
+    void filterStore.loadFilterData()
+    void foldersStore.loadTagPaths({ force: true })
+  },
+  1000,
+  { maxWait: 5000 },
+)
+useWebSocket('library', (event) => {
+  if (event === 'media_added' || event === 'media_removed') void reloadAfterImport()
 })
 
 function openViewer(media: Media) {
@@ -117,11 +125,6 @@ function openSlideshow() {
 
 function closeSlideshow() {
   slideshowOpen.value = false
-}
-
-function openScan() {
-  if (isMobile.value) return
-  scanStore.prepare()
 }
 
 function closeScan() {
@@ -170,7 +173,6 @@ useKeyboard([
     },
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
-  { key: 's', ctrl: true, handler: openScan },
   { key: 'd', ctrl: true, shift: true, handler: () => { if (!isMobile.value) dupFinderOpen.value = true } },
   { key: 'u', ctrl: true, handler: handleUpscaleFromSelected },
 ])
@@ -194,7 +196,6 @@ watch(isMobile, () => {
       <template #center>
         <div class="center-stack">
           <ContentSearchBar
-            @scan="openScan"
             @refresh="mediaStore.loadAllMedia()"
             @upscale-queue="upscaleQueueOpen = true"
             @find-duplicates="dupFinderOpen = true"
