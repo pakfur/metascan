@@ -79,6 +79,24 @@ def get_registry() -> ProcessRegistry:
     return _registry_singleton
 
 
+def installed_registry() -> Optional[ProcessRegistry]:
+    """The registry, or None where none is installed (route tests)."""
+    return _registry_singleton
+
+
+_import_singleton: Optional[Any] = None
+
+
+def set_import_process(process: Optional[Any]) -> None:
+    """Install the Import process (FastAPI lifespan)."""
+    global _import_singleton
+    _import_singleton = process
+
+
+def get_import_process() -> Optional[Any]:
+    return _import_singleton
+
+
 def interactive_vlm_hold(by: str) -> ContextManager[None]:
     """Hold Tagging for one interactive VLM request plus its grace (spec 7).
 

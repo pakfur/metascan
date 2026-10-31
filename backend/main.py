@@ -51,6 +51,7 @@ from backend.dependencies import (
     get_thumbnail_cache,
     interactive_vlm_hold,
     set_generation_process,
+    set_import_process,
     set_taste_process,
     set_training_process,
     set_upscale_process,
@@ -65,6 +66,8 @@ from backend.services.background.generation import (
     StoryboardProcess,
     T2iProcess,
 )
+from backend.services.background.hygiene import HygieneProcess
+from backend.services.background.import_process import ImportProcess
 from backend.services.background.registry import ProcessRegistry
 from backend.services.background.tagging import TaggingProcess
 from backend.services.background.taste import TasteProcess
@@ -847,12 +850,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scorecard_service.running,
     )
     await training_process.refresh()
-    bg_processes: List[Any] = [upscale_process, taste_process, training_process]
+    import_process = ImportProcess(
+        background_registry, scan.scan_status, scan.request_cancel
+    )
+    hygiene_process = HygieneProcess()
+    bg_processes: List[Any] = [
+        upscale_process,
+        taste_process,
+        training_process,
+        import_process,
+        hygiene_process,
+    ]
     for proc in bg_processes:
         background_registry.register(proc)
     set_upscale_process(upscale_process)
     set_taste_process(taste_process)
     set_training_process(training_process)
+    set_import_process(import_process)
 
     # The tag queue outlives the process: Tagging resumes what remains once
     # everything it waits on is wired (a persisted owner pause keeps it paused).
@@ -887,7 +901,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("Scorecard service shutdown raised")
         set_scorecard_service(None)
-        for set_proc in (set_upscale_process, set_taste_process, set_training_process):
+        for set_proc in (
+            set_upscale_process,
+            set_taste_process,
+            set_training_process,
+            set_import_process,
+        ):
             set_proc(None)
         for proc in bg_processes:
             await proc.aclose()

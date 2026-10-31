@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import stat
-from contextlib import nullcontext
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -21,7 +21,12 @@ from backend.config import (
     get_t2i_config,
     load_app_config,
 )
-from backend.dependencies import get_db, get_thumbnail_cache
+from backend.dependencies import (
+    get_db,
+    get_import_process,
+    get_thumbnail_cache,
+    installed_registry,
+)
 from backend.ws.manager import ws_manager
 from backend.services.taste_snapshot import TASTE_SNAPSHOT_FILENAME  # noqa: F401
 from backend.services.taste_snapshot import (
@@ -52,6 +57,64 @@ router = APIRouter(prefix="/api/scan", tags=["scan"])
 # Track the running scan task so it can be cancelled
 _scan_task: Optional[asyncio.Task] = None
 _cancel_requested = False
+
+# What the Import panel shows (backend/services/background/import_process.py):
+# the last progress payload, kept beside the WebSocket broadcasts, whether a
+# run is under way, and how the last one failed (the exception's type only: its
+# text can quote a path).
+_scan_active = False
+_full_clean_active = False
+_progress: Dict[str, Any] = {}
+_scan_error: Optional[str] = None
+
+
+def _poke_import() -> None:
+    process = get_import_process()
+    if process is not None:
+        process.poke()
+
+
+def _set_progress(**fields: Any) -> None:
+    """Merge into the last payload (a new dict, so the scanner's worker thread
+    and the panel never see a half-written one) and tell the panel."""
+    global _progress
+    _progress = {**_progress, **fields}
+    _poke_import()
+
+
+def scan_running() -> bool:
+    return _scan_active or (_scan_task is not None and not _scan_task.done())
+
+
+def scan_status() -> Dict[str, Any]:
+    """The running scan as the Import panel shows it: phase and counts and the
+    bare name of the file in hand, never a path."""
+    running = scan_running()
+    p = _progress if running else {}
+    return {
+        "running": running,
+        "cancelling": running and _cancel_requested,
+        "full_clean": running and _full_clean_active,
+        "phase": p.get("phase"),
+        "dir_current": p.get("dir_current"),
+        "dir_total": p.get("dir_total"),
+        "current": p.get("current"),
+        "total": p.get("total"),
+        "file": p.get("file"),
+        "error": None if running else _scan_error,
+    }
+
+
+def request_cancel() -> bool:
+    """Ask the running scan to stop (``/cancel`` and the panel's Stop). A full
+    clean stops the same way: its marker and pending file stay, nothing is
+    tombstoned. False when no scan is running."""
+    global _cancel_requested
+    if not scan_running():
+        return False
+    _cancel_requested = True
+    _poke_import()
+    return True
 
 
 def _data_dir(db: Any) -> Optional[Path]:
@@ -284,7 +347,7 @@ async def start_scan(body: ScanRequest):
     re-importing it, so it is refused (409 ``scan_folders_missing``) while a
     configured scan folder's files can't be seen (:func:`_full_clean_blockers`);
     an ordinary scan skips that folder."""
-    global _scan_task, _cancel_requested
+    global _scan_task, _cancel_requested, _scan_error, _progress
 
     if _scan_task and not _scan_task.done():
         raise HTTPException(status_code=409, detail="Scan already in progress")
@@ -309,6 +372,12 @@ async def start_scan(body: ScanRequest):
         if _scan_task and not _scan_task.done():
             raise HTTPException(status_code=409, detail="Scan already in progress")
 
+    # The owner starting a scan clears a Stop on the Import panel.
+    process = get_import_process()
+    if process is not None:
+        await process.owner_scan_starting()
+    _scan_error = None
+    _progress = {}
     _cancel_requested = False
     _scan_task = asyncio.create_task(_run_scan(body.full_cleanup, body.full_clean))
     return {"status": "started"}
@@ -317,12 +386,8 @@ async def start_scan(body: ScanRequest):
 @router.post("/cancel")
 async def cancel_scan():
     """Cancel a running scan."""
-    global _cancel_requested
-
-    if not _scan_task or _scan_task.done():
+    if not request_cancel():
         raise HTTPException(status_code=409, detail="No scan in progress")
-
-    _cancel_requested = True
     return {"status": "cancelling"}
 
 
@@ -338,9 +403,40 @@ async def _run_scan(full_cleanup: bool, full_clean: bool = False) -> None:
     again here), it then writes the lasting marker first, and only a scan
     that walks every configured folder to the end with none unavailable
     (and re-ingests the generated output still on disk) -- this one, or any
-    later one -- removes it."""
-    with full_clean_running() if full_clean else nullcontext():
-        await _scan(full_cleanup, full_clean)
+    later one -- removes it.
+
+    A full clean also holds Embedding, Tagging and Hygiene (the background
+    registry) for the run, dropped however it ends; Embedding's part goes
+    before the post-walk index build, which a hold would queue."""
+    global _scan_active, _full_clean_active
+    _scan_active = True
+    _full_clean_active = full_clean
+    _poke_import()
+    try:
+        with ExitStack() as stack:
+            release_embedding = _no_release
+            if full_clean:
+                stack.enter_context(full_clean_running())
+                registry = installed_registry()
+                if registry is not None:
+                    stack.enter_context(
+                        registry.hold(["tagging", "hygiene"], by="Full clean")
+                    )
+                    embedding_hold = ExitStack()
+                    embedding_hold.enter_context(
+                        registry.hold(["embedding"], by="Full clean")
+                    )
+                    stack.enter_context(embedding_hold)
+                    release_embedding = embedding_hold.close
+            await _scan(full_cleanup, full_clean, release_embedding)
+    finally:
+        _scan_active = False
+        _full_clean_active = False
+        _poke_import()
+
+
+def _no_release() -> None:
+    return None
 
 
 async def _mark_full_clean_unfinished(data_dir: Optional[Path]) -> bool:
@@ -629,8 +725,13 @@ def _generated_output_fields(report: ReingestReport) -> Dict[str, Any]:
     }
 
 
-async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
+async def _scan(  # noqa: C901
+    full_cleanup: bool,
+    full_clean: bool,
+    release_embedding: Callable[[], None] = lambda: None,
+) -> None:
     """The scan itself; see ``_run_scan``."""
+    global _scan_error
     db = get_db()
     thumbnail_cache = get_thumbnail_cache()
     config = load_app_config()
@@ -638,6 +739,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
 
     scanner = Scanner(db, thumbnail_cache)
 
+    _set_progress(phase="starting")
     await ws_manager.broadcast("scan", "started", {"full_clean": full_clean})
 
     # Configured folders whose files could not be seen at some check of this
@@ -726,6 +828,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
             )
             return
         await asyncio.to_thread(db.truncate_all_data)
+        _set_progress(phase="full_clean")
         await ws_manager.broadcast(
             "scan",
             "phase_changed",
@@ -933,6 +1036,14 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
                 _note_missing(unavailable)
                 continue
 
+            _set_progress(
+                phase="scanning",
+                dir_current=dir_idx + 1,
+                dir_total=total_dirs,
+                current=None,
+                total=None,
+                file=None,
+            )
             await ws_manager.broadcast(
                 "scan",
                 "progress",
@@ -945,6 +1056,9 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
             )
 
             def progress_callback(current, total, file_path):
+                _set_progress(
+                    current=current, total=total, file=Path(str(file_path)).name
+                )
                 ws_manager.broadcast_sync(
                     "scan",
                     "file_progress",
@@ -992,6 +1106,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         # Stale cleanup
         stale_count = 0
         if full_cleanup:
+            _set_progress(phase="stale_cleanup", current=None, total=None, file=None)
             await ws_manager.broadcast(
                 "scan", "phase_changed", {"phase": "stale_cleanup"}
             )
@@ -1041,6 +1156,8 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         if completed and walked_folders:
             await _every_folder_scanned()
         await _apply_pending()
+        # The index build below would queue behind a hold on Embedding.
+        release_embedding()
 
         # Auto-trigger embedding build when:
         #   - the scan was not cancelled,
@@ -1071,6 +1188,7 @@ async def _scan(full_cleanup: bool, full_clean: bool) -> None:  # noqa: C901
         )
 
     except Exception as e:
+        _scan_error = type(e).__name__
         # Best-effort restore so users don't silently lose ratings on a
         # failed full-clean rescan.
         await _restore_taste_from_snapshot(completed=False)
