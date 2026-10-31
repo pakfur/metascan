@@ -16,7 +16,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
@@ -127,6 +127,32 @@ class ConfirmRequiredError(StoryboardError):
     """A destructive operation needs explicit confirmation from the caller."""
 
 
+class RunCancelled(StoryboardError):
+    """The owner stopped the run at a cancel point (between beats or panels).
+    The terminal ``*_error`` event carries its text, ``cancelled``."""
+
+    def __init__(self) -> None:
+        super().__init__("cancelled")
+
+
+async def _nothing_to_wait_for() -> None:
+    return None
+
+
+class _Run:
+    """One tracked synthesis, compile or compose run (Background activity)."""
+
+    __slots__ = ("storyboard_id", "kind", "done", "total", "cancelled", "calls")
+
+    def __init__(self, storyboard_id: int, kind: str) -> None:
+        self.storyboard_id = storyboard_id
+        self.kind = kind
+        self.done = 0
+        self.total = 0
+        self.cancelled = False
+        self.calls = 0  # VLM calls in flight
+
+
 class StoryboardRunner:
     """Orchestrates the storyboard lifecycle: parse -> synthesize -> generate.
 
@@ -174,6 +200,86 @@ class StoryboardRunner:
         # runner-wide lock is fine; a per-storyboard lock map would be
         # over-engineering for this.
         self._folder_lock = asyncio.Lock()
+        # Runs of synthesize / compile_video / compose_story, from the call
+        # to its end (queued behind _synth_lock included). The Storyboard
+        # background process reads them and injects the pause gate; this
+        # module never imports backend.
+        self._runs: List[_Run] = []
+        self.wait_unpaused: Callable[[], Awaitable[None]] = _nothing_to_wait_for
+        self.on_runs_changed: Callable[[], None] = lambda: None
+
+    # ---- run tracking ----------------------------------------------------
+
+    def active_runs(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "storyboard_id": r.storyboard_id,
+                "kind": r.kind,
+                "done": r.done,
+                "total": r.total,
+            }
+            for r in list(self._runs)
+        ]
+
+    def cancel_runs(self, storyboard_id: Optional[int] = None) -> int:
+        """Ask the runs (of one storyboard, or all) to stop at their next cancel
+        point. Synchronous, so a stop cannot be outrun by a gate opening."""
+        hit = 0
+        for r in list(self._runs):
+            if storyboard_id is None or r.storyboard_id == storyboard_id:
+                r.cancelled = True
+                hit += 1
+        return hit
+
+    def is_writing(self) -> bool:
+        """True while a VLM call of a run is in flight."""
+        return any(r.calls > 0 for r in list(self._runs))
+
+    async def unload_vlms(self) -> None:
+        await self._unload_vlms()
+
+    def _begin_run(self, storyboard_id: int, kind: str) -> _Run:
+        run = _Run(storyboard_id, kind)
+        self._runs.append(run)
+        self._runs_changed()
+        return run
+
+    def _end_run(self, run: _Run) -> None:
+        if run in self._runs:
+            self._runs.remove(run)
+        self._runs_changed()
+
+    def _runs_changed(self) -> None:
+        try:
+            self.on_runs_changed()
+        except Exception:
+            logger.debug("storyboard runs listener raised", exc_info=True)
+
+    def _progress(self, run: _Run, done: int, total: int) -> None:
+        run.done, run.total = done, total
+        self._runs_changed()
+
+    async def _checkpoint(self, run: _Run) -> None:
+        """The cancel point: between beats and panels, never mid-call. Also
+        where a pause waits."""
+        if run.cancelled:
+            raise RunCancelled()
+        await self.wait_unpaused()
+        if run.cancelled:
+            raise RunCancelled()
+
+    @staticmethod
+    async def _gather_run(coros: Sequence[Any]) -> List[Any]:
+        """``asyncio.gather``, except that a cancelled run takes its siblings
+        down with it instead of leaving them to finish in the background."""
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except RunCancelled:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     # ---- events ----------------------------------------------------------
 
@@ -387,32 +493,38 @@ class StoryboardRunner:
         confirm: bool = False,
     ) -> Dict[str, int]:
         stage = "outline"
+        run = self._begin_run(storyboard_id, "compose")
         try:
-            counts = await self._compose_locked(
-                storyboard_id,
-                stages=stages,
-                scene_ids=scene_ids,
-                panel_ids=panel_ids,
-                confirm=confirm,
-            )
-        except Exception as exc:
-            stage = getattr(exc, "_compose_stage", stage)
+            try:
+                counts = await self._compose_locked(
+                    storyboard_id,
+                    run,
+                    stages=stages,
+                    scene_ids=scene_ids,
+                    panel_ids=panel_ids,
+                    confirm=confirm,
+                )
+            except Exception as exc:
+                stage = getattr(exc, "_compose_stage", stage)
+                self._emit(
+                    "storyboard",
+                    "story_error",
+                    {"storyboard_id": storyboard_id, "stage": stage, "error": str(exc)},
+                )
+                raise
             self._emit(
                 "storyboard",
-                "story_error",
-                {"storyboard_id": storyboard_id, "stage": stage, "error": str(exc)},
+                "story_complete",
+                {"storyboard_id": storyboard_id, "counts": counts},
             )
-            raise
-        self._emit(
-            "storyboard",
-            "story_complete",
-            {"storyboard_id": storyboard_id, "counts": counts},
-        )
-        return counts
+            return counts
+        finally:
+            self._end_run(run)
 
     async def _compose_locked(
         self,
         storyboard_id: int,
+        run: _Run,
         *,
         stages: Sequence[str],
         scene_ids: Optional[List[int]],
@@ -443,7 +555,14 @@ class StoryboardRunner:
 
                 for current in run_stages:
                     n, stage_warnings, extra = await self._run_stage(
-                        current, vlm, sem, storyboard_id, scene_ids, panel_ids, confirm
+                        current,
+                        vlm,
+                        sem,
+                        storyboard_id,
+                        scene_ids,
+                        panel_ids,
+                        confirm,
+                        run,
                     )
                     counts[current] = n
                     self._emit(
@@ -470,6 +589,7 @@ class StoryboardRunner:
         scene_ids: Optional[List[int]],
         panel_ids: Optional[List[int]],
         purge: bool,
+        run: _Run,
     ) -> Tuple[int, List[str], Dict[str, Any]]:
         # `purge` mirrors the compose call's `confirm`: a user-confirmed
         # destructive recompose purges the destroyed tree's generated
@@ -491,6 +611,7 @@ class StoryboardRunner:
         scale = str(tree.get("story_scale") or "standard")
 
         def progress(done: int, total: int) -> None:
+            self._progress(run, done, total)
             self._emit(
                 "storyboard",
                 "story_progress",
@@ -513,6 +634,16 @@ class StoryboardRunner:
             are appended verbatim to the user turn (spec §6). Style rules
             never hard-fail — leftovers return as warnings.
             """
+            await self._checkpoint(run)
+            run.calls += 1
+            try:
+                return await _validated(unit, validate, lint, gen_kwargs)
+            finally:
+                run.calls -= 1
+
+        async def _validated(
+            unit: str, validate: Any, lint: Optional[Any], gen_kwargs: Dict[str, Any]
+        ) -> Any:
             raw = await vlm.generate_text(**gen_kwargs)
             try:
                 result = validate(raw)
@@ -677,10 +808,15 @@ class StoryboardRunner:
                     # whole shots+beats tree; the free-form VLM path below
                     # never runs for it (and the beats stage skips it).
                     template = templates.get_template(str(tid))
+                    await self._checkpoint(run)
                     async with sem:
-                        n_panels, _ = await self._template_scene(
-                            tree, scene, template, vlm, purge
-                        )
+                        run.calls += 1
+                        try:
+                            n_panels, _ = await self._template_scene(
+                                tree, scene, template, vlm, purge
+                            )
+                        finally:
+                            run.calls -= 1
                     await asyncio.to_thread(
                         self.db.update_scene,
                         scene["id"],
@@ -742,7 +878,7 @@ class StoryboardRunner:
                     shots_warnings.extend(warns)
                 return len(panels)
 
-            results = await asyncio.gather(*(_shots_for(i, s) for i, s in targets))
+            results = await self._gather_run([_shots_for(i, s) for i, s in targets])
             made = sum(results)
             return made, shots_warnings, {"template_scenes": template_scenes}
 
@@ -872,8 +1008,8 @@ class StoryboardRunner:
                     )
             return made
 
-        results = await asyncio.gather(
-            *(_beats_for_scene(s, ids) for s, ids in scene_work)
+        results = await self._gather_run(
+            [_beats_for_scene(s, ids) for s, ids in scene_work]
         )
         return sum(results), beats_warnings, {}
 
@@ -1043,27 +1179,32 @@ class StoryboardRunner:
         route) on failure. Unlike ``compose_story``, compile has no
         sub-stages, so the error event stamps nothing beyond the message.
         """
+        run = self._begin_run(storyboard_id, "compile")
         try:
-            counts = await self._compile_locked(
-                storyboard_id, panel_ids, force, deterministic_only
-            )
-        except Exception as exc:
+            try:
+                counts = await self._compile_locked(
+                    storyboard_id, run, panel_ids, force, deterministic_only
+                )
+            except Exception as exc:
+                self._emit(
+                    "storyboard",
+                    "compile_error",
+                    {"storyboard_id": storyboard_id, "error": str(exc)},
+                )
+                raise
             self._emit(
                 "storyboard",
-                "compile_error",
-                {"storyboard_id": storyboard_id, "error": str(exc)},
+                "compile_complete",
+                {"storyboard_id": storyboard_id, **counts},
             )
-            raise
-        self._emit(
-            "storyboard",
-            "compile_complete",
-            {"storyboard_id": storyboard_id, **counts},
-        )
-        return counts
+            return counts
+        finally:
+            self._end_run(run)
 
     async def _compile_locked(
         self,
         storyboard_id: int,
+        run: _Run,
         panel_ids: Optional[List[int]],
         force: bool,
         deterministic_only: bool,
@@ -1125,26 +1266,35 @@ class StoryboardRunner:
 
             progress_lock = asyncio.Lock()
             done = 0
+            self._progress(run, 0, total)
 
             async def _one(scene: Dict[str, Any], panel: Dict[str, Any]) -> None:
                 nonlocal done
+                await self._checkpoint(run)
                 subjects = self._panel_subjects(tree, panel)
                 try:
                     if sem is not None:
                         async with sem:
-                            doc, issues = await self._compile_panel(
-                                vlm,
-                                tree,
-                                scene,
-                                panel,
-                                subjects,
-                                mode,
-                                deterministic_only,
-                            )
+                            await self._checkpoint(run)
+                            run.calls += 1
+                            try:
+                                doc, issues = await self._compile_panel(
+                                    vlm,
+                                    tree,
+                                    scene,
+                                    panel,
+                                    subjects,
+                                    mode,
+                                    deterministic_only,
+                                )
+                            finally:
+                                run.calls -= 1
                     else:
                         doc, issues = await self._compile_panel(
                             vlm, tree, scene, panel, subjects, mode, deterministic_only
                         )
+                except RunCancelled:
+                    raise
                 except Exception as exc:
                     if not isinstance(
                         exc, (VlmError, TimeoutError, RuntimeError, h3.H3Error)
@@ -1166,6 +1316,7 @@ class StoryboardRunner:
                         done += 1
                         counts["failed"] += 1
                         done_snapshot = done
+                    self._progress(run, done_snapshot, total)
                     self._emit(
                         "storyboard",
                         "compile_progress",
@@ -1193,6 +1344,7 @@ class StoryboardRunner:
                     done += 1
                     counts["failed" if has_error else "compiled"] += 1
                     done_snapshot = done
+                self._progress(run, done_snapshot, total)
                 self._emit(
                     "storyboard",
                     "compile_progress",
@@ -1204,7 +1356,7 @@ class StoryboardRunner:
                     },
                 )
 
-            await asyncio.gather(*(_one(scene, panel) for scene, panel in work))
+            await self._gather_run([_one(scene, panel) for scene, panel in work])
             return counts
 
     async def _compile_panel(
@@ -1348,25 +1500,32 @@ class StoryboardRunner:
         caller that isn't going through the fire-and-forget route) on
         failure.
         """
+        run = self._begin_run(storyboard_id, "synthesis")
         try:
-            counts = await self._synthesize_locked(storyboard_id, beat_ids, force)
-        except Exception as exc:
+            try:
+                counts = await self._synthesize_locked(
+                    storyboard_id, run, beat_ids, force
+                )
+            except Exception as exc:
+                self._emit(
+                    "storyboard",
+                    "synthesis_error",
+                    {"storyboard_id": storyboard_id, "error": str(exc)},
+                )
+                raise
             self._emit(
                 "storyboard",
-                "synthesis_error",
-                {"storyboard_id": storyboard_id, "error": str(exc)},
+                "synthesis_complete",
+                {"storyboard_id": storyboard_id, **counts},
             )
-            raise
-        self._emit(
-            "storyboard",
-            "synthesis_complete",
-            {"storyboard_id": storyboard_id, **counts},
-        )
-        return counts
+            return counts
+        finally:
+            self._end_run(run)
 
     async def _synthesize_locked(
         self,
         storyboard_id: int,
+        run: _Run,
         beat_ids: Optional[List[int]] = None,
         force: bool = False,
     ) -> Dict[str, int]:
@@ -1415,11 +1574,13 @@ class StoryboardRunner:
 
             progress_lock = asyncio.Lock()
             done = 0
+            self._progress(run, 0, total)
 
             async def _one(
                 scene: Dict[str, Any], panel: Dict[str, Any], beat: Dict[str, Any]
             ) -> None:
                 nonlocal done
+                await self._checkpoint(run)
                 subjects = [
                     subjects_by_id[sid]
                     for sid in beat["subject_ids"]
@@ -1432,6 +1593,8 @@ class StoryboardRunner:
                     assert sem is not None
                     system, user = build_render_messages(brief, tree["target_model"])
                     async with sem:
+                        await self._checkpoint(run)
+                        run.calls += 1
                         try:
                             text = await vlm.generate_text(
                                 system_prompt=system,
@@ -1444,6 +1607,8 @@ class StoryboardRunner:
                         except VlmError:
                             text = brief
                             source = "brief"
+                        finally:
+                            run.calls -= 1
                 prompt = finalize_prompt(text, tree.get("style_block"))
                 await asyncio.to_thread(
                     self.db.update_beat,
@@ -1457,6 +1622,7 @@ class StoryboardRunner:
                     done += 1
                     counts["synthesized" if source == "llm" else "fallback"] += 1
                     done_snapshot = done
+                self._progress(run, done_snapshot, total)
                 self._emit(
                     "storyboard",
                     "synthesis_progress",
@@ -1470,8 +1636,8 @@ class StoryboardRunner:
                     },
                 )
 
-            await asyncio.gather(
-                *(_one(scene, panel, beat) for scene, panel, beat in work)
+            await self._gather_run(
+                [_one(scene, panel, beat) for scene, panel, beat in work]
             )
             return counts
 
@@ -2252,4 +2418,9 @@ class StoryboardRunner:
             await asyncio.gather(*self._ingest_tasks, return_exceptions=True)
 
 
-__all__ = ["StoryboardRunner", "StoryboardError", "ConfirmRequiredError"]
+__all__ = [
+    "StoryboardRunner",
+    "StoryboardError",
+    "ConfirmRequiredError",
+    "RunCancelled",
+]

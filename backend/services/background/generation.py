@@ -1,4 +1,4 @@
-"""The T2I and I2V processes: batches behind the registry (spec 6.2, 6.3, 7).
+"""The T2I, I2V and Storyboard processes: batches behind the registry (spec 6.2, 6.3, 7).
 
 Pause is a gate, not a cancel. ``ComfyClient.set_source_paused`` keeps the
 source's queued jobs in the client's queue (order kept, other sources still
@@ -75,6 +75,12 @@ class _GenerationProcess:
         """(ended, total, phase word) over the active batches; None when none."""
         raise NotImplementedError
 
+    def _activity(self, ended: int, total: int, phase: str) -> str:
+        return f"{self.noun} {min(ended + 1, total)} of {total}, {phase}"
+
+    async def _cancel_batch(self, batch_id: str) -> None:
+        await self._runner.cancel_batch(batch_id)
+
     # protocol ---------------------------------------------------------------
     def capabilities(self) -> Capabilities:
         return Capabilities(can_start=True, can_pause=True, can_stop=True)
@@ -99,7 +105,7 @@ class _GenerationProcess:
         if counts is None:
             return ProcessReport(State.IDLE, None, "No batches")
         ended, total, phase = counts
-        text = f"{self.noun} {min(ended + 1, total)} of {total}, {phase}"
+        text = self._activity(ended, total, phase)
         # Winding down is harmless while nothing suspends the process, and it
         # keeps the holds from dropping in the gap before pause() is reached.
         return ProcessReport(
@@ -139,7 +145,7 @@ class _GenerationProcess:
         self._open_gate()  # whatever is left must be free to be cancelled
         for batch_id in self._batch_ids():
             try:
-                await self._runner.cancel_batch(batch_id)
+                await self._cancel_batch(batch_id)
             except Exception as exc:
                 # Over already, or unknown: nothing left to stop.
                 logger.debug("%s stop: %s on %s", self.id, type(exc).__name__, batch_id)
@@ -249,3 +255,56 @@ class I2vProcess(_GenerationProcess):
             return None
         ended, total, phase = self._runner.progress_counts()
         return ended, total, "writing prompts" if phase == "writing" else phase
+
+
+class StoryboardProcess(_GenerationProcess):
+    """Synthesis, compile, compose and the story engine, tracked as runs by
+    StoryboardRunner. Pause waits at the runner's next cancel point and holds
+    back the storyboard's ComfyUI jobs; stop cancels the runs there and the
+    queued and running jobs of their storyboards. Counts only in the activity
+    line, never story or prompt text."""
+
+    id = "storyboard"
+    label = "Storyboard"
+    order = 70
+    noun = "Storyboard"
+    unit = "steps"
+
+    _NOUNS = {"synthesis": "Synthesis", "compile": "Compile", "compose": "Story"}
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._runner.on_runs_changed = self.poke
+
+    def _batch_ids(self) -> List[str]:
+        seen: List[str] = []
+        for r in self._runner.active_runs():
+            sid = str(r["storyboard_id"])
+            if sid not in seen:
+                seen.append(sid)
+        return seen
+
+    def _counts(self) -> Optional[Tuple[int, int, str]]:
+        runs = self._runner.active_runs()
+        if not runs:
+            return None
+        ended = sum(int(r["done"]) for r in runs)
+        total = sum(int(r["total"]) for r in runs)
+        return ended, total, self._NOUNS.get(str(runs[0]["kind"]), "Storyboard")
+
+    def _activity(self, ended: int, total: int, phase: str) -> str:
+        # ``phase`` is the first run's kind word here.
+        if not total:
+            return f"{phase} starting"
+        return f"{phase} {min(ended + 1, total)} of {total}"
+
+    async def _cancel_batch(self, batch_id: str) -> None:
+        sid = int(batch_id)
+        self._runner.cancel_runs(sid)
+        await self._runner.cancel(sid)
+
+    async def stop(self) -> None:
+        # Mark every run before the gate opens, so a run released from its
+        # pause hits the cancel point rather than carrying on.
+        self._runner.cancel_runs()
+        await super().stop()

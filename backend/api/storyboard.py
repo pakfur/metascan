@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.config import load_app_config
-from backend.dependencies import get_db
+from backend.dependencies import get_db, get_generation_process
 from backend.ws.manager import ws_manager
 from backend.services.comfy_service import ComfyService
 from backend.services.storyboard_service import (
@@ -158,6 +158,14 @@ def storyboard_busy() -> bool:
     started from these routes is still running -- writer training refuses
     to take the GPU meanwhile."""
     return any(not t.done() for t in _background_tasks)
+
+
+async def _notify_process() -> None:
+    """The owner is starting a storyboard run: that clears a stop."""
+    process = get_generation_process("storyboard")
+    if process is not None:
+        await process.owner_batch_starting()
+        process.poke()
 
 
 def _require_runner() -> Any:
@@ -589,6 +597,7 @@ async def synthesize_storyboard(
     else:
         total = len(all_beat_ids)
 
+    await _notify_process()
     task = asyncio.create_task(
         runner.synthesize(storyboard_id, beat_ids=body.beat_ids, force=body.force)
     )
@@ -630,6 +639,7 @@ async def compile_storyboard(
             continue
         total += 1
 
+    await _notify_process()
     task = asyncio.create_task(
         runner.compile_video(storyboard_id, panel_ids=body.panel_ids, force=body.force)
     )
@@ -703,6 +713,7 @@ async def compose_storyboard(
     except StoryboardError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    await _notify_process()
     task = asyncio.create_task(
         runner.compose_story(
             storyboard_id,
