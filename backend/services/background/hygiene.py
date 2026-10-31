@@ -5,11 +5,12 @@ A pass runs the registered checks in order. It starts by itself only when
 nothing else works (no other process ``running``), the owner has not changed
 anything for ``IDLE_AFTER_S``, and the last complete pass is
 ``HYGIENE_INTERVAL_S`` old; the first pass after a start has no interval.
-Play runs one now and ignores both timers (and a process that is running: a
-manual pass is the owner's call). Hygiene is in nobody's ``holds``: a process
-starting mid-pass makes an automatic pass stop at the next row or check
-through ``HygieneContext.should_stop``, and the next quiet moment starts a
-new pass. Pause and stop land the same way, between rows or checks; a hold
+Play ignores both timers but never runs alongside another process
+(background work never delays the owner): it begins as soon as nothing else
+is running, and until then the panel is ``waiting``. Hygiene is in nobody's
+``holds``: a process starting mid-pass makes the pass, a manual one too, stop
+at the next row or check through ``HygieneContext.should_stop``; an automatic
+pass starts anew at the next quiet moment, a manual one stays pending. Pause and stop land the same way, between rows or checks; a hold
 (Full clean) arrives as a pause.
 
 A check that raises fails the pass with the exception's type only; later
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 HYGIENE_INTERVAL_S = 1800.0
 POLL_S = 5.0
 ACTIVITY_MAX = 120
+OTHERS_CACHE_S = 1.0  # should_stop() is asked per row
 
 
 @dataclass
@@ -106,7 +108,9 @@ class HygieneProcess:
         self._poll_s = poll_s
 
         self._pass: Optional[asyncio.Task] = None
-        self._manual = False
+        self._manual_pending = False  # Play pressed, not yet finished
+        self._waiting_for = ""
+        self._others: Tuple[float, List[str]] = (float("-inf"), [])
         self._halted = registry.persisted_intent(self.id) != "none"
         self._closed = False
         self._error: Optional[str] = None
@@ -119,7 +123,11 @@ class HygieneProcess:
     # protocol ----------------------------------------------------------
     def capabilities(self) -> Capabilities:
         running = self._running()
-        return Capabilities(can_start=not running, can_pause=True, can_stop=running)
+        return Capabilities(
+            can_start=not (running or self._manual_pending),
+            can_pause=True,
+            can_stop=running or self._manual_pending,
+        )
 
     def report(self) -> ProcessReport:
         if self._running():
@@ -131,6 +139,10 @@ class HygieneProcess:
                     winding_down=True,
                 )
             return ProcessReport(State.RUNNING, self._progress, self._activity)
+        if self._manual_pending and not self._halted:
+            return ProcessReport(
+                State.WAITING, None, f"Waiting for {self._waiting_for or 'other work'}"
+            )
         if self._error:
             return ProcessReport(
                 State.FAILED, None, "Library check failed", error=self._error
@@ -143,7 +155,11 @@ class HygieneProcess:
         """The owner's play: a pass now, ignoring both timers."""
         self._halted = False
         self._error = None
-        self._begin(manual=True)
+        if self._running():
+            return
+        self._manual_pending = True
+        if not self._begin_if_clear():
+            self._notify()
 
     async def pause(self) -> None:
         self._halted = True
@@ -155,6 +171,7 @@ class HygieneProcess:
 
     async def stop(self) -> None:
         self._halted = True
+        self._manual_pending = False
         self._notify()
 
     async def aclose(self) -> None:
@@ -183,28 +200,47 @@ class HygieneProcess:
     def _running(self) -> bool:
         return self._pass is not None and not self._pass.done()
 
-    def _others_running(self) -> bool:
-        return any(
-            s.state == State.RUNNING and s.id != self.id
-            for s in self._registry.statuses()
-        )
+    def _running_others(self, fresh: bool = False) -> List[str]:
+        """Labels of the other processes that are running. The registry
+        snapshots every adapter, so the answer is kept ``OTHERS_CACHE_S``
+        unless ``fresh``."""
+        now = self._clock()
+        if fresh or now - self._others[0] >= OTHERS_CACHE_S:
+            labels = [
+                s.label
+                for s in self._registry.statuses()
+                if s.state == State.RUNNING and s.id != self.id
+            ]
+            self._others = (now, labels)
+        return self._others[1]
+
+    def _begin_if_clear(self) -> bool:
+        others = self._running_others(fresh=True)
+        self._waiting_for = ", ".join(others)
+        if others:
+            return False
+        self._begin()
+        return True
 
     def tick(self) -> bool:
-        """Start an automatic pass when the rule allows it. True if it did."""
+        """Start a pass when the rule allows it. True if it did."""
         if self._running() or self._closed or self._halted:
             return False
+        if self._registry.blocked(self.id):
+            return False
+        if self._manual_pending:
+            return self._begin_if_clear()
         now = self._clock()
         if now < self._next_ok_at or self._idle.idle_for() < self._idle_after_s:
             return False
-        if self._registry.blocked(self.id) or self._others_running():
+        if self._running_others(fresh=True):
             return False
-        self._begin(manual=False)
+        self._begin()
         return True
 
-    def _begin(self, manual: bool) -> None:
+    def _begin(self) -> None:
         if self._running() or self._closed:
             return
-        self._manual = manual
         self._error = None
         self._activity = "Starting"
         self._progress = None
@@ -214,7 +250,7 @@ class HygieneProcess:
     def should_stop(self) -> bool:
         if self._closed or self._halted:
             return True
-        return not self._manual and self._others_running()
+        return bool(self._running_others())
 
     # the pass ----------------------------------------------------------
     def _context(self) -> HygieneContext:
@@ -243,7 +279,8 @@ class HygieneProcess:
                 self._set_activity(f"Checking {check.name}")
                 await check.run(ctx)
             else:
-                complete = True
+                # cut short during the last check: not complete
+                complete = not self.should_stop()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -253,6 +290,7 @@ class HygieneProcess:
             if complete:
                 self._ever_complete = True
             if complete or self._error:
+                self._manual_pending = False
                 self._next_ok_at = self._clock() + self._interval_s
             self._pass = None
             self._progress = None

@@ -76,9 +76,9 @@ class Check:
 
 
 class Rig:
-    def __init__(self, tmp_path, checks=(), persisted=None):
-        self.clock = Clock()
-        self.tracker = IdleTracker(self.clock)
+    def __init__(self, tmp_path, checks=(), shared=None):
+        self.clock = shared.clock if shared else Clock()
+        self.tracker = shared.tracker if shared else IdleTracker(self.clock)
         self.path = tmp_path / "bg.json"
         self.registry = ProcessRegistry(self.path, lambda st: None)
         self.other = Other()
@@ -95,6 +95,10 @@ class Rig:
         )
         self.registry.register(self.proc)
 
+    async def aclose(self):
+        await self.proc.aclose()
+        await self.registry.aclose()
+
     def quiet(self, s=IDLE_AFTER_S):
         self.clock.advance(s)
 
@@ -104,8 +108,22 @@ class Rig:
 
 
 @pytest.fixture
-def rig(tmp_path):
-    r = Rig(tmp_path)
+async def mk(tmp_path):
+    made = []
+
+    def make(shared=None):
+        r = Rig(tmp_path, shared=shared)
+        made.append(r)
+        return r
+
+    yield make
+    for r in made:
+        await r.aclose()
+
+
+@pytest.fixture
+def rig(mk):
+    r = mk()
     r.proc.checks = [Check("a", r.log), Check("b", r.log)]
     return r
 
@@ -169,8 +187,8 @@ async def test_play_runs_now_ignoring_both_timers(rig):
     assert rig.log == ["a", "b", "a", "b"]
 
 
-async def test_pause_lands_between_checks(tmp_path):
-    r = Rig(tmp_path)
+async def test_pause_lands_between_checks(mk):
+    r = mk()
     gate = asyncio.Event()
     r.proc.checks = [Check("a", r.log, gate=gate), Check("b", r.log)]
     r.quiet()
@@ -191,14 +209,15 @@ async def test_pause_lands_between_checks(tmp_path):
     assert r.log == ["a", "a", "b"]
 
 
-async def test_a_process_starting_mid_pass_stops_it_between_checks(tmp_path):
-    r = Rig(tmp_path)
+async def test_a_process_starting_mid_pass_stops_it_between_checks(mk):
+    r = mk()
     gate = asyncio.Event()
     r.proc.checks = [Check("a", r.log, gate=gate), Check("b", r.log)]
     r.quiet()
     assert r.proc.tick()
     await asyncio.sleep(0)
     r.other.state = State.RUNNING
+    r.quiet(1)  # past the 1 s cache of should_stop
     gate.set()
     await r.proc.wait_pass()
     assert r.log == ["a"]
@@ -222,8 +241,8 @@ async def test_a_held_hygiene_stays_paused_until_released(rig):
     await rig.run_pass()
 
 
-async def test_a_stop_stays_stopped_across_a_restart(tmp_path):
-    r = Rig(tmp_path)
+async def test_a_stop_stays_stopped_across_a_restart(mk):
+    r = mk()
     gate = asyncio.Event()
     r.proc.checks = [Check("a", r.log, gate=gate), Check("b", r.log)]
     r.quiet()
@@ -236,21 +255,8 @@ async def test_a_stop_stays_stopped_across_a_restart(tmp_path):
     assert r.registry.status("hygiene").state == State.STOPPED
     r.quiet(HYGIENE_INTERVAL_S)
     assert not r.proc.tick()
-    r2 = Rig.__new__(Rig)
-    r2.clock = r.clock
-    r2.tracker = r.tracker
-    r2.registry = ProcessRegistry(r.path, lambda st: None)
-    r2.log = []
-    r2.proc = HygieneProcess(
-        r2.registry,
-        r2.tracker,
-        get_db=lambda: None,
-        get_config=lambda: {},
-        get_data_dir=lambda db: None,
-        checks=[Check("a", r2.log)],
-        clock=r2.clock,
-    )
-    r2.registry.register(r2.proc)
+    r2 = mk(shared=r)  # a restart: a new registry reads the same state file
+    r2.proc.checks = [Check("a", r2.log)]
     assert not r2.proc.tick()
     assert r2.registry.status("hygiene").state == State.STOPPED
     await r2.registry.command("hygiene", "start")  # the owner's play clears it
@@ -258,8 +264,8 @@ async def test_a_stop_stays_stopped_across_a_restart(tmp_path):
     assert r2.log == ["a"]
 
 
-async def test_a_raising_check_fails_the_pass_with_the_type_only(tmp_path):
-    r = Rig(tmp_path)
+async def test_a_raising_check_fails_the_pass_with_the_type_only(mk):
+    r = mk()
     r.proc.checks = [
         Check("a", r.log, raises=ValueError("/secret/path")),
         Check("b", r.log),
@@ -291,8 +297,8 @@ async def test_activity_never_holds_a_full_path(rig):
     await rig.proc.wait_pass()
 
 
-async def test_no_checks_reads_in_sync_after_a_pass(tmp_path):
-    r = Rig(tmp_path)
+async def test_no_checks_reads_in_sync_after_a_pass(mk):
+    r = mk()
     st = r.registry.status("hygiene")
     assert (st.order, st.label, st.activity) == (
         80,
@@ -338,3 +344,124 @@ def test_finish_clears_the_marker_only_for_a_completed_walk(finish):
 def test_finish_keeps_the_marker_otherwise(finish, report):
     scan_api.finish_ordinary_pass(report)
     assert finish == ["apply"]
+
+
+# ---- Play never runs alongside other work ----------------------------------
+
+
+async def test_play_waits_for_a_running_process_then_runs(rig):
+    rig.other.state = State.RUNNING
+    await rig.registry.command("hygiene", "start")
+    st = rig.registry.status("hygiene")
+    assert (st.state, st.activity) == (State.WAITING, "Waiting for embedding")
+    assert st.capabilities.can_stop and not st.capabilities.can_start
+    assert not rig.proc.tick()  # still busy; no idle needed, no pass yet
+    assert rig.log == []
+    rig.other.state = State.IDLE
+    await rig.run_pass()  # not idle, inside no interval: Play ignores both
+    assert rig.log == ["a", "b"]
+    assert rig.registry.status("hygiene").activity == "In sync"
+
+
+async def test_a_process_starting_mid_manual_pass_stops_it_and_it_resumes(mk):
+    r = mk()
+    gate = asyncio.Event()
+    r.proc.checks = [Check("a", r.log, gate=gate), Check("b", r.log)]
+    await r.registry.command("hygiene", "start")
+    await asyncio.sleep(0)
+    assert r.proc._running()
+    r.other.state = State.RUNNING
+    r.quiet(1)
+    gate.set()
+    await r.proc.wait_pass()
+    assert r.log == ["a"]  # stopped between checks
+    assert r.registry.status("hygiene").state == State.WAITING  # still pending
+    r.other.state = State.IDLE
+    await r.run_pass()
+    assert r.log == ["a", "a", "b"]
+
+
+async def test_stop_clears_a_pending_play(rig):
+    rig.other.state = State.RUNNING
+    await rig.registry.command("hygiene", "start")
+    await rig.registry.command("hygiene", "stop")
+    rig.other.state = State.IDLE
+    rig.quiet(HYGIENE_INTERVAL_S)
+    assert not rig.proc.tick()
+    assert rig.registry.status("hygiene").state == State.STOPPED
+    assert rig.log == []
+
+
+async def test_a_pass_cut_short_after_the_last_check_is_not_complete(mk):
+    r = mk()
+    gate = asyncio.Event()
+    r.proc.checks = [Check("a", r.log, gate=gate)]
+    r.quiet()
+    assert r.proc.tick()
+    await asyncio.sleep(0)
+    r.other.state = State.RUNNING
+    r.quiet(1)
+    gate.set()
+    await r.proc.wait_pass()
+    assert r.registry.status("hygiene").activity == "Waiting for a quiet moment"
+    r.other.state = State.IDLE
+    assert r.proc.tick()  # no interval: the pass did not complete
+    await r.proc.wait_pass()
+
+
+async def test_a_winding_down_process_stops_a_pass(mk):
+    r = mk()
+    gate = asyncio.Event()
+    r.proc.checks = [Check("a", r.log, gate=gate), Check("b", r.log)]
+    r.quiet()
+    assert r.proc.tick()
+    await asyncio.sleep(0)
+    r.other.report = lambda: ProcessReport(
+        State.RUNNING, None, "Saving", winding_down=True
+    )
+    r.quiet(1)
+    gate.set()
+    await r.proc.wait_pass()
+    assert r.log == ["a"]
+
+
+async def test_a_polling_only_import_does_not_stop_a_pass(tmp_path, mk):
+    r = mk()
+    r.other.report = lambda: ProcessReport(State.IDLE, None, "Watching 2 folders")
+    gate = asyncio.Event()
+    r.proc.checks = [Check("a", r.log, gate=gate), Check("b", r.log)]
+    r.quiet()
+    assert r.proc.tick()
+    await asyncio.sleep(0)
+    r.quiet(2)
+    gate.set()
+    await r.proc.wait_pass()
+    assert r.log == ["a", "b"]
+
+
+async def test_should_stop_snapshots_the_registry_once_a_second(rig):
+    calls = []
+    real = rig.registry.statuses
+    rig.registry.statuses = lambda: calls.append(1) or real()
+    rig.proc.tick()  # one fresh read
+    n = len(calls)
+    for _ in range(1000):
+        rig.proc.should_stop()
+    assert len(calls) <= n + 1
+    rig.quiet(1)
+    rig.proc.should_stop()
+    assert len(calls) <= n + 2
+
+
+async def test_aclose_stops_the_poll_and_the_pass(mk):
+    r = mk()
+    gate = asyncio.Event()
+    r.proc.checks = [Check("a", r.log, gate=gate)]
+    r.proc.start_loop()
+    r.quiet()
+    assert r.proc.tick()
+    await asyncio.sleep(0)
+    loop_task, pass_task = r.proc._loop_task, r.proc._pass
+    await r.proc.aclose()
+    assert loop_task.done() and pass_task.done()
+    assert not r.proc.tick()
