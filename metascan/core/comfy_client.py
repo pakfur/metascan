@@ -588,6 +588,26 @@ class ComfyClient:
         queue, being posted or running in ComfyUI)."""
         return sum(1 for j in self._running if self._job_source.get(j) == source)
 
+    def source_job_count(self, source: str) -> int:
+        """Queued plus running jobs of ``source``."""
+        return sum(
+            1
+            for j in (*self._queue, *self._running)
+            if self._job_source.get(j) == source
+        )
+
+    async def cancel_source(self, source: str) -> int:
+        """Cancel every queued and running job of ``source`` (``cancel``'s path,
+        gated or not). Returns how many were asked."""
+        ids = [
+            j
+            for j in (*self._queue, *self._running)
+            if self._job_source.get(j) == source
+        ]
+        for job_id in ids:
+            await self.cancel(job_id)
+        return len(ids)
+
     def has_gated_jobs(self, source: str) -> bool:
         """True when jobs of ``source`` sit in the queue (held by its gate)."""
         return any(self._job_source.get(j) == source for j in self._queue)

@@ -9,6 +9,7 @@ multiplexed WebSocket.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -142,7 +143,17 @@ async def _nothing_to_wait_for() -> None:
 class _Run:
     """One tracked synthesis, compile or compose run (Background activity)."""
 
-    __slots__ = ("storyboard_id", "kind", "done", "total", "cancelled", "calls")
+    __slots__ = (
+        "storyboard_id",
+        "kind",
+        "done",
+        "total",
+        "cancelled",
+        "calls",
+        "holds_lock",
+        "relock",
+        "reensure",
+    )
 
     def __init__(self, storyboard_id: int, kind: str) -> None:
         self.storyboard_id = storyboard_id
@@ -151,6 +162,10 @@ class _Run:
         self.total = 0
         self.cancelled = False
         self.calls = 0  # VLM calls in flight
+        self.holds_lock = False  # holds the runner's _synth_lock
+        self.relock = asyncio.Lock()  # serialises re-taking it after a pause
+        # Brings the run's VLM back after a pause (resume may have unloaded it).
+        self.reensure: Optional[Callable[[], Awaitable[None]]] = None
 
 
 class StoryboardRunner:
@@ -190,6 +205,11 @@ class StoryboardRunner:
         # the same (or another) storyboard would double-write prompts if
         # interleaved with itself; simplest safe answer is a single lock.
         self._synth_lock = asyncio.Lock()
+        # Runs are serialised by _run_lock, which a paused run keeps. A run
+        # holds _synth_lock (the VLM-unload exclusion generate() relies on)
+        # except while it waits out a pause with no VLM call in flight: an
+        # owner's generate() must never wait on a paused background run.
+        self._run_lock = asyncio.Lock()
         # Guards the folder-ensure read-check-create-update sequence in
         # generate(). Two concurrent generate() calls for the same
         # storyboard would otherwise both observe folder_id is None, both
@@ -207,6 +227,7 @@ class StoryboardRunner:
         self._runs: List[_Run] = []
         self.wait_unpaused: Callable[[], Awaitable[None]] = _nothing_to_wait_for
         self.on_runs_changed: Callable[[], None] = lambda: None
+        self.is_paused: Callable[[], bool] = lambda: False
 
     # ---- run tracking ----------------------------------------------------
 
@@ -261,12 +282,44 @@ class StoryboardRunner:
 
     async def _checkpoint(self, run: _Run) -> None:
         """The cancel point: between beats and panels, never mid-call. Also
-        where a pause waits."""
+        where a pause waits: with no call of the run in flight it lets go of
+        _synth_lock for the wait, then re-takes it and brings the VLM back
+        (a resume may have unloaded it)."""
         if run.cancelled:
             raise RunCancelled()
+        if not self.is_paused():
+            await self.wait_unpaused()
+            if run.cancelled:
+                raise RunCancelled()
+            return
+        if run.holds_lock and run.calls == 0:
+            self._synth_lock.release()
+            run.holds_lock = False
         await self.wait_unpaused()
+        async with run.relock:
+            if not run.holds_lock:
+                await self._synth_lock.acquire()
+                run.holds_lock = True
         if run.cancelled:
             raise RunCancelled()
+        if run.reensure is not None:
+            await run.reensure()
+
+    @contextlib.asynccontextmanager
+    async def _run_guard(self, run: _Run) -> Any:
+        """One run at a time, holding _synth_lock (see _checkpoint). The first
+        cancel point comes before any work, so a run stopped while queued
+        never reads the tree or loads the VLM."""
+        async with self._run_lock:
+            await self._synth_lock.acquire()
+            run.holds_lock = True
+            try:
+                await self._checkpoint(run)
+                yield
+            finally:
+                if run.holds_lock:
+                    self._synth_lock.release()
+                    run.holds_lock = False
 
     @staticmethod
     async def _gather_run(coros: Sequence[Any]) -> List[Any]:
@@ -542,9 +595,10 @@ class StoryboardRunner:
         counts: Dict[str, int] = {}
         current = "outline"
         try:
-            async with self._synth_lock:
+            async with self._run_guard(run):
                 model_id = self._pick_vlm_model(vlm)
                 await vlm.ensure_started(model_id)
+                run.reensure = lambda: vlm.ensure_started(model_id)
                 from metascan.core.vlm_models import REGISTRY
 
                 slots = 2
@@ -1209,7 +1263,7 @@ class StoryboardRunner:
         force: bool,
         deterministic_only: bool,
     ) -> Dict[str, int]:
-        async with self._synth_lock:
+        async with self._run_guard(run):
             tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
             if tree is None:
                 raise StoryboardError(f"no storyboard with id {storyboard_id}")
@@ -1261,6 +1315,7 @@ class StoryboardRunner:
             if vlm is not None:
                 model_id = self._pick_vlm_model(vlm)
                 await vlm.ensure_started(model_id)
+                run.reensure = lambda: vlm.ensure_started(model_id)
                 slots = REGISTRY[model_id].parallel_slots if model_id in REGISTRY else 2
                 sem = asyncio.Semaphore(slots)
 
@@ -1529,7 +1584,7 @@ class StoryboardRunner:
         beat_ids: Optional[List[int]] = None,
         force: bool = False,
     ) -> Dict[str, int]:
-        async with self._synth_lock:
+        async with self._run_guard(run):
             tree = await asyncio.to_thread(self.db.get_storyboard_tree, storyboard_id)
             if tree is None:
                 raise StoryboardError(f"no storyboard with id {storyboard_id}")
@@ -1569,6 +1624,7 @@ class StoryboardRunner:
             if vlm is not None:
                 model_id = self._pick_vlm_model(vlm)
                 await vlm.ensure_started(model_id)
+                run.reensure = lambda: vlm.ensure_started(model_id)
                 slots = REGISTRY[model_id].parallel_slots if model_id in REGISTRY else 2
                 sem = asyncio.Semaphore(slots)
 

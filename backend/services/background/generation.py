@@ -275,6 +275,14 @@ class StoryboardProcess(_GenerationProcess):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._runner.on_runs_changed = self.poke
+        self._runner.is_paused = lambda: not self._gate.is_set()
+
+    def _job_count(self) -> int:
+        try:
+            return int(self._comfy.source_job_count(self.id))
+        except Exception:
+            logger.debug("%s job count failed", self.id, exc_info=True)
+            return 0
 
     def _batch_ids(self) -> List[str]:
         seen: List[str] = []
@@ -287,13 +295,16 @@ class StoryboardProcess(_GenerationProcess):
     def _counts(self) -> Optional[Tuple[int, int, str]]:
         runs = self._runner.active_runs()
         if not runs:
-            return None
+            # generate / generate_story jobs belong to no run.
+            return (0, 0, "Rendering") if self._job_count() else None
         ended = sum(int(r["done"]) for r in runs)
         total = sum(int(r["total"]) for r in runs)
         return ended, total, self._NOUNS.get(str(runs[0]["kind"]), "Storyboard")
 
     def _activity(self, ended: int, total: int, phase: str) -> str:
         # ``phase`` is the first run's kind word here.
+        if phase == "Rendering":
+            return f"Rendering {self._job_count()} jobs"
         if not total:
             return f"{phase} starting"
         return f"{phase} {min(ended + 1, total)} of {total}"
@@ -307,4 +318,10 @@ class StoryboardProcess(_GenerationProcess):
         # Mark every run before the gate opens, so a run released from its
         # pause hits the cancel point rather than carrying on.
         self._runner.cancel_runs()
+        # The storyboard's own jobs belong to no run, and a paused gate must
+        # not let them render on Stop: cancel them before it opens.
+        try:
+            await self._comfy.cancel_source(self.id)
+        except Exception:
+            logger.warning("%s: cancelling its jobs failed", self.id, exc_info=True)
         await super().stop()

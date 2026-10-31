@@ -55,6 +55,12 @@ class Comfy:
     def has_gated_jobs(self, source):
         return self.gated_jobs
 
+    def source_job_count(self, source):
+        return 0
+
+    async def cancel_source(self, source):
+        return 0
+
 
 class T2iRunner:
     def __init__(self):

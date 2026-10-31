@@ -9,6 +9,7 @@ from backend.services.background.protocol import State
 from backend.services.background.registry import ProcessRegistry
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.storyboard_runner import RunCancelled, StoryboardRunner
+from metascan.core.vlm_client import VlmError
 from tests.test_background_generation import Comfy, Stub, until
 from tests import test_storyboard_compile as compile_t
 from tests import test_storyboard_compose as compose_t
@@ -29,14 +30,19 @@ class BlockingVlm:
             self.release.set()
         self.started = 0
         self.finished = 0
+        self.ensures = 0
+        self.loaded = False
 
     async def ensure_started(self, model_id):
-        pass
+        self.ensures += 1
+        self.loaded = True
 
     async def shutdown(self):
-        pass
+        self.loaded = False
 
     async def generate_text(self, **kw):
+        if not self.loaded and self.inner is None:
+            raise VlmError("not loaded")
         self.started += 1
         await self.release.wait()
         self.finished += 1
@@ -217,3 +223,89 @@ async def test_an_owner_run_clears_stopped(env):
     assert registry.status("storyboard").state == State.RUNNING
     vlm.release.set()
     await task
+
+
+class OrderComfy(Comfy):
+    """Records whether the gate was still shut when the source was cancelled."""
+
+    def __init__(self):
+        super().__init__()
+        self.jobs = 0
+        self.cancel_calls = []
+
+    def source_job_count(self, source):
+        return self.jobs
+
+    async def cancel_source(self, source):
+        self.cancel_calls.append((source, "storyboard" in self.gated))
+        self.jobs = 0
+        return 1
+
+
+async def test_stop_cancels_the_sources_jobs_before_the_gate_opens(tmp_path, db):
+    vlm = BlockingVlm()
+    runner, events = make(db, tmp_path, vlm)
+    comfy = OrderComfy()
+    registry = ProcessRegistry(tmp_path / "bg.json", lambda st: None)
+    registry.register(Stub("tagging"))
+    registry.register(Stub("embedding"))
+    proc = StoryboardProcess(registry, runner, comfy, wind_down_poll_s=0.01)
+    registry.register(proc)
+    try:
+        comfy.jobs = 2  # generate jobs: no run behind them
+        proc.poke()
+        st = registry.status("storyboard")
+        assert st.state == State.RUNNING and st.activity == "Rendering 2 jobs"
+        await registry.command("storyboard", "pause")
+        await registry.command("storyboard", "stop")
+        assert comfy.cancel_calls == [("storyboard", True)]  # gate still shut
+        assert comfy.gated == set()
+        await until(lambda: registry.status("storyboard").state == State.STOPPED)
+    finally:
+        await proc.aclose()
+        await registry.aclose()
+
+
+async def test_a_paused_run_does_not_hold_the_lock_generate_needs(env):
+    proc, registry, comfy, runner, vlm, events, db = env
+    sb = board_with_beats(db, 12)
+    task = asyncio.create_task(runner.synthesize(sb))
+    await until(lambda: vlm.started >= 1)
+    await registry.command("storyboard", "pause")
+    vlm.release.set()
+    await until(lambda: registry.status("storyboard").state == State.PAUSED)
+    # generate() / generate_story() take this lock around their VLM unload.
+    await asyncio.wait_for(runner._synth_lock.acquire(), 1)
+    runner._synth_lock.release()
+    await registry.command("storyboard", "resume")
+    await asyncio.wait_for(task, 2)
+
+
+async def test_a_run_stopped_while_queued_never_loads_the_vlm(env):
+    proc, registry, comfy, runner, vlm, events, db = env
+    first = asyncio.create_task(runner.synthesize(board_with_beats(db, 4)))
+    await until(lambda: vlm.started >= 1)
+    second = asyncio.create_task(runner.synthesize(board_with_beats(db, 4)))
+    await until(lambda: len(runner.active_runs()) == 2)
+    ensures = vlm.ensures
+    await registry.command("storyboard", "stop")
+    vlm.release.set()
+    for t in (first, second):
+        with pytest.raises(RunCancelled):
+            await t
+    assert vlm.ensures == ensures
+
+
+async def test_resume_after_an_unload_keeps_the_remaining_beats_on_the_llm(env):
+    proc, registry, comfy, runner, vlm, events, db = env
+    comfy.gated_jobs = True  # resume unloads the VLMs
+    sb = board_with_beats(db, 12)
+    task = asyncio.create_task(runner.synthesize(sb))
+    await until(lambda: vlm.started >= 1)
+    await registry.command("storyboard", "pause")
+    vlm.release.set()
+    await until(lambda: registry.status("storyboard").state == State.PAUSED)
+    await registry.command("storyboard", "resume")
+    counts = await asyncio.wait_for(task, 2)
+    assert vlm.ensures >= 2  # re-ensured after the pause
+    assert counts == {"synthesized": 12, "fallback": 0, "skipped_locked": 0}

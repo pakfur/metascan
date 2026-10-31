@@ -159,3 +159,18 @@ async def test_cancel_all_cancels_gated_queued_jobs(gated):
     assert not gated.has_gated_jobs("t2i")
     for job in ids:
         assert gated.db.get_generation_job(job)["state"] == "cancelled"
+
+
+async def test_cancel_source_cancels_gated_queued_jobs_of_that_source_only(
+    gated, fake_comfy  # noqa: F811
+):
+    pid = await gated.register_preset("sdxl", "t2i", t2i_workflow())
+    gated.set_source_paused("storyboard", True)
+    mine = await gated.submit(pid, params(positive="sb"), panel_id=1)
+    other = await gated.submit(pid, params(positive="t2i"), t2i_batch_id="b1")
+    assert gated.source_job_count("storyboard") == 1
+    assert await gated.cancel_source("storyboard") == 1
+    assert gated.db.get_generation_job(mine)["state"] == "cancelled"
+    assert (await gated.wait_for_job(other, timeout=10))["state"] == "done"
+    assert prompts(fake_comfy) == ["t2i"]  # the cancelled job never dispatched
+    assert gated.source_job_count("storyboard") == 0
