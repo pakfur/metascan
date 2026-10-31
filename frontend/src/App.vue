@@ -6,6 +6,7 @@ import { useT2iStore } from './stores/t2i'
 import { useCategoriesStore } from './stores/categories'
 import { useTasteStore } from './stores/taste'
 import { useTrainingStore } from './stores/training'
+import { useBackgroundStore } from './stores/background'
 import type { CategoriesWsEvent } from './types/websocket'
 import type { TasteWsEvent } from './types/taste'
 
@@ -14,6 +15,7 @@ const t2iStore = useT2iStore()
 const categoriesStore = useCategoriesStore()
 const tasteStore = useTasteStore()
 const trainingStore = useTrainingStore()
+const backgroundStore = useBackgroundStore()
 
 // Scores for the Taste sort (empty until a model exists).
 tasteStore.load().catch((e) => console.error('Failed to load taste scores', e))
@@ -75,6 +77,14 @@ trainingStore.loadAdapters().catch((e) => console.warn('Failed to load writer ad
 useWebSocket('training', (event, data) => trainingStore.handleEvent(event, data))
 onWsConnect(() => {
   trainingStore.load().catch((e) => console.warn('Failed to load training status', e instanceof Error ? e.message : e))
+})
+
+// Background activity pill: one registry status per process. The list is
+// refetched on every WS (re)connect (events missed during a gap or a server
+// restart), and `process_updated` events keep it current in between.
+useWebSocket('background', (event, data) => backgroundStore.handleEvent(event, data))
+onWsConnect(() => {
+  backgroundStore.load().catch((e) => console.warn('Failed to load background activity', e instanceof Error ? e.message : e))
 })
 
 // New i2v clips change the "Has I2V video" smart-folder rule's membership.

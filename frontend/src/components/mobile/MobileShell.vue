@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import ActivityPill from '../background/ActivityPill.vue'
 import type { Media } from '../../types/media'
 import { useFoldersStore } from '../../stores/folders'
 import { useMediaStore } from '../../stores/media'
@@ -72,6 +73,7 @@ onMounted(() => {
       </button>
 
       <div class="m-topbar-actions">
+        <ActivityPill />
         <button
           class="m-icon-btn"
           type="button"

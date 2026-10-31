@@ -3,6 +3,7 @@ import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useModelsStore } from '../../stores/models'
 import { useTrainingStore } from '../../stores/training'
+import ActivityPill from '../background/ActivityPill.vue'
 
 const emit = defineEmits<{
   scan: []
@@ -33,6 +34,7 @@ function openStoryboards() {
 
 <template>
   <div class="content-search-bar">
+    <ActivityPill />
     <button
       v-if="training.chipText"
       class="training-chip"
