@@ -117,6 +117,13 @@ function stop() {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.errtext { color: var(--danger-color); }
+.errtext {
+  color: var(--danger-color);
+  /* A failed line may carry what to do next ("press play to confirm"): wrap it. */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
 .heldline { color: var(--warn); }
 </style>

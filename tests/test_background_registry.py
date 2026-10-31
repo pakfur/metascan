@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from backend.services.background.protocol import (
@@ -287,3 +289,61 @@ async def test_notify_from_a_worker_thread_runs_calls_on_the_loop(tmp_path):
     assert seen == [loop_thread]
     assert any(e.state == State.HELD for e in events)
     await reg.aclose()
+
+
+class SlowResume:
+    """Reports paused from its own flag until a slow resume() returns."""
+
+    holds = ()
+
+    def __init__(self):
+        self.id, self.label, self.order = "slow", "SLOW", 0
+        self.paused = False
+        self.go = asyncio.Event()
+
+    def capabilities(self):
+        return Capabilities(True, True, True)
+
+    def report(self):
+        return ProcessReport(State.PAUSED if self.paused else State.RUNNING, None, "x")
+
+    async def start(self):
+        pass
+
+    async def pause(self):
+        self.paused = True
+
+    async def resume(self):
+        await self.go.wait()
+        self.paused = False
+
+    async def stop(self):
+        pass
+
+
+async def test_a_slow_resume_never_reports_paused_without_intent_or_holder(tmp_path):
+    p = SlowResume()
+    reg, _ = make(tmp_path, p)
+    with reg.hold(["slow"], by="Chat"):
+        await reg.settle()
+        assert reg.status("slow").state == State.HELD
+    # The hold is gone, resume() is queued or in flight and the adapter still
+    # says paused: the owner's Play would be refused as not_paused.
+    for _ in range(3):
+        st = reg.status("slow")
+        assert not (st.state == State.PAUSED and reg.intent("slow") == "none")
+        assert st.state != State.PAUSED and st.held_by == []
+        await asyncio.sleep(0.01)
+    assert reg.status("slow").activity == "Resuming"
+    p.go.set()
+    await reg.settle()
+    await asyncio.sleep(0.02)
+    st = reg.status("slow")
+    assert st.state == State.RUNNING and st.activity == "x"
+
+
+async def test_an_owner_pause_still_shows_paused_during_a_resume_elsewhere(tmp_path):
+    p = SlowResume()
+    reg, _ = make(tmp_path, p)
+    await reg.command("slow", "pause")
+    assert reg.status("slow").state == State.PAUSED

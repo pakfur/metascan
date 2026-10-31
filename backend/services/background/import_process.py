@@ -192,6 +192,9 @@ class ImportProcess:
             return ProcessReport(
                 State.WAITING, None, f"Waiting: {names} unavailable", None, warnings
             )
+        intent = self._registry.intent(self.id)
+        if intent in ("paused", "stopped"):
+            return ProcessReport(State.IDLE, None, intent.capitalize(), None, warnings)
         n = self._folder_count
         what = "no folders" if n == 0 else f"{n} folder{'s' if n != 1 else ''}"
         return ProcessReport(State.IDLE, None, f"Watching {what}", None, warnings)

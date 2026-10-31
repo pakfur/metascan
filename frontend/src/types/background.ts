@@ -73,6 +73,11 @@ export function playPauseButton(p: BackgroundProcess): PlayPause {
     case 'stopped':
     case 'failed':
     case 'idle':
+      // Nothing to start but something to pause (an idle Tagging, a watching
+      // Import): offer Pause. A process with neither stays a disabled Play.
+      if (!caps.can_start && caps.can_pause) {
+        return { kind: 'pause', action: 'pause', disabled: false }
+      }
       return { kind: 'play', action: 'start', disabled: !caps.can_start }
     case 'running':
     case 'waiting':

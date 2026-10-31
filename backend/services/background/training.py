@@ -97,14 +97,13 @@ class WriterTrainingProcess:
         can_start = (
             self._paused_run is not None or self._registry.intent(self.id) == "stopped"
         )
-        # Briefs and the scorecard have no pause: refuse it rather than store
-        # an intent that pauses nothing.
-        only_side_jobs = self._manager_status().get("run") is None and (
-            self._briefs() is not None or self._scorecard() is not None
-        )
+        # Only a run can pause: briefs and the scorecard have no pause, and an
+        # idle writer training has nothing to pause. Refuse it rather than
+        # store an intent that pauses nothing.
+        no_run = self._manager_status().get("run") is None
         return Capabilities(
             can_start=can_start,
-            can_pause=not only_side_jobs,
+            can_pause=not no_run,
             can_stop=True,
             confirm_stop=True,
         )

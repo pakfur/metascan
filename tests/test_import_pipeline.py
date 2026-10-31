@@ -407,6 +407,20 @@ def test_polling_alone_is_idle_and_ingest_is_running(rig):
     assert working.state == State.RUNNING
 
 
+def test_a_stopped_or_paused_import_says_so_not_watching(rig):
+    async def go():
+        await rig.passes(2)
+        await rig.registry.command("import", "pause")
+        paused = rig.registry.status("import")
+        await rig.registry.command("import", "stop")
+        stopped = rig.registry.status("import")
+        return paused, stopped
+
+    paused, stopped = run(go())
+    assert (paused.state, paused.activity) == (State.PAUSED, "Paused")
+    assert (stopped.state, stopped.activity) == (State.STOPPED, "Stopped")
+
+
 def test_ingest_progress_is_done_of_total_with_a_bare_file_name(rig):
     seen = []
 

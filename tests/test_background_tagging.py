@@ -417,3 +417,29 @@ async def test_an_owner_retag_clears_a_stop_but_not_a_pause(env):
     await asyncio.sleep(0.05)
     assert registry.status("tagging").state == State.PAUSED
     assert len(Pump.instances) == n
+
+
+async def test_hold_end_before_resume_never_shows_paused_with_no_intent(env):
+    proc, registry, db, *_ = env
+    db.queued = 3
+    with registry.hold(["tagging"], by="Text to image"):
+        await registry.settle()
+        assert registry.status("tagging").state == State.HELD
+    # The hold is gone; Tagging's own flag may still say paused for a moment.
+    st = registry.status("tagging")
+    assert st.state != State.PAUSED and st.held_by == []
+    await registry.settle()
+    assert registry.status("tagging").state != State.PAUSED
+
+
+async def test_can_start_only_with_something_to_start(env):
+    proc, registry, db, *_ = env
+    caps = registry.status("tagging").capabilities
+    assert (caps.can_start, caps.can_pause) == (False, True)
+    db.queued = 3
+    await proc._refresh_queue()
+    assert registry.status("tagging").capabilities.can_start is True
+    db.queued = 0
+    await proc._refresh_queue()
+    await registry.command("tagging", "pause")
+    assert registry.status("tagging").capabilities.can_start is True

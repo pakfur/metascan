@@ -14,6 +14,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import replace
 from collections import Counter
 from pathlib import Path
 from typing import (
@@ -80,6 +81,9 @@ class ProcessRegistry:
         self._drain_lock: Optional[asyncio.Lock] = None
         self._closed = False
         self._settle_tasks: set = set()
+        # Processes whose resume is queued or running: until it has returned,
+        # a process still reporting PAUSED is on its way back, not paused.
+        self._resuming: set = set()
 
     # persistence -------------------------------------------------------
     def _load(self) -> Dict[str, str]:
@@ -187,6 +191,17 @@ class ProcessRegistry:
                 self._sticky_error[pid] = rep.error or "failed"
             elif rep.state == State.RUNNING:
                 self._sticky_error.pop(pid, None)
+        for pid in self._resuming:
+            rep = reports.get(pid)
+            if (
+                rep is not None
+                and rep.state == State.PAUSED
+                and self._intent.get(pid, "none") == "none"
+            ):
+                # The hold ended or the owner pressed play, but the adapter has
+                # not run resume() yet: never show paused with no intent and no
+                # holder (the owner's Play would be refused as not_paused).
+                reports[pid] = replace(rep, state=State.WAITING, activity="Resuming")
         memo: Dict[str, Tuple[State, List[str]]] = {}
 
         def holders_of(pid: str) -> List[str]:
@@ -280,6 +295,7 @@ class ProcessRegistry:
                 self._applied[pid] = "paused"
             elif not suspended and applied == "paused":
                 self._pending.append((pid, "resume"))
+                self._resuming.add(pid)
                 self._applied[pid] = "running"
 
     def _snapshot(self) -> Dict[str, ProcessStatus]:
@@ -483,13 +499,24 @@ class ProcessRegistry:
                     continue
                 try:
                     await getattr(p, action)()
+                    if action == "resume":
+                        self._resumed(pid)
                 except Exception as exc:
+                    if action == "resume":
+                        self._resumed(pid)
                     logger.warning(
                         "%s of %s failed: %s", action, pid, type(exc).__name__
                     )
                     with self._lock:
                         self._cmd_error[pid] = f"{action} failed: {exc}"
                     self.notify(pid)
+
+    def _resumed(self, pid: str) -> None:
+        with self._lock:
+            # a later pause queued behind this resume still counts as resuming
+            # only while its own resume is pending
+            if not any(a == "resume" and q == pid for q, a in self._pending):
+                self._resuming.discard(pid)
 
     # plumbing ----------------------------------------------------------
     def _capture_loop(self) -> None:

@@ -97,7 +97,16 @@ class TaggingProcess:
     def capabilities(self) -> Capabilities:
         # Stop needs something to stop: queued rows or a drain in flight.
         can_stop = bool(self._queued) or self._running
-        return Capabilities(can_start=True, can_pause=True, can_stop=can_stop)
+        # Play needs something to start: rows, a stop or a failure to clear. An
+        # idle, empty Tagging offers Pause instead (the panel's rule).
+        can_start = (
+            bool(self._queued)
+            or self._running
+            or bool(self._error)
+            or self._registry.intent(self.id) in ("paused", "stopped")
+            or self._registry.failed(self.id)
+        )
+        return Capabilities(can_start=can_start, can_pause=True, can_stop=can_stop)
 
     def _suspended(self) -> bool:
         return self._paused or self._stopping
