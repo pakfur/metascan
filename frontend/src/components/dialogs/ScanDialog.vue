@@ -8,7 +8,7 @@ const scanStore = useScanStore()
 const steps = [
   { key: 'preparing', label: 'Prepare' },
   { key: 'confirming', label: 'Confirm' },
-  { key: 'scanning', label: 'Import' },
+  { key: 'scanning', label: 'Rescan' },
   { key: 'embedding', label: 'Embed' },
   { key: 'complete', label: 'Done' },
 ]

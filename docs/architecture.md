@@ -16,7 +16,7 @@ Browser (Vue 3 SPA)              Backend (FastAPI)
 
 - **Frontend** is a thin client handling display and user interaction.
 - **Backend** handles all heavy processing: scanning, AI embeddings, upscaling, duplicate detection.
-- **WebSocket** provides real-time progress for scans, upscaling, file watcher events, model load/download status, and folder cross-tab sync.
+- **WebSocket** provides real-time progress for scans, upscaling, always-on import events, model load/download status, and folder cross-tab sync.
 - **Subprocess workers** isolate long-running AI tasks from the main server process — embedding generation (`embedding_worker.py`), live CLIP inference (`inference_worker.py`), upscaling (`upscale_worker.py`).
 - **Two CLIP processes** by design: a one-shot batch worker computes embeddings + tags for unembedded files and exits; a long-running inference worker speaks NDJSON over stdio for live text/image queries. They never share state.
 
