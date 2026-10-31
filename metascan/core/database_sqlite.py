@@ -3032,6 +3032,10 @@ class DatabaseManager:
         it started is dropped. A source that is already pending keeps its
         first target (the file now there is not the one the row belongs to)."""
         for old, new in plan:
+            pending_here = conn.execute(
+                "SELECT new_path FROM faiss_pending_renames WHERE old_path = ?",
+                (old,),
+            ).fetchone()
             chained = [
                 r[0]
                 for r in conn.execute(
@@ -3040,11 +3044,22 @@ class DatabaseManager:
                 ).fetchall()
             ]
             if not chained:
-                conn.execute(
-                    "INSERT OR IGNORE INTO faiss_pending_renames "
-                    "(old_path, new_path) VALUES (?, ?)",
-                    (old, new),
-                )
+                if pending_here is not None:
+                    # ``old`` is the index row of the file that moved off it
+                    # (pending), yet the file here now moves too: which
+                    # file's vector the row holds is unknown. Neither file
+                    # may take it; both are embedded again.
+                    conn.execute(
+                        "DELETE FROM faiss_pending_renames WHERE old_path = ?",
+                        (old,),
+                    )
+                    DatabaseManager._reset_embedded(conn, [str(pending_here[0]), new])
+                else:
+                    conn.execute(
+                        "INSERT INTO faiss_pending_renames "
+                        "(old_path, new_path) VALUES (?, ?)",
+                        (old, new),
+                    )
                 continue
             for first in chained:
                 if first == new:
@@ -3058,6 +3073,44 @@ class DatabaseManager:
                         "WHERE old_path = ?",
                         (new, first),
                     )
+
+    @staticmethod
+    def _reset_embedded(conn: sqlite3.Connection, posix_paths: Sequence[str]) -> None:
+        """Mark files not embedded (as ``clear_embeddings`` does), so the
+        next build embeds them; they never read a row by their path."""
+        conn.executemany(
+            "UPDATE media_hashes SET has_embedding = 0, clip_model = NULL, "
+            "embedding_updated_at = NULL WHERE file_path = ?",
+            [(p,) for p in posix_paths],
+        )
+
+    def reset_embedded(self, file_paths: Sequence[str]) -> None:
+        """``_reset_embedded`` for stored POSIX paths, in one transaction."""
+        if not file_paths:
+            return
+        with self.lock, self._get_connection() as conn:
+            self._reset_embedded(conn, file_paths)
+            conn.commit()
+
+    def drop_pending_rename_from(self, file_path: str) -> bool:
+        """The embedding worker is about to write ``file_path``'s FAISS row
+        (stored POSIX path). When a rename is pending *from* it, the row no
+        longer belongs to the file that moved: drop the rename and mark that
+        file not embedded, so it is embedded again rather than given the
+        vector of the file now at this path. True when a row was dropped."""
+        with self.lock, self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT new_path FROM faiss_pending_renames WHERE old_path = ?",
+                (file_path,),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "DELETE FROM faiss_pending_renames WHERE old_path = ?", (file_path,)
+            )
+            self._reset_embedded(conn, [str(row[0])])
+            conn.commit()
+            return True
 
     def list_faiss_pending_renames(self) -> List[Tuple[str, str]]:
         """Pending FAISS renames ``(old, new)`` (stored POSIX paths)."""

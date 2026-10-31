@@ -432,3 +432,200 @@ def test_the_worker_applies_renames_at_its_start_without_re_embedding(env, monke
     assert not on_disk.has_file(a)
     assert np.allclose(on_disk.get_embedding(b), v)
     assert db.list_faiss_pending_renames() == []
+
+
+# ---------------------------------------------------------------- fix round 1
+
+
+def test_the_map_keeps_mapping_after_the_apply_until_the_swap(env, server, monkeypatch):
+    db = env["db"]
+    a, b = _p(env, "a.png"), _p(env, "b.png")
+    _fm(env, [(a, _unit(11))])
+    _embedded_media(env, a)
+    memory = _disk(env)
+    monkeypatch.setattr(similarity, "_faiss_manager", memory)
+    db.move_media_batch_applied([(a, b)])
+    similarity.refresh_pending_map()
+    reloads: List[int] = []
+    monkeypatch.setattr(
+        similarity, "_reload_faiss_after_index_build", lambda: reloads.append(1)
+    )
+
+    assert similarity.apply_pending_faiss_renames() == 1
+    assert db.list_faiss_pending_renames() == []
+    assert reloads == [1]
+    assert similarity.map_pending(a) == b  # memory still holds a
+    similarity.refresh_pending_map()  # any later refresh keeps it too
+    assert similarity.map_pending(a) == b
+
+    similarity._rebuild_faiss_manager(1)  # the swap
+    assert similarity._faiss_manager is not memory
+    assert similarity.map_pending(a) == a  # the new index holds b
+    assert similarity._faiss_manager.has_file(b)
+
+
+def test_a_failed_run_reloads_the_index_too(monkeypatch):
+    from types import SimpleNamespace
+
+    reloads: List[int] = []
+    monkeypatch.setattr(
+        similarity, "_reload_faiss_after_index_build", lambda: reloads.append(1)
+    )
+    monkeypatch.setattr(similarity.ws_manager, "broadcast_sync", lambda *a, **k: None)
+    monkeypatch.setattr(similarity, "get_embedding_process", lambda: None)
+    eq = SimpleNamespace(on_progress=None, on_complete=None, on_error=None)
+    similarity._attach_embedding_callbacks(eq)  # type: ignore[arg-type]
+    eq.on_error("boom")
+    assert reloads == [1]
+
+
+def _worker_env(env, monkeypatch, on_embed=None):
+    queue = env["lib"] / "queue"
+    queue.mkdir(exist_ok=True)
+
+    class FakeClip:
+        def __init__(self, model_key=MODEL, device="auto") -> None:
+            self.model_config = {"name": "fake", "pretrained": "fake"}
+
+        def _check_model_needs_download(self, *a) -> bool:
+            return False
+
+        def _ensure_model_loaded(self) -> None:
+            return None
+
+        embedding_dim = DIM
+
+        def compute_image_embedding(self, path):
+            if on_embed is not None:
+                on_embed(path)
+            return _unit(int.from_bytes(Path(path).read_bytes()[:4], "little"))
+
+        def compute_video_embedding(self, *a, **k):
+            return None
+
+        def unload_model(self) -> None:
+            return None
+
+    monkeypatch.setattr(ew, "EmbeddingManager", FakeClip)
+    monkeypatch.setattr(ew, "build_vocabulary", lambda *a, **k: None)
+
+    def run(paths):
+        task = {
+            "model_key": MODEL,
+            "device": "cpu",
+            "file_paths": paths,
+            "db_path": str(env["data"]),
+            "index_dir": str(env["index"]),
+            "compute_phash": False,
+            "video_keyframes": 4,
+            "tag_with_vlm": False,
+        }
+        (queue / "embedding_task.json").write_text(json.dumps(task))
+        ew.EmbeddingWorker(queue).run()
+
+    return run
+
+
+def _file(env, name: str, content: bytes) -> str:
+    path = _p(env, name)
+    Path(path).write_bytes(content)
+    return path
+
+
+def _assert_moved_file_has_no_vector(env, moved: str, other_vec: np.ndarray):
+    """The moved file is marked not embedded and no row at its path holds
+    the other file's vector."""
+    assert moved not in env["db"].embedded_paths([moved])
+    row = _disk(env).get_embedding(moved)
+    assert row is None or not np.allclose(row, other_vec)
+
+
+def test_case_a_a_failed_apply_then_a_new_file_at_the_old_path(env, monkeypatch):
+    db = env["db"]
+    a, b = _file(env, "a.png", b"NEW1"), _p(env, "b.png")
+    old_vec = _unit(12)
+    _fm(env, [(a, old_vec)])
+    _embedded_media(env, a)  # the file that moves a -> b
+    db.move_media_batch_applied([(a, b)])
+    db.save_media(_media(a))  # a different file now lives at a
+    run = _worker_env(env, monkeypatch)
+    monkeypatch.setattr(
+        ew,
+        "apply_pending_renames",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("apply failed")),
+    )
+    run([a])
+    new_vec = _unit(int.from_bytes(b"NEW1", "little"))
+    assert np.allclose(_disk(env).get_embedding(a), new_vec)
+    assert db.list_faiss_pending_renames() == []
+    _assert_moved_file_has_no_vector(env, b, new_vec)
+    _assert_moved_file_has_no_vector(env, b, old_vec)
+
+
+def test_case_b_a_move_during_the_run_then_the_run_embeds_the_old_path(
+    env, monkeypatch
+):
+    db = env["db"]
+    a, b = _file(env, "a.png", b"NEW2"), _p(env, "b.png")
+    dummy = _file(env, "dummy.png", b"DUMM")
+    old_vec = _unit(13)
+    _fm(env, [(a, old_vec)])
+    _embedded_media(env, a)
+    db.save_media(_media(dummy))
+    moved = []
+
+    def on_embed(path):
+        if path == dummy and not moved:  # the move lands mid-run
+            db.move_media_batch_applied([(a, b)])
+            db.save_media(_media(a))  # and a different file takes a
+            moved.append(1)
+
+    run = _worker_env(env, monkeypatch, on_embed)
+    run([dummy, a])
+    assert moved
+    new_vec = _unit(int.from_bytes(b"NEW2", "little"))
+    assert np.allclose(_disk(env).get_embedding(a), new_vec)
+    assert db.list_faiss_pending_renames() == []
+    _assert_moved_file_has_no_vector(env, b, new_vec)
+    _assert_moved_file_has_no_vector(env, b, old_vec)
+
+
+def test_case_c_a_file_at_a_pending_old_path_moves_on(env):
+    db = env["db"]
+    a, b, d = (_p(env, n) for n in ("a.png", "b.png", "d.png"))
+    old_vec = _unit(14)
+    _fm(env, [(a, old_vec)])
+    _embedded_media(env, a)
+    db.move_media_batch_applied([(a, b)])
+    _embedded_media(env, a)  # a different file at a, marked embedded
+    db.move_media_batch_applied([(a, d)])
+
+    assert db.list_faiss_pending_renames() == []
+    assert db.embedded_paths([b, d]) == set()
+    result = apply_pending_renames(db, _disk(env))
+    assert result.renamed == 0
+    for moved in (b, d):
+        assert _disk(env).get_embedding(moved) is None
+
+
+def test_a_chain_onto_a_pending_old_path_is_not_case_c(env):
+    db = env["db"]
+    z, a, b, d = (_p(env, n) for n in ("z.png", "a.png", "b.png", "d.png"))
+    db.save_media(_media(a))
+    db.save_media(_media(z))
+    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied([(z, a)])
+    db.move_media_batch_applied([(a, d)])  # z's file moves on
+    assert sorted(db.list_faiss_pending_renames()) == sorted([(a, b), (z, d)])
+
+
+def test_a_moved_file_with_no_row_to_take_is_marked_not_embedded(env):
+    db = env["db"]
+    a, b = _p(env, "a.png"), _p(env, "b.png")
+    _fm(env, [(_p(env, "other.png"), _unit(15))])  # no row at a
+    _embedded_media(env, a)
+    db.move_media_batch_applied([(a, b)])
+    result = apply_pending_renames(db, _disk(env))
+    assert (result.renamed, result.reset) == (0, 1)
+    assert db.embedded_paths([b]) == set()
+    assert db.list_faiss_pending_renames() == []

@@ -196,12 +196,26 @@ _pending_map: Dict[str, str] = {}
 
 def refresh_pending_map() -> None:
     """Re-read ``faiss_pending_renames`` into the in-memory map. Blocking
-    (one small query); call after anything that writes the table."""
+    (one small query). An entry the table no longer has stays while the
+    in-memory index still holds its old path (a worker or the server step
+    renamed the disk first): it goes once the index is reloaded, so a
+    search never returns a path that no longer exists."""
     global _pending_map
     try:
-        _pending_map = dict(get_db().list_faiss_pending_renames())
+        fresh = dict(get_db().list_faiss_pending_renames())
     except Exception:
         logger.warning("Could not read the pending FAISS renames", exc_info=True)
+        return
+    fm = _faiss_manager
+    if fm is not None:
+        for old, new in _pending_map.items():
+            if (
+                old not in fresh
+                and fm.has_file(to_native_path(old))
+                and not fm.has_file(to_native_path(new))
+            ):
+                fresh[old] = new
+    _pending_map = fresh
 
 
 def map_pending(path: str) -> str:
@@ -223,15 +237,21 @@ def apply_pending_faiss_renames() -> int:
         fm = FaissIndexManager(eq.index_dir)
         fm.load()
         result = apply_pending_renames(get_db(), fm)
-    refresh_pending_map()
     if result.renamed:
+        # Memory still holds the old paths: the map stays until the reload
+        # swaps the renamed index in (``_rebuild_faiss_manager`` refreshes).
         _reload_faiss_after_index_build()
+    else:
+        refresh_pending_map()
     return result.renamed
 
 
 async def after_media_move() -> None:
-    """Call after ``move_media_batch``: searches show the new paths at once
-    and the rows are renamed as soon as no worker is running."""
+    """Contract: whoever calls ``move_media_batch*`` awaits this afterwards
+    (Task 16). Searches show the new paths at once; the rows are renamed now
+    if no worker is running. If one is, the worker applies them at its
+    start, or the next idle call does. An idle server applies renames only
+    through this hook."""
     await asyncio.to_thread(refresh_pending_map)
     await asyncio.to_thread(apply_pending_faiss_renames)
 
@@ -313,6 +333,11 @@ def _attach_embedding_callbacks(eq: EmbeddingQueue) -> None:
             _schedule_vlm_drain_after_complete(eq)
 
     def on_error(msg: str) -> None:
+        # A run that failed may still have renamed rows on disk at its start.
+        try:
+            _reload_faiss_after_index_build()
+        except Exception:
+            logger.exception("Failed to reload FAISS after a failed index build")
         ws_manager.broadcast_sync("embedding", "error", {"message": msg})
         process = get_embedding_process()
         if process is not None:

@@ -22,7 +22,7 @@ from typing import Callable, Sequence, Tuple
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.embedding_manager import FaissIndexManager
-from metascan.utils.path_utils import to_native_path
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ STAMP_RETRY_DELAYS_S: Tuple[float, ...] = (0.5, 1.0, 2.0)
 class RenameResult:
     renamed: int = 0  # rows re-keyed and saved
     cleared: int = 0  # pending rows dropped
+    reset: int = 0  # moved files marked not embedded (no row to take)
     failed: bool = False  # stamp or save failed; pending rows kept
 
 
@@ -59,7 +60,8 @@ def apply_pending_renames(
         for old, new in pending
         if new in embedded and fm.has_file(to_native_path(old))
     ]
-    renamed = fm.rename(pairs) if pairs else 0
+    applied = fm.rename_applied(pairs) if pairs else []
+    renamed = len(applied)
     if renamed:
         paths = [p for pair in pairs for p in pair]
         if not _stamp(db, paths, list(delays), sleep) or not fm.save():
@@ -68,10 +70,18 @@ def apply_pending_renames(
             )
             fm.load()  # drop the unsaved change
             return RenameResult(failed=True)
+    # A moved file marked embedded whose row was not carried over (the old
+    # path is not in the index, or the pair was dropped) has no vector: mark
+    # it not embedded so the next build embeds it. Never one that got a row.
+    got_row = {to_posix_path(new) for _, new in applied}
+    lost = [new for _, new in pending if new in embedded and new not in got_row]
+    if lost:
+        db.reset_embedded(lost)
+        logger.warning("%d moved file(s) had no FAISS row to rename", len(lost))
     cleared = db.clear_faiss_pending_renames(pending)
     if renamed:
         logger.info("Renamed %d FAISS row(s) after a move", renamed)
-    return RenameResult(renamed=renamed, cleared=cleared)
+    return RenameResult(renamed=renamed, cleared=cleared, reset=len(lost))
 
 
 def _stamp(

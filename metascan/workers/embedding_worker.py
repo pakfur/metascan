@@ -57,6 +57,7 @@ from metascan.core.vocabulary import (  # noqa: E402
 )
 from metascan.utils.app_paths import get_base_path, get_data_dir  # noqa: E402
 from metascan.utils.log_files import rotating_file_handler  # noqa: E402
+from metascan.utils.path_utils import to_posix_path  # noqa: E402
 
 
 # Maximum time to spend on a single file (seconds).
@@ -554,6 +555,9 @@ class EmbeddingWorker:
                         # Appends a new path's row or overwrites an existing
                         # one; either way its tombstones are stamped with
                         # this batch, before the next save.
+                        # A rename pending from this path would hand the
+                        # moved file the vector of the file embedded here.
+                        db_mgr.drop_pending_rename_from(to_posix_path(file_path))
                         faiss_mgr.add(file_path, embedding)
                         batch_paths.append(file_path)
                         embedded_count += 1

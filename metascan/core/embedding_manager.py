@@ -748,14 +748,18 @@ class FaissIndexManager:
         self._dirty = True
 
     def rename(self, pairs: List[Tuple[str, str]]) -> int:
+        """``rename_applied``'s count."""
+        return len(self.rename_applied(pairs))
+
+    def rename_applied(self, pairs: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
         """Re-key rows ``(old, new)`` without touching their vectors; returns
-        how many were renamed. The pairs apply at once (a swap, or a chain
+        the pairs renamed. The pairs apply at once (a swap, or a chain
         b -> c with a -> b, works), a pair whose ``old`` is not in the index
         is skipped, and a ``new`` that already holds a row of its own (a
         deleted file's stale one) is overwritten: that row is dropped, which
         rebuilds the index as a flat one of the same metric."""
         if self._index is None:
-            return 0
+            return []
         moves: Dict[str, str] = {}
         taken: Set[str] = set()
         for old, new in pairs:
@@ -766,7 +770,7 @@ class FaissIndexManager:
             moves[old] = new
             taken.add(new)
         if not moves:
-            return 0
+            return []
 
         drop = {
             self._path_to_id[new]
@@ -792,7 +796,7 @@ class FaissIndexManager:
         self._id_to_path = id_to_path
         self._path_to_id = {p: i for i, p in enumerate(id_to_path)}
         self._dirty = True
-        return len(moves)
+        return list(moves.items())
 
     def search(
         self, query_vector: np.ndarray, top_k: int = 50
