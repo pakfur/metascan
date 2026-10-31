@@ -28,7 +28,13 @@ from typing import (
     Tuple,
 )
 
-from .protocol import BackgroundProcess, ProcessReport, ProcessStatus, State
+from .protocol import (
+    BackgroundProcess,
+    Capabilities,
+    ProcessReport,
+    ProcessStatus,
+    State,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +76,7 @@ class ProcessRegistry:
         self._ticker: Optional[asyncio.Task] = None
         self._drain_lock: Optional[asyncio.Lock] = None
         self._closed = False
+        self._settle_tasks: set = set()
 
     # persistence -------------------------------------------------------
     def _load(self) -> Dict[str, str]:
@@ -143,6 +150,19 @@ class ProcessRegistry:
                 out[pid] = ProcessReport(State.FAILED, None, "", error="report failed")
         return out
 
+    def _capabilities(self) -> Dict[str, Capabilities]:
+        # outside the lock, like _reports(): an adapter may take its own locks
+        out = {}
+        for pid, p in list(self._procs.items()):
+            try:
+                out[pid] = p.capabilities()
+            except Exception as exc:
+                logger.warning(
+                    "capabilities() of %s raised %s", pid, type(exc).__name__
+                )
+                out[pid] = Capabilities(False, False, False)
+        return out
+
     def _compute(
         self, reports: Dict[str, ProcessReport]
     ) -> Dict[str, Tuple[State, List[str]]]:
@@ -189,7 +209,12 @@ class ProcessRegistry:
         return {pid: eff(pid) for pid in reports}
 
     def _build(
-        self, pid: str, rep: ProcessReport, state: State, held_by: List[str]
+        self,
+        pid: str,
+        rep: ProcessReport,
+        caps: Capabilities,
+        state: State,
+        held_by: List[str],
     ) -> ProcessStatus:
         p = self._procs[pid]
         error = rep.error or self._cmd_error.get(pid)
@@ -205,7 +230,7 @@ class ProcessRegistry:
             held_by=held_by if state == State.HELD else [],
             error=error,
             warnings_count=rep.warnings_count,
-            capabilities=p.capabilities(),
+            capabilities=caps,
         )
         key = (
             st.state,
@@ -239,12 +264,13 @@ class ProcessRegistry:
 
     def _snapshot(self) -> Dict[str, ProcessStatus]:
         reports = self._reports()
+        caps = self._capabilities()
         with self._lock:
             computed = self._compute(reports)
             return {
-                pid: self._build(pid, reports[pid], *computed[pid])
+                pid: self._build(pid, reports[pid], caps[pid], *computed[pid])
                 for pid in reports
-                if pid in self._procs
+                if pid in self._procs and pid in caps
             }
 
     def statuses(self) -> List[ProcessStatus]:
@@ -267,13 +293,14 @@ class ProcessRegistry:
         if pid not in self._procs:
             return
         reports = self._reports()
+        caps = self._capabilities()
         with self._lock:
             computed = self._compute(reports)
             self._reconcile(computed)
             statuses = {
-                p: self._build(p, reports[p], *computed[p])
+                p: self._build(p, reports[p], caps[p], *computed[p])
                 for p in reports
-                if p in self._procs
+                if p in self._procs and p in caps
             }
             self._dirty.add(pid)
             # a hold change can move other processes too
@@ -457,14 +484,22 @@ class ProcessRegistry:
         loop = self._loop
         if loop is None or self._closed or loop.is_closed():
             return
+        with self._lock:
+            if not self._pending:
+                return
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
         if running is loop:
-            loop.create_task(self.settle())
+            self._spawn_settle(loop)
         else:
-            loop.call_soon_threadsafe(lambda: loop.create_task(self.settle()))
+            loop.call_soon_threadsafe(self._spawn_settle, loop)
+
+    def _spawn_settle(self, loop: asyncio.AbstractEventLoop) -> None:
+        task = loop.create_task(self.settle())
+        self._settle_tasks.add(task)
+        task.add_done_callback(self._settle_tasks.discard)
 
     async def aclose(self) -> None:
         self._closed = True

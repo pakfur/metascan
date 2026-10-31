@@ -43,9 +43,11 @@ from backend.api import (
     i2v,
     t2i,
     taste as taste_api,
+    background as background_api,
     websocket,
 )
-from backend.dependencies import get_db, get_thumbnail_cache
+from backend.dependencies import get_db, get_thumbnail_cache, set_registry
+from backend.services.background.registry import ProcessRegistry
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
@@ -474,6 +476,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # here, and nothing has been started yet that would need stopping.
     await _open_database()
 
+    background_registry = ProcessRegistry(
+        get_data_dir() / "background_state.json", background_api.publish_status
+    )
+    set_registry(background_registry)
+
     ws_manager.attach_loop(asyncio.get_running_loop())
     similarity.set_server_loop(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(_event_loop_heartbeat())
@@ -810,6 +817,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # storyboard_runner.aclose(), so it only has to drain tasks that
         # are already in flight.
         try:
+            await background_registry.aclose()
+        except Exception:
+            logger.exception("Background registry shutdown raised")
+        try:
             await comfy_client.shutdown()
         except Exception:
             logger.exception("Comfy client shutdown raised")
@@ -906,6 +917,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(i2v.router)
     app.include_router(t2i.router)
     app.include_router(taste_api.router)
+    app.include_router(background_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)

@@ -255,3 +255,35 @@ async def test_unknown_process_refused(tmp_path):
     with pytest.raises(CommandRefused):
         await reg.command("nope", "pause")
     await reg.aclose()
+
+
+async def test_notify_from_a_worker_thread_runs_calls_on_the_loop(tmp_path):
+    import asyncio
+    import threading
+
+    f = FakeProcess("emb")
+    seen = []
+
+    async def pause():
+        seen.append(threading.get_ident())
+
+    f.pause = pause  # type: ignore[method-assign]
+    clock = Clock()
+    reg, events = make(tmp_path, f, clock=clock)
+    clock.t = 10.0  # past the per-process notify interval
+    reg._capture_loop()
+    loop_thread = threading.get_ident()
+
+    def work():
+        reg.hold(["emb"], by="T2I").__enter__()
+
+    t = threading.Thread(target=work)
+    t.start()
+    t.join()
+    for _ in range(40):
+        if seen and any(e.state == State.HELD for e in events):
+            break
+        await asyncio.sleep(0.05)
+    assert seen == [loop_thread]
+    assert any(e.state == State.HELD for e in events)
+    await reg.aclose()

@@ -8,6 +8,7 @@ from metascan.core.database_sqlite import DatabaseManager
 from metascan.utils.app_paths import get_data_dir, get_thumbnail_cache_dir
 
 from backend.config import load_app_config
+from backend.services.background.registry import ProcessRegistry
 
 # `functools.lru_cache` has a race: it releases the cache lock before
 # calling the wrapped function, so two concurrent misses with the same
@@ -54,3 +55,20 @@ def get_thumbnail_cache() -> ThumbnailCache:
                 get_thumbnail_cache_dir(), thumbnail_size=size
             )
     return _thumbnail_cache_singleton
+
+
+_registry_singleton: Optional[ProcessRegistry] = None
+
+
+def set_registry(registry: Optional[ProcessRegistry]) -> None:
+    """Install the background-process registry (FastAPI lifespan)."""
+    global _registry_singleton
+    _registry_singleton = registry
+
+
+def get_registry() -> ProcessRegistry:
+    if _registry_singleton is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail="registry not initialized")
+    return _registry_singleton
