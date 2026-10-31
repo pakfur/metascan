@@ -67,6 +67,7 @@ from backend.services.background.generation import (
     T2iProcess,
 )
 from backend.services.background.hygiene import HygieneProcess
+from backend.services.background.idle import ActivityMiddleware, idle_tracker
 from backend.services.background.import_process import ImportProcess
 from backend.services.background.registry import ProcessRegistry
 from backend.services.background.tagging import TaggingProcess
@@ -853,7 +854,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     import_process = ImportProcess(
         background_registry, scan.scan_status, scan.request_cancel
     )
-    hygiene_process = HygieneProcess()
+    hygiene_process = HygieneProcess(
+        background_registry,
+        idle_tracker,
+        get_db=get_db,
+        get_config=load_app_config,
+        get_data_dir=scan._data_dir,
+        import_process=lambda: import_process,
+    )
     bg_processes: List[Any] = [
         upscale_process,
         taste_process,
@@ -881,6 +889,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await tagging.kick_if_queued()
     # The watcher polls the scan folders from here on (spec 9).
     import_process.start_loop()
+    hygiene_process.start_loop()
 
     try:
         yield
@@ -1004,6 +1013,10 @@ def create_app() -> FastAPI:  # noqa: C901
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Counts non-read requests for Hygiene's idle rule (pure ASGI: streaming
+    # responses pass through unbuffered).
+    app.add_middleware(ActivityMiddleware, tracker=idle_tracker)
 
     # API key authentication middleware
     if server_config.api_key:

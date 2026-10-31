@@ -758,6 +758,49 @@ def _generated_output_fields(report: ReingestReport) -> Dict[str, Any]:
     }
 
 
+@dataclass
+class PassReport:
+    """How a pass over the scan folders ended, for ``finish_ordinary_pass``."""
+
+    cancelled: bool = False
+    generated_back: bool = True  # every generated file still on disk came back
+    missing_folders: List[str] = field(default_factory=list)
+    walked_folders: int = 0
+
+    @property
+    def completed(self) -> bool:
+        return not self.cancelled and self.generated_back and not self.missing_folders
+
+
+def _apply_pending_snapshot(db: Any, data_dir: Optional[Path]) -> None:
+    """Restore anything pending from an earlier interrupted full clean that
+    this pass brought back. Never tombstones, never raises."""
+    if data_dir is None:
+        return
+    try:
+        apply_pending_taste_snapshot(db, data_dir)
+    except Exception as e:
+        logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
+
+
+def finish_ordinary_pass(report: PassReport) -> None:
+    """The end of a pass over the scan folders (the scan route's, and
+    hygiene's): the full-clean marker goes when the pass walked at least one
+    and every configured folder to the end and brought every generated file
+    still on disk back, with no cancel and no error (the only place the
+    marker is removed; a failure keeps it and the pause, and is logged); then
+    what an earlier interrupted full clean left pending is applied. Blocking;
+    never raises."""
+    db = get_db()
+    data_dir = _data_dir(db)
+    if data_dir is not None and report.completed and report.walked_folders:
+        try:
+            clear_full_clean_marker(data_dir)
+        except Exception as e:
+            logger.error(f"Removing the full-clean marker failed: {e}", exc_info=True)
+    _apply_pending_snapshot(db, data_dir)
+
+
 async def _scan(  # noqa: C901
     full_cleanup: bool,
     full_clean: bool,
@@ -906,14 +949,7 @@ async def _scan(  # noqa: C901
             )
 
     async def _apply_pending() -> None:
-        """Restore anything pending from an earlier interrupted full clean
-        that this scan brought back. Never tombstones, never raises."""
-        if data_dir is None:
-            return
-        try:
-            await asyncio.to_thread(apply_pending_taste_snapshot, db, data_dir)
-        except Exception as e:
-            logger.error(f"Applying pending taste snapshot failed: {e}", exc_info=True)
+        await asyncio.to_thread(_apply_pending_snapshot, db, data_dir)
 
     async def _reingest_generated_output() -> ReingestReport:
         """T2I / I2V output enters the library through ComfyClient's ingest,
@@ -1020,20 +1056,6 @@ async def _scan(  # noqa: C901
                 failed_roots,
             )
         return report
-
-    async def _every_folder_scanned() -> None:
-        """A scan walked every configured folder to the end (and re-ingested
-        the generated output still on disk): every file still on disk in a
-        configured folder, and every T2I / I2V output still on disk, has its
-        media row again, so the T2I / I2V lists may prune again. The only
-        place the full-clean marker is removed; a failure keeps it (and the
-        pause) and is logged. Never raises."""
-        if data_dir is None:
-            return
-        try:
-            await asyncio.to_thread(clear_full_clean_marker, data_dir)
-        except Exception as e:
-            logger.error(f"Removing the full-clean marker failed: {e}", exc_info=True)
 
     def _expected_paths() -> Iterable[str]:
         """What should be under the configured folders, for telling an empty
@@ -1180,15 +1202,18 @@ async def _scan(  # noqa: C901
         # normally -- it must not tombstone what wasn't re-imported yet, and
         # neither may a run whose generated output did not all come back, or
         # one that could not see one of its folders.
-        completed = not _cancel_requested and generated_back and not missing_folders
-        await _restore_taste_from_snapshot(completed=completed)
+        report = PassReport(
+            cancelled=_cancel_requested,
+            generated_back=generated_back,
+            missing_folders=missing_folders,
+            walked_folders=walked_folders,
+        )
+        await _restore_taste_from_snapshot(completed=report.completed)
         # A completed scan that walked its folders (none unavailable) has
         # every file still on disk back: the T2I / I2V lists may prune again.
         # Not when unfinished, not with a folder unavailable (its files were
         # not walked), and not with no folder to walk at all.
-        if completed and walked_folders:
-            await _every_folder_scanned()
-        await _apply_pending()
+        await asyncio.to_thread(finish_ordinary_pass, report)
         # The index build below would queue behind a hold on Embedding.
         release_embedding()
 

@@ -10,6 +10,7 @@ from backend import dependencies
 from backend.api import scan as scan_api
 from backend.services import taste_snapshot as ts
 from backend.services.background.hygiene import HygieneProcess
+from backend.services.background.idle import IdleTracker
 from backend.services.background.import_process import ImportProcess
 from backend.services.background.protocol import State
 from backend.services.background.registry import ProcessRegistry
@@ -30,7 +31,15 @@ def reg(tmp_path):
         registry.register(Stub(pid))
     process = ImportProcess(registry, scan_api.scan_status, scan_api.request_cancel)
     registry.register(process)
-    registry.register(HygieneProcess())
+    registry.register(
+        HygieneProcess(
+            registry,
+            IdleTracker(),
+            get_db=lambda: None,
+            get_config=lambda: {},
+            get_data_dir=lambda db: None,
+        )
+    )
     dependencies.set_registry(registry)
     dependencies.set_import_process(process)
     yield registry
@@ -47,16 +56,12 @@ def test_idle_import_cannot_be_stopped_or_started(reg):
     assert st.capabilities.can_stop is False
 
 
-def test_hygiene_is_an_idle_placeholder(reg):
+def test_hygiene_waits_for_a_quiet_moment(reg):
     st = reg.status("hygiene")
-    assert (st.order, st.state, st.activity) == (80, State.IDLE, "Not running yet")
-    assert not any(
-        (
-            st.capabilities.can_start,
-            st.capabilities.can_pause,
-            st.capabilities.can_stop,
-        )
-    )
+    assert (st.order, st.state) == (80, State.IDLE)
+    assert st.activity == "Waiting for a quiet moment"
+    assert (st.capabilities.can_start, st.capabilities.can_pause) == (True, True)
+    assert st.capabilities.can_stop is False
 
 
 def test_a_running_scan_shows_progress_with_a_bare_file_name(monkeypatch, db, reg):
