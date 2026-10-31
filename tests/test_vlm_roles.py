@@ -355,13 +355,12 @@ def test_t2i_uses_writer_tagging_uses_general() -> None:
     # ask for the default (general) client.
     import backend.api.chat as chat
     import backend.api.prompt as prompt
-    import backend.api.similarity as similarity
 
     for mod in (chat, prompt):
         assert "get_vlm_client()" in inspect.getsource(mod._require_ready_client)
-    assert "get_vlm_client()" in inspect.getsource(
-        similarity._schedule_vlm_drain_after_complete
-    )
+    # The tag drain (TaggingProcess) is built on the general client.
+    tagging = source[source.index("TaggingProcess(") :]
+    assert "get_vlm_client," in tagging.split(")", 1)[0]
 
 
 # ---------------------------------------------------------------------------

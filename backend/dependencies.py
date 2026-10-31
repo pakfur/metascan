@@ -1,14 +1,18 @@
 """FastAPI dependency injection for shared resources."""
 
+import contextlib
 from threading import Lock
-from typing import Optional
+from typing import TYPE_CHECKING, ContextManager, Optional
 
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.utils.app_paths import get_data_dir, get_thumbnail_cache_dir
 
 from backend.config import load_app_config
-from backend.services.background.registry import ProcessRegistry
+from backend.services.background.registry import INTERACTIVE_GRACE_S, ProcessRegistry
+
+if TYPE_CHECKING:
+    from backend.services.background.tagging import TaggingProcess
 
 # `functools.lru_cache` has a race: it releases the cache lock before
 # calling the wrapped function, so two concurrent misses with the same
@@ -72,3 +76,26 @@ def get_registry() -> ProcessRegistry:
 
         raise HTTPException(status_code=503, detail="registry not initialized")
     return _registry_singleton
+
+
+def interactive_vlm_hold(by: str) -> ContextManager[None]:
+    """Hold Tagging for one interactive VLM request plus its grace (spec 7).
+
+    A no-op when no registry is installed (tests, a half-started server)."""
+    registry = _registry_singleton
+    if registry is None:
+        return contextlib.nullcontext()
+    return registry.hold_for(["tagging"], by=by, grace_s=INTERACTIVE_GRACE_S)
+
+
+_tagging_singleton: Optional["TaggingProcess"] = None
+
+
+def set_tagging_process(process: Optional["TaggingProcess"]) -> None:
+    """Install the Tagging process (FastAPI lifespan)."""
+    global _tagging_singleton
+    _tagging_singleton = process
+
+
+def get_tagging_process() -> Optional["TaggingProcess"]:
+    return _tagging_singleton

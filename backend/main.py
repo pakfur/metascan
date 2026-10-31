@@ -46,8 +46,15 @@ from backend.api import (
     background as background_api,
     websocket,
 )
-from backend.dependencies import get_db, get_thumbnail_cache, set_registry
+from backend.dependencies import (
+    get_db,
+    get_thumbnail_cache,
+    interactive_vlm_hold,
+    set_registry,
+    set_tagging_process,
+)
 from backend.services.background.registry import ProcessRegistry
+from backend.services.background.tagging import TaggingProcess
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
@@ -573,6 +580,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         writer_adapter=get_writer_adapter_path,
         get_all_vlms=get_all_vlm_clients,
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+        vlm_activity_hold=interactive_vlm_hold,
     )
     i2v_runner.on_event(
         lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
@@ -596,6 +604,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_root=Path(comfy_cfg["output_root"]),
         get_config=lambda: get_t2i_config(load_app_config()),
         unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+        vlm_activity_hold=interactive_vlm_hold,
         # "base+taste": favorite prompts as examples, CLIP only when ready.
         taste_examples=TasteExamplesService(get_db()).examples_for,
         # "adapter:<id>": the writer's llama-server serves the adapter.
@@ -746,13 +755,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         or generation_busy(t2i_runner, comfy_client, i2v_runner),
     )
     t2i_runner.on_event(auto_index.on_t2i_event)
+
     # The post-embedding VLM tag drain waits for the same "no generation in
     # flight" so a 27B never loads into a render.
     # Writer training holds the GPU: the drain (and the hindsight briefs,
     # which wait on the same probe) wait it out too.
-    similarity.set_generation_busy_probe(
-        lambda: gpu_reserved() or generation_busy(t2i_runner, comfy_client, i2v_runner)
+    def _generation_or_training_busy() -> bool:
+        return gpu_reserved() or generation_busy(t2i_runner, comfy_client, i2v_runner)
+
+    similarity.set_generation_busy_probe(_generation_or_training_busy)
+
+    # The tag queue outlives the process: Tagging resumes what remains once
+    # everything it waits on is wired (a persisted owner pause keeps it paused).
+    tagging = TaggingProcess(
+        background_registry,
+        get_vlm_client,
+        get_db,
+        _generation_or_training_busy,
     )
+    background_registry.register(tagging)
+    set_tagging_process(tagging)
+    await tagging.kick_if_queued()
 
     try:
         yield
@@ -783,7 +806,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Auto index scheduler shutdown raised")
         # The embedding queue is the rescore trigger: stop it (and unhook)
         # before closing the taste service that consumes it.
-        await similarity.shutdown_embedding_queue()  # cancels any VLM drain
+        await tagging.aclose()  # cancels any VLM drain
+        set_tagging_process(None)
+        await similarity.shutdown_embedding_queue()
         try:
             from backend.services import hindsight_briefs
 

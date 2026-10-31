@@ -15,12 +15,23 @@ import asyncio
 import json
 import logging
 import random
+import contextlib
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
 from metascan.core.generation_categories import tag_generated_media
@@ -121,6 +132,10 @@ SEED_MAX = 2**31 - 1
 
 # How many ended runs stay known, so a late cancel answers "over", not 404.
 _FINISHED_KEEP = 50
+
+
+def _no_hold(by: str) -> ContextManager[None]:
+    return contextlib.nullcontext()
 
 
 def _random_seed() -> int:
@@ -236,9 +251,13 @@ class I2vRunner:
         writer_adapter: Optional[Callable[[int], Optional[Path]]] = None,
         get_all_vlms: Optional[Callable[[], Iterable[Any]]] = None,
         unload_vlm_during_generation: bool = True,
+        vlm_activity_hold: Optional[Callable[[str], ContextManager[None]]] = None,
     ) -> None:
         self.db = db
         self.comfy = comfy
+        # Holds Tagging while the writer prompts (injected by the lifespan:
+        # metascan/core never imports backend); default: no hold.
+        self._vlm_hold = vlm_activity_hold or _no_hold
         self.get_vlm = get_vlm  # the prompt-writer client
         # Adapter id -> its GGUF when the writer's llama-server serves it;
         # None: no adapter can be used.
@@ -348,17 +367,18 @@ class I2vRunner:
         extra: Dict[str, Any] = {}
         if lora_path is not None:
             extra["lora_path"] = lora_path
-        await vlm.ensure_started(model_id)
-        try:
-            return await self._write(
-                vlm, path, idea, duration_s, template, model_id, extra
-            )
-        except AdapterLoadingError as exc:
-            raise WriterAdapterUnavailable(
-                writer, str(exc), code=ADAPTER_LOADING
-            ) from exc
-        except AdapterNotLoadedError as exc:
-            raise WriterAdapterUnavailable(writer, str(exc)) from exc
+        with self._vlm_hold("Prompt writer"):
+            await vlm.ensure_started(model_id)
+            try:
+                return await self._write(
+                    vlm, path, idea, duration_s, template, model_id, extra
+                )
+            except AdapterLoadingError as exc:
+                raise WriterAdapterUnavailable(
+                    writer, str(exc), code=ADAPTER_LOADING
+                ) from exc
+            except AdapterNotLoadedError as exc:
+                raise WriterAdapterUnavailable(writer, str(exc)) from exc
 
     async def _adapter_lora(self, writer: str) -> Optional[Path]:
         """None for ``base``; the GGUF of a servable I2V adapter for

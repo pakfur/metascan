@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.api import vlm as vlm_api
+from backend.dependencies import interactive_vlm_hold
 from backend.services.gpu_lock import GPU_FREE
 from metascan.core.vlm_client import STATE_READY, VlmClient, VlmError
 
@@ -107,20 +108,22 @@ async def chat(body: ChatRequest) -> StreamingResponse:
 
     async def stream() -> AsyncIterator[bytes]:
         start = time.monotonic()
-        try:
-            async for kind, text in client.chat_stream(
-                messages=messages,
-                image_path=image_path,
-                temperature=body.temperature,
-                max_tokens=body.max_tokens,
-            ):
-                yield _ndjson(
-                    {"type": "delta" if kind == "content" else kind, "text": text}
-                )
-        except VlmError as e:
-            logger.warning("chat stream failed: %s", e)
-            yield _ndjson({"type": "error", "message": str(e)})
-            return
+        # Tagging yields for the request plus a grace: a chat has no clear end.
+        with interactive_vlm_hold("Chat"):
+            try:
+                async for kind, text in client.chat_stream(
+                    messages=messages,
+                    image_path=image_path,
+                    temperature=body.temperature,
+                    max_tokens=body.max_tokens,
+                ):
+                    yield _ndjson(
+                        {"type": "delta" if kind == "content" else kind, "text": text}
+                    )
+            except VlmError as e:
+                logger.warning("chat stream failed: %s", e)
+                yield _ndjson({"type": "error", "message": str(e)})
+                return
         elapsed = int((time.monotonic() - start) * 1000)
         yield _ndjson(
             {

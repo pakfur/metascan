@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.dependencies import get_db
+from backend.dependencies import get_db, get_tagging_process
 from backend.services.vlm_roles import Role, VlmRoles, WriterModelNotAllowed
 from backend.services.gpu_lock import GPU_FREE
 from metascan.core.vlm_select import vlm_model_installed
@@ -338,6 +338,13 @@ async def unload(body: ActiveBody) -> Dict[str, Any]:
     )
     if client is None:
         return dict(general.snapshot())
+    if client is general:
+        # The owner's unload of the general model is never undone by
+        # background work: Tagging pauses first (in-flight images finish,
+        # the queue keeps the rest) and stays paused after holds release.
+        tagging = get_tagging_process()
+        if tagging is not None:
+            await tagging.owner_unloaded()
     await client.shutdown()
     return dict(client.snapshot())
 

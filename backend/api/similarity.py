@@ -12,8 +12,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.config import load_app_config, save_app_config
-from backend.dependencies import get_db
-from backend.services.scan_dispatch import preferred_vlm_model_id, should_tag_with_vlm
+from backend.dependencies import get_db, get_tagging_process
+from backend.services.scan_dispatch import should_tag_with_vlm
 from backend.ws.manager import ws_manager
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.embedding_manager import FaissIndexManager
@@ -51,18 +51,10 @@ _vlm_scan_stops: Optional[Tuple[Any, int]] = None
 # callbacks fire on a worker thread (the poller uses asyncio.to_thread), so
 # coroutines they need must be handed to this loop thread-safely.
 _server_loop: Optional[asyncio.AbstractEventLoop] = None
-# Touched only on the loop thread (inside _drain), so no lock is needed.
-_vlm_drain_running: bool = False
-# A request that arrived mid-drain: one more pass picks up what was queued
-# meanwhile.
-_vlm_drain_rerun: bool = False
-# The in-flight scheduled drain, cancelled on shutdown.
-_vlm_drain_future: Optional["concurrent.futures.Future[None]"] = None
 # True while ComfyUI generation work is in flight (installed from the
 # lifespan: auto_index.generation_busy). The post-embedding VLM drain waits
 # for it to settle -- no VLM tagging competes with a render for the GPU.
 _generation_busy: Optional[Callable[[], bool]] = None
-_VLM_DRAIN_DEFER_POLL_S = 5.0
 
 
 def _capture_vlm_scan_stops() -> Optional[Tuple[Any, int]]:
@@ -74,25 +66,6 @@ def _capture_vlm_scan_stops() -> Optional[Tuple[Any, int]]:
     if client is None or not isinstance(stops, int):
         return None
     return (client, stops)
-
-
-def _vlm_stops_since_scan(client: Any) -> Optional[int]:
-    """The ``_explicit_stops`` value the drain must still see to (re)start
-    ``client``, or None (no snapshot, or the role rebuilt the client since,
-    so the scan never saw it unloaded)."""
-    snap = _vlm_scan_stops
-    if snap is None or snap[0] is not client:
-        return None
-    return snap[1]
-
-
-def cancel_vlm_drain() -> None:
-    """Shutdown hook: cancel an in-flight post-embedding drain."""
-    global _vlm_drain_future
-    fut = _vlm_drain_future
-    _vlm_drain_future = None
-    if fut is not None and not fut.done():
-        fut.cancel()
 
 
 def set_server_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
@@ -124,20 +97,6 @@ def generation_in_flight() -> bool:
     """Public form of the generation-busy probe (other background VLM jobs
     wait on the same signal)."""
     return _generation_in_flight()
-
-
-async def _wait_for_generation_to_settle() -> bool:
-    """Wait (on the loop) while generation work is in flight. True when it
-    had to wait."""
-    if not _generation_in_flight():
-        return False
-    logger.info(
-        "VLM drain after scan deferred: ComfyUI generation in flight; "
-        "it runs when the generation settles"
-    )
-    while _generation_in_flight():
-        await asyncio.sleep(_VLM_DRAIN_DEFER_POLL_S)
-    return True
 
 
 def set_embedding_complete_hook(hook: Optional[Callable[[], None]]) -> None:
@@ -367,107 +326,23 @@ def _log_faiss_reload_failure(fut: "concurrent.futures.Future[None]") -> None:
 def _schedule_vlm_drain_after_complete(
     eq: Optional[EmbeddingQueue] = None, *, fresh: bool = False
 ) -> None:
-    """Run VlmTagPump.drain_once() on the server loop after an embedding build.
+    """Ask the Tagging process to drain the tag queue.
 
-    Called from the ``on_complete`` sync callback, which runs on a worker
-    thread (the poller uses ``asyncio.to_thread``), so ``get_running_loop``
-    would always raise here.  The coroutine is handed to the loop captured at
-    startup via ``run_coroutine_threadsafe``.  With no usable loop we warn and
-    leave the ``vlm_tag_queue`` rows untouched for the next drain.  Drains
-    never overlap: a request arriving mid-drain sets a rerun flag and the
-    running drain makes one more pass (coalesced).  ``fresh`` (the retag
-    route: the owner just asked) ignores the scan's unload snapshot.  ``eq`` is unused (the
-    queue is a table now); the retag route calls this with none.
+    Called from the ``on_complete`` sync callback (a worker thread) and from
+    the retag route; ``TaggingProcess.kick`` is thread-safe, skips a held,
+    paused or stopped process (the rows stay queued; a release resumes
+    them) and coalesces overlapping requests. ``fresh`` (the retag route:
+    the owner just asked) ignores the scan's unload snapshot.  ``eq`` is
+    unused (the queue is a table now).
     """
-
-    async def _drain() -> None:
-        global _vlm_drain_running, _vlm_drain_rerun
-        if _vlm_drain_running:
-            _vlm_drain_rerun = True
-            logger.info("VLM drain after scan: one already running, will rerun after")
-            return
-        _vlm_drain_running = True
-        try:
-            # Never tag while ComfyUI renders: wait for the generation to
-            # settle (requests arriving meanwhile coalesce into the rerun).
-            deferred = await _wait_for_generation_to_settle()
-            from backend.api.vlm import get_vlm_client
-            from backend.services.vlm_tag_pump import VlmTagPump
-
-            from metascan.core.vlm_models import REGISTRY as VLM_REGISTRY
-            from metascan.core.vlm_select import vlm_model_installed
-
-            client = get_vlm_client()  # the general role's client
-            if client is None:
-                logger.debug("VLM drain skipped: no VlmClient installed")
-                return
-            # The general role's model when it is installed, else the
-            # installed hardware pick (tagging never waits on a download).
-            mid = getattr(client, "model_id", None) or getattr(
-                client, "preferred_model_id", None
-            )
-            if not mid or not await asyncio.to_thread(vlm_model_installed, mid):
-                mid = preferred_vlm_model_id(detect_hardware())
-            if not mid:
-                logger.debug("VLM drain skipped: no preferred VLM model for this host")
-                return
-            spec = VLM_REGISTRY.get(mid)
-            # A drain that waited for a render: the render's own VLM unload
-            # (an explicit stop) is behind it, so snapshot again now that
-            # the GPU is free; otherwise an unload since the scan began wins.
-            since = (
-                getattr(client, "_explicit_stops", None)
-                if deferred
-                else (None if fresh else _vlm_stops_since_scan(client))
-            )
-            if not isinstance(since, int):
-                since = None
-            pump = VlmTagPump(
-                client=client,
-                db=get_db(),
-                model_id=mid,
-                concurrency=spec.parallel_slots if spec is not None else 2,
-                # An explicit unload (ComfyUI render, /unload) since the
-                # scan started wins: the drain must not bring the VLM back.
-                unless_stopped_since=since,
-            )
-            while True:
-                _vlm_drain_rerun = False
-                if await _wait_for_generation_to_settle():
-                    stops = getattr(client, "_explicit_stops", None)
-                    pump._unless_stopped_since = (
-                        stops if isinstance(stops, int) else None
-                    )
-                drained = await pump.drain_once()
-                logger.info(f"VLM drain after scan: tagged {drained} file(s)")
-                if not _vlm_drain_rerun:
-                    break
-        except Exception:
-            logger.exception("VLM drain after scan failed")
-        finally:
-            _vlm_drain_running = False
-            _vlm_drain_rerun = False
-
-    global _vlm_drain_future
-    loop = _server_loop
-    if loop is None or loop.is_closed():
+    process = get_tagging_process()
+    if process is None:
         logger.warning(
-            "VLM drain after scan not scheduled: server event loop unavailable; "
+            "VLM drain after scan not scheduled: tagging process unavailable; "
             "pending tags stay queued for the next drain"
         )
         return
-    coro = _drain()
-    try:
-        fut = asyncio.run_coroutine_threadsafe(coro, loop)
-        # A coalesced request returns at once; keep tracking the real drain.
-        if _vlm_drain_future is None or _vlm_drain_future.done():
-            _vlm_drain_future = fut
-    except RuntimeError:
-        coro.close()
-        logger.warning(
-            "VLM drain after scan not scheduled: server event loop closed; "
-            "pending tags stay queued for the next drain"
-        )
+    process.kick(fresh=fresh, scan_stops=None if fresh else _vlm_scan_stops)
 
 
 async def _embed_poll_loop() -> None:
@@ -497,7 +372,6 @@ def init_embedding_queue() -> None:
 async def shutdown_embedding_queue() -> None:
     """Shutdown hook: cancel poller and any running worker."""
     global _embed_poll_task
-    cancel_vlm_drain()
     if _embed_poll_task is not None:
         _embed_poll_task.cancel()
         try:

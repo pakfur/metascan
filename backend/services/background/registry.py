@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 Action = Literal["start", "pause", "resume", "stop"]
 NOTIFY_MIN_INTERVAL_S = 0.5  # two events per second per process
 TICK_S = 0.1
+# Chat, playground and writer prompting hold Tagging this long after a request:
+# a chat has no clear end (spec 7).
+INTERACTIVE_GRACE_S = 60.0
 
 
 class CommandRefused(Exception):

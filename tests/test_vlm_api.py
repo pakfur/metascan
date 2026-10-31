@@ -169,3 +169,18 @@ def test_active_endpoint_400_on_unknown_model(app_with_stub_vlm):
     c, _ = app_with_stub_vlm
     r = c.post("/api/vlm/active", json={"model_id": "qwen3vl-bogus"})
     assert r.status_code == 400
+
+
+def test_unload_of_the_general_model_is_an_owner_pause_of_tagging(app_with_stub_vlm):
+    c, stub = app_with_stub_vlm
+    stub.shutdown = AsyncMock(return_value=None)
+    r = c.post("/api/vlm/unload", json={"model_id": "qwen3vl-4b"})
+    assert r.status_code == 200
+    stub.shutdown.assert_awaited_once()
+    st = next(
+        p for p in c.get("/api/background").json()["processes"] if p["id"] == "tagging"
+    )
+    assert st["state"] == "paused"
+    assert st["activity"] == "Paused: model unloaded"
+    # Leave no persisted intent behind for the next test's lifespan.
+    c.post("/api/background/tagging/resume")

@@ -119,21 +119,42 @@ the root CLAUDE.md still applies.
   `_is_resident()` after its own `_ensure_resident` returns and re-ensures
   again (bounded by `_EVICTION_RETRIES`) instead of running the request
   against the stopped server.
-  The post-scan tag drain (`similarity._schedule_vlm_drain_after_complete`,
-  run on the captured server loop, coalesced) is a background re-ensure
-  too: `_start_index_build` snapshots the general client's
-  `_explicit_stops`, and `VlmTagPump(unless_stopped_since=…)` passes it to
-  `VlmClient.ensure_started(…, unless_stopped_since=…)`, which refuses to
-  spawn after an explicit unload since the scan began; the batch stays
-  queued in the durable `vlm_tag_queue` table (v8; a row leaves only once
-  its tags are written) for the next drain. The drain also waits
-  while ComfyUI generation is in flight (`similarity.
-  set_generation_busy_probe`, installed from the lifespan with
-  `auto_index.generation_busy`; a failing probe counts as busy), polling
-  every `_VLM_DRAIN_DEFER_POLL_S` and running on its own once the work
-  settles — before each pass, including coalesced reruns. A drain that
-  had to wait re-snapshots `_explicit_stops` after the wait: the render's
-  own VLM unload is then behind it and must not strand the batch.
+  The tag drain belongs to `TaggingProcess`
+  (`backend/services/background/tagging.py`, registry id `tagging`);
+  `similarity._schedule_vlm_drain_after_complete` and the retag route's
+  `fresh=True` only call its thread-safe `kick()`. `kick()` does nothing
+  while `registry.blocked("tagging")` (held, paused, stopped: the rows stay
+  queued and a registry release calls `resume()`, which kicks), runs the
+  drain on the server loop and coalesces overlapping kicks into one rerun.
+  The drain is a background re-ensure too: `_start_index_build` snapshots
+  the general client's `_explicit_stops` and the scan's kick passes it
+  (`scan_stops`), so `VlmTagPump(unless_stopped_since=…)` ->
+  `VlmClient.ensure_started(…, unless_stopped_since=…)` refuses to spawn
+  after an explicit unload since the scan began; the batch stays queued in
+  the durable `vlm_tag_queue` table (v8; a row leaves only once its tags are
+  written). Every other kick (retag, resume, retry, startup) snapshots the
+  stops when the drain runs. The drain waits while ComfyUI generation is in
+  flight (the `generation_busy` the lifespan passes, the same probe as
+  `similarity.set_generation_busy_probe`; a failing probe counts as busy;
+  panel `waiting`, "Waiting for image generation"), polling every
+  `DEFER_POLL_S` and running on its own once the work settles -- before each
+  pass, including reruns -- and a drain that had to wait re-snapshots
+  `_explicit_stops` after it: the render's own VLM unload is behind it and
+  must not strand the batch. A pass that ends with rows left means the VLM
+  is not ready (`VlmNotReady`, GPU busy, unloaded under a request): the
+  panel is `waiting` and a slow timer (`RETRY_S` = 30 s, no busy loop)
+  kicks again. `lifespan` calls `kick_if_queued()` once after startup
+  (a persisted owner pause keeps it paused). An owner `POST /api/vlm/unload`
+  of the general client calls `TaggingProcess.owner_unloaded()` BEFORE the
+  shutdown: an owner pause through the registry ("Paused: model unloaded"),
+  which persists and survives hold releases; a ComfyUI unload goes through
+  the runner, not that route, and so resumes at release. Chat, the prompt
+  playground and writer prompting hold Tagging for each request plus
+  `INTERACTIVE_GRACE_S` (60 s): `dependencies.interactive_vlm_hold(label)`
+  in `chat.py` ("Chat") and `prompt.py` ("Prompt playground"), and the
+  runners' injected `vlm_activity_hold` ("Prompt writer"; metascan/core
+  never imports backend, the default is a no-op). The panel `activity` is
+  counts only: never a path or a prompt.
 - **Prompt-writer adapters (LoRA) ride the writer's llama-server.**
   `VlmRoles(adapter_source=…)` (wired in the lifespan to
   `writer_adapters.servable_adapter_files`: `ready`/`untested` rows whose
