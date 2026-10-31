@@ -191,17 +191,19 @@ class ProcessRegistry:
                 self._sticky_error[pid] = rep.error or "failed"
             elif rep.state == State.RUNNING:
                 self._sticky_error.pop(pid, None)
-        for pid in self._resuming:
-            rep = reports.get(pid)
+        for rid in self._resuming:
+            held_rep = reports.get(rid)
             if (
-                rep is not None
-                and rep.state == State.PAUSED
-                and self._intent.get(pid, "none") == "none"
+                held_rep is not None
+                and held_rep.state == State.PAUSED
+                and self._intent.get(rid, "none") == "none"
             ):
                 # The hold ended or the owner pressed play, but the adapter has
                 # not run resume() yet: never show paused with no intent and no
                 # holder (the owner's Play would be refused as not_paused).
-                reports[pid] = replace(rep, state=State.WAITING, activity="Resuming")
+                reports[rid] = replace(
+                    held_rep, state=State.WAITING, activity="Resuming"
+                )
         memo: Dict[str, Tuple[State, List[str]]] = {}
 
         def holders_of(pid: str) -> List[str]:
