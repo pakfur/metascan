@@ -74,6 +74,7 @@ _scan_error: Optional[str] = None
 # start_scan around the moment it marks a scan running, so a move can't land
 # after a scan's taste snapshot.
 move_gate = threading.Lock()
+MOVE_GATE_WAIT_S = 30.0
 
 PROGRESS_POKE_INTERVAL_S = 0.25
 _PER_FILE_FIELDS = frozenset({"current", "total", "file"})
@@ -394,14 +395,21 @@ async def start_scan(body: ScanRequest):
     process = get_import_process()
     if process is not None:
         await process.owner_scan_starting()
-    _scan_error = None
-    _progress = {}
-    _cancel_requested = False
-    # A move in flight finishes first (off the loop: it may take a while).
-    await asyncio.to_thread(move_gate.acquire)
+    # A move in flight finishes first. Polled in this coroutine, not in a
+    # worker thread: a cancelled request must not leave a thread that goes on
+    # to take the lock and never release it.
+    deadline = time.monotonic() + MOVE_GATE_WAIT_S
+    while not move_gate.acquire(blocking=False):
+        if time.monotonic() >= deadline:
+            raise HTTPException(status_code=409, detail="Library busy, try again")
+        await asyncio.sleep(0.05)
     try:
         if scan_running():
             raise HTTPException(status_code=409, detail="Scan already in progress")
+        # Only a request that starts the scan resets the last run's state.
+        _scan_error = None
+        _progress = {}
+        _cancel_requested = False
         _scan_task = asyncio.create_task(_run_scan(body.full_cleanup, body.full_clean))
     finally:
         move_gate.release()

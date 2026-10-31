@@ -781,3 +781,49 @@ def test_start_scan_waits_for_a_move_in_flight(rig, monkeypatch):
         scan_api._scan_task = None
         if gate.locked():
             gate.release()
+
+
+def test_a_cancelled_start_scan_leaves_the_gate_free(rig, monkeypatch):
+    gate = scan_api.move_gate
+    gate.acquire()
+    scan_api._scan_task = None
+    monkeypatch.setattr(scan_api, "get_import_process", lambda: None)
+
+    async def go():
+        task = asyncio.create_task(scan_api.start_scan(scan_api.ScanRequest()))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        gate.release()
+        await asyncio.sleep(0.2)  # a leaked worker thread would take it now
+        return gate.acquire(blocking=False)
+
+    try:
+        assert run(go()) is True
+    finally:
+        if gate.locked():
+            gate.release()
+
+
+def test_the_loser_of_the_race_does_not_clear_a_running_scans_state(rig, monkeypatch):
+    monkeypatch.setattr(scan_api, "get_import_process", lambda: None)
+    monkeypatch.setattr(scan_api, "_progress", {"phase": "scanning", "current": 3})
+    monkeypatch.setattr(scan_api, "_cancel_requested", True)
+    monkeypatch.setattr(scan_api, "_scan_error", "Boom")
+    scan_api._scan_task = None
+
+    async def go():
+        scan_api._scan_active = True  # a scan started while this request waited
+        try:
+            with pytest.raises(scan_api.HTTPException) as err:
+                await scan_api.start_scan(scan_api.ScanRequest())
+            return err.value.status_code
+        finally:
+            scan_api._scan_active = False
+
+    assert run(go()) == 409
+    assert scan_api._progress == {"phase": "scanning", "current": 3}
+    assert scan_api._cancel_requested is True and scan_api._scan_error == "Boom"
