@@ -411,7 +411,7 @@ function onThumbDragEnd() {
       <div v-if="displayList.length === 0 && !mediaStore.loading" class="empty-state">
         <span class="empty-icon">🖼</span>
         <span>No media to display</span>
-        <span class="empty-hint">Try adjusting your filters or running a scan</span>
+        <span class="empty-hint">Try adjusting your filters. Files in your library folders appear on their own.</span>
       </div>
 
       <div v-else class="scroll-spacer" :style="{ height: totalHeight + 'px' }">

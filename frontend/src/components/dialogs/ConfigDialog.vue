@@ -5,6 +5,8 @@ import ConfigModelsTab from './ConfigModelsTab.vue'
 import ConfigTrainingTab from './ConfigTrainingTab.vue'
 import ConfigI2VTab from './ConfigI2VTab.vue'
 import ConfigT2ITab from './ConfigT2ITab.vue'
+import { useScanStore } from '../../stores/scan'
+import { useViewport } from '../../composables/useViewport'
 
 const emit = defineEmits<{
   close: []
@@ -15,9 +17,19 @@ interface DirEntry {
   search_subfolders: boolean
 }
 
-type TabKey = 'directories' | 'models' | 'training' | 'i2v' | 't2i'
+type TabKey = 'directories' | 'models' | 'training' | 'i2v' | 't2i' | 'maintenance'
 
 const activeTab = ref<TabKey>('directories')
+
+const scanStore = useScanStore()
+const { isMobile } = useViewport()
+
+// The scan dialog is rendered by LibraryView while the scan store is busy,
+// so hand over to it and close this one.
+function openFullClean() {
+  emit('close')
+  void scanStore.prepare()
+}
 
 const directories = ref<DirEntry[]>([])
 const newPath = ref('')
@@ -104,6 +116,14 @@ async function saveDirectories() {
           @click="activeTab = 't2i'"
         >
           Text to Image
+        </button>
+        <button
+          v-if="!isMobile"
+          class="tab"
+          :class="{ active: activeTab === 'maintenance' }"
+          @click="activeTab = 'maintenance'"
+        >
+          Maintenance
         </button>
       </nav>
 
@@ -192,6 +212,21 @@ async function saveDirectories() {
 
       <div v-else-if="activeTab === 't2i'" class="tab-panel">
         <ConfigT2ITab />
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="emit('close')">Close</button>
+        </div>
+      </div>
+
+      <div v-else-if="activeTab === 'maintenance'" class="tab-panel">
+        <h4>Full clean &amp; rescan</h4>
+        <p class="hint">
+          New files in your library folders are imported on their own. A full
+          clean wipes the database and reimports every file; your ratings,
+          reasons and categories are kept.
+        </p>
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="openFullClean">Full clean &amp; rescan…</button>
+        </div>
         <div class="dialog-actions">
           <button class="btn-secondary" @click="emit('close')">Close</button>
         </div>

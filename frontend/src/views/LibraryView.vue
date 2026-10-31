@@ -119,11 +119,6 @@ function closeSlideshow() {
   slideshowOpen.value = false
 }
 
-function openScan() {
-  if (isMobile.value) return
-  scanStore.prepare()
-}
-
 function closeScan() {
   if (scanStore.phase === 'complete' || scanStore.embeddingPhase === 'complete') {
     mediaStore.loadAllMedia()
@@ -170,7 +165,6 @@ useKeyboard([
     },
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
-  { key: 's', ctrl: true, handler: openScan },
   { key: 'd', ctrl: true, shift: true, handler: () => { if (!isMobile.value) dupFinderOpen.value = true } },
   { key: 'u', ctrl: true, handler: handleUpscaleFromSelected },
 ])
@@ -194,7 +188,6 @@ watch(isMobile, () => {
       <template #center>
         <div class="center-stack">
           <ContentSearchBar
-            @scan="openScan"
             @refresh="mediaStore.loadAllMedia()"
             @upscale-queue="upscaleQueueOpen = true"
             @find-duplicates="dupFinderOpen = true"

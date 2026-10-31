@@ -19,8 +19,6 @@ export const useScanStore = defineStore('scan', () => {
   // Scan state
   const phase = ref<ScanPhase>('idle')
   const prepareResult = ref<ScanPrepareResult | null>(null)
-  const fullCleanup = ref(false)
-  const scanMode = ref<'incremental' | 'full_clean'>('incremental')
   const errorMessage = ref('')
 
   // Scan progress
@@ -218,8 +216,8 @@ export const useScanStore = defineStore('scan', () => {
     outputCheckFailed.value = false
     try {
       await startScan({
-        full_cleanup: fullCleanup.value,
-        full_clean: scanMode.value === 'full_clean',
+        full_cleanup: false,
+        full_clean: true,
       })
     } catch (e) {
       // A refused start never reaches the WebSocket, e.g. 409
@@ -238,7 +236,6 @@ export const useScanStore = defineStore('scan', () => {
   function reset() {
     phase.value = 'idle'
     prepareResult.value = null
-    fullCleanup.value = false
     errorMessage.value = ''
     fileCurrent.value = 0
     fileTotal.value = 0
@@ -280,8 +277,6 @@ export const useScanStore = defineStore('scan', () => {
   return {
     phase,
     prepareResult,
-    fullCleanup,
-    scanMode,
     errorMessage,
     currentDir,
     dirCurrent,

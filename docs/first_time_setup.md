@@ -282,7 +282,7 @@ Vite prints a local URL (usually `http://localhost:5173`). Open it in any modern
 From the running app:
 
 1. Click **Config** → **Folders** and add a directory containing your media.
-2. Click **Scan** to index files. The scan dialog streams real-time progress over WebSocket.
+2. Files in those folders are imported on their own; the activity grid shows the progress. (Config → Maintenance has Full clean & rescan.)
 3. Browse the thumbnail grid; double-click for the full-screen viewer; right-click for context actions.
 
 ## Troubleshooting
