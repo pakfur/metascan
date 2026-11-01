@@ -3,6 +3,7 @@ isolated DB, explicit clock)."""
 
 import asyncio
 
+from metascan.utils.path_utils import to_native_path
 from tests._taste_service_fixtures import (  # noqa: F401
     after,
     db,
@@ -411,7 +412,9 @@ async def test_model_with_old_labels_version_is_due(service, db, fake_runner):
     assert st["labels_outdated"] is True and st["new_events"] == 0
     # Its scores stay served until the retrain lands.
     assert (await service.scores())["model_id"] == mid
-    assert (await service.scores())["scores"] == {"/lib/mpos00.png": 0.7}
+    assert (await service.scores())["scores"] == {
+        to_native_path("/lib/mpos00.png"): 0.7
+    }
     assert await service.maybe_retrain(now=after(500)) is True
     await service.wait_idle()
     assert len(fake_runner.train_calls) == 1

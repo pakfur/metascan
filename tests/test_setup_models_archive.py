@@ -8,6 +8,7 @@ Uses file:// URLs so no network is involved.
 
 import io
 import stat
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -36,6 +37,10 @@ def _make_targz(path: Path, prefix: str = "llama-b10456/bin/") -> None:
         add_file("extras/README.txt", b"skip me")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Linux/macOS assets: Windows gets a flat zip with no symlinks",
+)
 @pytest.mark.parametrize(
     "prefix",
     [
@@ -81,6 +86,10 @@ def _make_zip(path: Path, prefix: str = "llama-b10456/") -> None:
         add_file("extras/README.txt", b"skip me")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Linux/macOS assets: Windows gets a flat zip with no symlinks",
+)
 def test_zip_asset_extracts_flat_with_symlinks(tmp_path):
     archive = tmp_path / "llama-b10456-bin-win-cpu-x64.zip"
     _make_zip(archive)
@@ -96,4 +105,22 @@ def test_zip_asset_extracts_flat_with_symlinks(tmp_path):
     assert link.is_symlink()
     assert link.readlink() == Path("libllama.so.0.0.1")
     assert not (tmp_path / "out" / "README.txt").exists()
+    assert not (tmp_path / "out" / "extras").exists()
+
+
+def test_windows_zip_extracts_flat_beside_the_binary(tmp_path, monkeypatch):
+    """The Windows asset: a flat zip of the .exe and its DLLs."""
+    monkeypatch.setattr(
+        "metascan.utils.llama_server.binary_filename", lambda: "llama-server.exe"
+    )
+    archive = tmp_path / "llama-b10456-bin-win-cuda-12.4-x64.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("llama-server.exe", b"MZ")
+        zf.writestr("ggml-cuda.dll", b"MZ")
+        zf.writestr("extras/README.txt", b"skip me")
+    dest = tmp_path / "out" / "llama-server.exe"
+
+    assert _ensure_target(DownloadTarget(url=archive.as_uri(), dest=dest)) is True
+    assert dest.read_bytes() == b"MZ"
+    assert (tmp_path / "out" / "ggml-cuda.dll").exists()
     assert not (tmp_path / "out" / "extras").exists()

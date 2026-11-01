@@ -18,6 +18,7 @@ from metascan.core.i2v_runner import (
     render_seconds,
 )
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_posix_path
 
 _WF = {
     "1": {
@@ -672,7 +673,7 @@ class TestCategoryTagging(TestFormStateAtIngest):
             rows = conn.execute(
                 "SELECT c.name, mc.source FROM media_categories mc "
                 "JOIN categories c ON c.id = mc.category_id WHERE mc.file_path = ?",
-                (Path(path).as_posix(),),
+                (to_posix_path(path),),
             ).fetchall()
         return {r["name"]: r["source"] for r in rows}
 
@@ -1188,6 +1189,7 @@ class TestBatchRun(I2vRunnerBase):
         async def submit(*a, **k):
             job_id = await orig(*a, **k)
             if job_id == 102:  # the last job fails before submit returns
+                self.finished.add(job_id)  # and ends once: not again from the poll
                 self._finish(job_id, "failed")
             return job_id
 

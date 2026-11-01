@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 
 
 def _seed_media(db: DatabaseManager, paths) -> None:
@@ -225,7 +226,7 @@ class TestFoldersApi(unittest.TestCase):
         # Simulate the media row going away.
         self.db.delete_media(Path("/lib/a.png"))
         rec = self.client.get("/api/folders").json()[0]
-        self.assertEqual(rec["items"], ["/lib/b.png"])
+        self.assertEqual(rec["items"], [to_native_path("/lib/b.png")])
 
 
 if __name__ == "__main__":

@@ -507,12 +507,23 @@ def test_a_marker_that_cannot_be_removed_keeps_the_prune_paused(
     assert logged.levelno == logging.ERROR
 
 
-def test_a_pending_file_that_cannot_be_checked_pauses_the_prune(db, tmp_path):
+def test_a_pending_file_that_cannot_be_checked_pauses_the_prune(
+    db, tmp_path, monkeypatch
+):
     """Only a missing file means "nothing pending": any other stat error
     (here a data dir that is a file) is raised, and the database counts a
     raising guard as paused."""
     not_a_dir = tmp_path / "data"
     not_a_dir.write_text("", encoding="utf-8")
+    real_stat = os.stat
+
+    def stat(path, *a, **k):
+        # Windows answers "not found" here, where POSIX raises ENOTDIR.
+        if str(path).startswith(str(not_a_dir) + os.sep):
+            raise NotADirectoryError(20, "Not a directory", str(path))
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(ts.os, "stat", stat)
     with pytest.raises(OSError):
         ts.lineage_prune_guard(not_a_dir)()
     db.set_lineage_prune_guard(ts.lineage_prune_guard(not_a_dir))

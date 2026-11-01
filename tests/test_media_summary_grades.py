@@ -18,6 +18,7 @@ import pytest
 from metascan.core import database_sqlite
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 from tests._taste_api_fixtures import client, seeded  # noqa: F401
 from tests.test_grades_migration import _build_v5_db, _judgment
 
@@ -48,6 +49,11 @@ def _grades(rows: List[Dict]) -> Dict[str, Optional[str]]:
     return {r["file_path"]: r["grade"] for r in rows}
 
 
+def _native(grades: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
+    """Expected grades keyed as the read APIs answer: native paths."""
+    return {to_native_path(p): g for p, g in grades.items()}
+
+
 def _plan(conn: sqlite3.Connection, sql: str) -> str:
     return " | ".join(str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + sql))
 
@@ -75,29 +81,31 @@ def test_summary_rows_carry_the_grade(db: DatabaseManager) -> None:
     db.set_grade("/l/clip.mp4", "fail")
 
     rows = db.get_all_media_summaries()
-    assert _grades(rows) == {
-        "/l/pass.png": "pass",
-        "/l/fail.png": "fail",
-        "/l/none.png": None,
-        "/l/seen.png": None,
-        "/l/star.png": None,
-        "/l/cleared.png": None,
-        "/l/clip.mp4": "fail",
-    }
+    assert _grades(rows) == _native(
+        {
+            "/l/pass.png": "pass",
+            "/l/fail.png": "fail",
+            "/l/none.png": None,
+            "/l/seen.png": None,
+            "/l/star.png": None,
+            "/l/cleared.png": None,
+            "/l/clip.mp4": "fail",
+        }
+    )
     by_path = {r["file_path"]: r for r in rows}
     # ★ and grade are independent: ★ alone is no grade, a grade sets no ★.
-    assert by_path["/l/star.png"]["is_favorite"] is True
-    assert by_path["/l/pass.png"]["is_favorite"] is False
+    assert by_path[to_native_path("/l/star.png")]["is_favorite"] is True
+    assert by_path[to_native_path("/l/pass.png")]["is_favorite"] is False
 
 
 def test_a_grade_change_shows_on_the_next_read(db: DatabaseManager) -> None:
     _add(db, "/l/a.png")
     db.set_grade("/l/a.png", "pass")
-    assert _grades(db.get_all_media_summaries()) == {"/l/a.png": "pass"}
+    assert _grades(db.get_all_media_summaries()) == _native({"/l/a.png": "pass"})
     db.set_grade("/l/a.png", "fail")
-    assert _grades(db.get_all_media_summaries()) == {"/l/a.png": "fail"}
+    assert _grades(db.get_all_media_summaries()) == _native({"/l/a.png": "fail"})
     db.set_favorite(Path("/l/a.png"), True)
-    assert _grades(db.get_all_media_summaries()) == {"/l/a.png": "fail"}
+    assert _grades(db.get_all_media_summaries()) == _native({"/l/a.png": "fail"})
 
 
 def test_the_old_reject_flag_is_never_read_as_a_grade(
@@ -116,10 +124,12 @@ def test_the_old_reject_flag_is_never_read_as_a_grade(
     with db._get_connection() as conn:
         conn.execute("UPDATE media_judgments SET passed = 1")
         conn.commit()
-    assert _grades(db.get_all_media_summaries()) == {
-        "/l/old.png": None,
-        "/l/new.png": "pass",
-    }
+    assert _grades(db.get_all_media_summaries()) == _native(
+        {
+            "/l/old.png": None,
+            "/l/new.png": "pass",
+        }
+    )
     assert db.get_grade("/l/old.png") is None
     assert db.get_grade("/l/new.png") == "pass"
 
@@ -135,25 +145,31 @@ def test_grades_ride_every_sort_and_filter(db: DatabaseManager) -> None:
     db.set_grade("/l/c.png", "pass")
 
     for sort in ("date_added", "date_modified", "file_name"):
-        assert _grades(db.get_all_media_summaries(sort=sort)) == {
-            "/l/a.png": "fail",
-            "/l/b.png": "pass",
-        }, sort
-        assert _grades(db.get_all_media_summaries(sort=sort, include_hidden=True)) == {
-            "/l/a.png": "fail",
-            "/l/b.png": "pass",
-            "/l/c.png": "pass",
-        }, sort
-        assert _grades(db.get_all_media_summaries(sort=sort, favorites_only=True)) == {
-            "/l/b.png": "pass"
-        }, sort
+        assert _grades(db.get_all_media_summaries(sort=sort)) == _native(
+            {
+                "/l/a.png": "fail",
+                "/l/b.png": "pass",
+            }
+        ), sort
+        assert _grades(
+            db.get_all_media_summaries(sort=sort, include_hidden=True)
+        ) == _native(
+            {
+                "/l/a.png": "fail",
+                "/l/b.png": "pass",
+                "/l/c.png": "pass",
+            }
+        ), sort
+        assert _grades(
+            db.get_all_media_summaries(sort=sort, favorites_only=True)
+        ) == _native({"/l/b.png": "pass"}), sort
     # Order is unchanged by the grade read (newest added first).
     assert [
         r["file_path"] for r in db.get_all_media_summaries(include_hidden=True)
     ] == [
-        "/l/c.png",
-        "/l/b.png",
-        "/l/a.png",
+        to_native_path("/l/c.png"),
+        to_native_path("/l/b.png"),
+        to_native_path("/l/a.png"),
     ]
 
 
@@ -204,7 +220,10 @@ def test_media_list_and_the_legacy_patch_carry_the_grade(
 ) -> None:
     client.patch("/api/judgments//p/a.png", json={"grade": "fail"})
     rows = {r["file_path"]: r for r in client.get("/api/media").json()}
-    assert (rows["/p/a.png"]["grade"], rows["/p/b.png"]["grade"]) == ("fail", None)
+    assert (
+        rows[to_native_path("/p/a.png")]["grade"],
+        rows[to_native_path("/p/b.png")]["grade"],
+    ) == ("fail", None)
 
     # The legacy ★ PATCH answers with a summary row: the grade rides along
     # (the grid replaces its row with it) and ★ never changes it.
@@ -214,10 +233,15 @@ def test_media_list_and_the_legacy_patch_carry_the_grade(
     r = client.patch("/api/media//p/b.png", json={"playback_speed": 1.5})
     assert r.status_code == 200 and r.json()["grade"] is None
     # Same keys as a list row (the list row also has ``hidden``).
-    assert "grade" in r.json() and set(r.json()) <= set(rows["/p/b.png"])
+    assert "grade" in r.json() and set(r.json()) <= set(
+        rows[to_native_path("/p/b.png")]
+    )
 
     rows = {r["file_path"]: r for r in client.get("/api/media").json()}
-    assert (rows["/p/a.png"]["is_favorite"], rows["/p/a.png"]["grade"]) == (
+    assert (
+        rows[to_native_path("/p/a.png")]["is_favorite"],
+        rows[to_native_path("/p/a.png")]["grade"],
+    ) == (
         True,
         "fail",
     )
@@ -243,7 +267,10 @@ def test_the_legacy_patch_leaves_out_a_grade_it_cannot_read(
     assert r.json()["is_favorite"] is True and "grade" not in r.json()
     assert any("Could not read the grade" in rec.getMessage() for rec in caplog.records)
     rows = {r["file_path"]: r for r in client.get("/api/media").json()}
-    assert (rows["/p/a.png"]["is_favorite"], rows["/p/a.png"]["grade"]) == (
+    assert (
+        rows[to_native_path("/p/a.png")]["is_favorite"],
+        rows[to_native_path("/p/a.png")]["grade"],
+    ) == (
         True,
         "fail",
     )

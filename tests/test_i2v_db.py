@@ -7,6 +7,7 @@ from pathlib import Path
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 
 
 def _seed_media(db, paths):
@@ -262,7 +263,7 @@ class TestI2vFormState(unittest.TestCase):
         vid = self._create(form_state=self.form)
         row = self.db.get_i2v_video(vid)
         self.assertEqual(row["form_state"], self.form)
-        self.assertEqual(row["source_path"], "/lib/src.png")
+        self.assertEqual(row["source_path"], to_native_path("/lib/src.png"))
         self.assertIsNone(self.db.get_i2v_video(vid + 99))
 
     def test_set_form_state_leaves_the_rendered_facts_alone(self):

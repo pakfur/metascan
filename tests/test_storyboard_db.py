@@ -11,6 +11,7 @@ import sqlite3
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 
 
 @pytest.fixture
@@ -198,24 +199,24 @@ def test_select_beat_image_swaps_hidden(db):
         r["file_path"]: r["hidden"]
         for r in db.get_all_media_summaries(include_hidden=True)
     }
-    assert rows["/pics/a.png"] is False
-    assert rows["/pics/b.png"] is True
+    assert rows[to_native_path("/pics/a.png")] is False
+    assert rows[to_native_path("/pics/b.png")] is True
 
     assert db.select_beat_image(beat_id, img_b) is True
     rows = {
         r["file_path"]: r["hidden"]
         for r in db.get_all_media_summaries(include_hidden=True)
     }
-    assert rows["/pics/a.png"] is True
-    assert rows["/pics/b.png"] is False
+    assert rows[to_native_path("/pics/a.png")] is True
+    assert rows[to_native_path("/pics/b.png")] is False
 
     assert db.select_beat_image(beat_id, None) is True
     rows = {
         r["file_path"]: r["hidden"]
         for r in db.get_all_media_summaries(include_hidden=True)
     }
-    assert rows["/pics/a.png"] is True
-    assert rows["/pics/b.png"] is True
+    assert rows[to_native_path("/pics/a.png")] is True
+    assert rows[to_native_path("/pics/b.png")] is True
     beat = db.get_beat(beat_id)
     assert beat["selected_image_id"] is None
 
@@ -311,7 +312,7 @@ def test_delete_panel_unhides_media_and_purges_jobs(db):
 
     assert db.delete_panel(pa)[0] is True
 
-    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert _hidden_by_path(db)[to_native_path("/pics/a.png")] is False
     assert db.get_generation_job(jid) is None
 
 
@@ -326,7 +327,7 @@ def test_delete_scene_unhides_media_and_purges_jobs(db):
 
     assert db.delete_scene(sc)[0] is True
 
-    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert _hidden_by_path(db)[to_native_path("/pics/a.png")] is False
     assert db.get_generation_job(jid) is None
 
 
@@ -341,7 +342,7 @@ def test_delete_storyboard_unhides_media_and_purges_jobs(db):
 
     assert db.delete_storyboard(sb)[0] is True
 
-    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert _hidden_by_path(db)[to_native_path("/pics/a.png")] is False
     assert db.get_generation_job(jid) is None
 
 
@@ -358,7 +359,7 @@ def test_replace_structure_unhides_media_and_purges_jobs(db):
 
     db.replace_storyboard_structure(sb, {"subjects": [], "scenes": []})
 
-    assert _hidden_by_path(db)["/pics/a.png"] is False
+    assert _hidden_by_path(db)[to_native_path("/pics/a.png")] is False
     assert db.get_generation_job(jid) is None
 
 
@@ -403,7 +404,10 @@ def test_list_and_count_beat_images(db):
     db.create_beat_image(beat_id, file_path="/pics/b.png", variant_index=0)
     assert db.count_beat_images(beat_id) == 2
     images = db.list_beat_images(beat_id)
-    assert [i["file_path"] for i in images] == ["/pics/b.png", "/pics/a.png"]
+    assert [i["file_path"] for i in images] == [
+        to_native_path("/pics/b.png"),
+        to_native_path("/pics/a.png"),
+    ]
 
 
 def test_list_generation_jobs_filters_by_panel_ids(db):
@@ -578,8 +582,8 @@ def test_delete_panel_purge_images_deletes_media_rows(db):
     ok, purged = db.delete_panel(pa, purge_images=True)
 
     assert ok is True
-    assert purged == ["/pics/a.png"]
-    assert "/pics/a.png" not in _hidden_by_path(db)
+    assert purged == [to_native_path("/pics/a.png")]
+    assert to_native_path("/pics/a.png") not in _hidden_by_path(db)
     assert db.get_generation_job(jid) is None
 
 
@@ -594,7 +598,10 @@ def test_delete_storyboard_purge_images_deletes_media_rows(db):
     ok, purged, _folder = db.delete_storyboard(sb, purge_images=True)
 
     assert ok is True
-    assert sorted(purged) == ["/pics/a.png", "/pics/b.png"]
+    assert sorted(purged) == [
+        to_native_path("/pics/a.png"),
+        to_native_path("/pics/b.png"),
+    ]
     assert _hidden_by_path(db) == {}
 
 
@@ -608,8 +615,8 @@ def test_delete_scene_purge_images_deletes_media_rows(db):
     ok, purged = db.delete_scene(sc, purge_images=True)
 
     assert ok is True
-    assert purged == ["/pics/a.png"]
-    assert "/pics/a.png" not in _hidden_by_path(db)
+    assert purged == [to_native_path("/pics/a.png")]
+    assert to_native_path("/pics/a.png") not in _hidden_by_path(db)
 
 
 def test_purge_spares_media_referenced_by_another_panel(db):
@@ -629,7 +636,7 @@ def test_purge_spares_media_referenced_by_another_panel(db):
 
     assert ok is True
     assert purged == []
-    assert _hidden_by_path(db)["/pics/shared.png"] is False
+    assert _hidden_by_path(db)[to_native_path("/pics/shared.png")] is False
 
 
 def test_purge_spares_media_used_as_subject_reference(db):
@@ -650,7 +657,7 @@ def test_purge_spares_media_used_as_subject_reference(db):
 
     assert ok is True
     assert purged == []
-    assert _hidden_by_path(db)["/pics/ref.png"] is False
+    assert _hidden_by_path(db)[to_native_path("/pics/ref.png")] is False
 
 
 def test_delete_storyboard_removes_its_folder(db):

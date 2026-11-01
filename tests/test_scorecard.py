@@ -35,6 +35,7 @@ from metascan.core.t2i_runner import T2iRequestError
 from metascan.core.t2i_wildcards import caption_reject_reason
 from metascan.core.writer_adapters import adapter_writer_id
 from metascan.core.writer_dataset import build_examples
+from metascan.utils.path_utils import to_posix_path
 from tests.test_writer_adapter_serving import BASE, AdapterCase
 
 
@@ -575,7 +576,11 @@ def test_scorecard_tombstones_are_found_by_their_column(
         lib.db.set_grade(path, grade)
         assert lib.db.delete_media(Path(path))
     tombs = {t["file_path"]: t["scorecard_id"] for t in lib.db.list_tombstones()}
-    assert tombs == {base: lib.card, adapter: lib.card, plain: None}
+    assert tombs == {
+        to_posix_path(base): lib.card,
+        to_posix_path(adapter): lib.card,
+        to_posix_path(plain): None,
+    }
     with lib.db.lock, lib.db._get_connection() as conn:
         # Not JSON and not a scorecard tombstone: never read.
         conn.execute(

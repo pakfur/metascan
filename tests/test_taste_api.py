@@ -21,6 +21,7 @@ from tests._taste_service_fixtures import (  # noqa: F401
     service,
     taste_config,
 )
+from metascan.utils.path_utils import to_native_path
 
 
 @pytest.fixture
@@ -161,9 +162,12 @@ def test_scores_served_when_fresh(client, db):
     mid = _scores(db, {"/s/a.png": 0.25, "/s/b.png": 0.75})
     body = client.get("/api/taste/scores").json()
     assert body["model_id"] == mid
-    assert body["scores"] == {"/s/a.png": 0.25, "/s/b.png": 0.75}
+    assert body["scores"] == {
+        to_native_path("/s/a.png"): 0.25,
+        to_native_path("/s/b.png"): 0.75,
+    }
     sub = client.post("/api/taste/scores", json={"file_paths": ["/s/b.png"]}).json()
-    assert sub == {"model_id": mid, "scores": {"/s/b.png": 0.75}}
+    assert sub == {"model_id": mid, "scores": {to_native_path("/s/b.png"): 0.75}}
 
 
 def test_scores_empty_when_stale(client, db, fake_runner):
@@ -209,17 +213,17 @@ def test_review_queue_is_ungraded_images(client, db):
     db.set_grade("/q/star_bad.png", "fail")
     body = client.get("/api/taste/review-queue").json()
     assert body["paths"] == [
-        "/q/seen.png",
-        "/q/near.png",
-        "/q/star.png",
-        "/q/mid.png",
-        "/q/cleared.png",
-        "/q/far_hi.png",
-        "/q/far_lo.png",
+        to_native_path("/q/seen.png"),
+        to_native_path("/q/near.png"),
+        to_native_path("/q/star.png"),
+        to_native_path("/q/mid.png"),
+        to_native_path("/q/cleared.png"),
+        to_native_path("/q/far_hi.png"),
+        to_native_path("/q/far_lo.png"),
     ]
     assert client.get("/api/taste/review-queue?limit=2").json()["paths"] == [
-        "/q/seen.png",
-        "/q/near.png",
+        to_native_path("/q/seen.png"),
+        to_native_path("/q/near.png"),
     ]
 
 

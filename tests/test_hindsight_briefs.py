@@ -21,6 +21,7 @@ from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
 from metascan.core.prompt_store import PromptStore
 from metascan.core.vlm_client import VlmError, is_background_vlm_work
+from metascan.utils.path_utils import to_posix_path
 
 NOW = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
 
@@ -94,16 +95,17 @@ def _gen(
 def _library(db, tmp_path, name, *, grade="pass", favorite=False):
     """A library image (no T2I row) with a prompt and a known model family."""
     path = _save(db, tmp_path / name)
+    stored = to_posix_path(path)
     with db.lock, db._get_connection() as conn:
         conn.execute(
             "UPDATE media SET data = json_set(data, '$.prompt', 'LIB') "
             "WHERE file_path = ?",
-            (path,),
+            (stored,),
         )
         conn.execute(
             "INSERT INTO indices (index_type, index_key, file_path) "
             "VALUES ('model', 'krea2_dev.safetensors', ?)",
-            (path,),
+            (stored,),
         )
         conn.commit()
     _mark(db, path, grade=grade, favorite=favorite)
@@ -234,12 +236,8 @@ def test_resumable_skips_briefed(db, store, tmp_path):
     client, events = FakeClient(), []
     asyncio.run(_run(_job(db, store, client, events)))
     assert [c["image_path"].name for c in client.calls] == ["b.png"]
-    assert (
-        db.get_hindsight_briefs([str(tmp_path / "a.png")])[str(tmp_path / "a.png")][
-            "brief"
-        ]
-        == "existing"
-    )
+    a = str(tmp_path / "a.png")
+    assert db.get_hindsight_briefs([a])[to_posix_path(a)]["brief"] == "existing"
     first = [d for _, ev, d in events if ev == "briefs_progress"][0]
     assert first == {"done": 1, "total": 2}
 

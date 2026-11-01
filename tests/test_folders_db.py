@@ -7,6 +7,7 @@ from pathlib import Path
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 
 
 def _media(path: str) -> Media:
@@ -37,7 +38,7 @@ class TestFolderCrud(unittest.TestCase):
         self.assertIsNotNone(rec)
         assert rec is not None
         self.assertEqual(rec["kind"], "manual")
-        self.assertEqual(rec["items"], ["/lib/a.png"])
+        self.assertEqual(rec["items"], [to_native_path("/lib/a.png")])
         self.assertEqual(rec["count"], 1)
         self.assertIsNone(rec.get("rules"))
 
@@ -139,7 +140,7 @@ class TestFolderCrud(unittest.TestCase):
         self.assertEqual(removed, 1)
         rec = self.db.get_folder("f_1")
         assert rec is not None
-        self.assertEqual(rec["items"], ["/lib/b.png"])
+        self.assertEqual(rec["items"], [to_native_path("/lib/b.png")])
 
     def test_remove_items_missing_paths_noop(self):
         self.db.create_folder("f_1", "manual", "A", items=["/lib/a.png"])
@@ -150,7 +151,7 @@ class TestFolderCrud(unittest.TestCase):
         self.db.delete_media(Path("/lib/a.png"))
         rec = self.db.get_folder("f_1")
         assert rec is not None
-        self.assertEqual(rec["items"], ["/lib/b.png"])
+        self.assertEqual(rec["items"], [to_native_path("/lib/b.png")])
 
 
 if __name__ == "__main__":

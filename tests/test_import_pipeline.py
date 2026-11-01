@@ -22,6 +22,7 @@ from metascan.core import folder_poller as fp
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.scanner import Scanner
 from metascan.utils.fs_compat import path_key
+from metascan.utils.path_utils import to_posix_path
 from tests.test_background_services import Stub
 
 
@@ -135,9 +136,9 @@ def test_dropped_file_ingests_and_broadcasts(rig):
         return pic
 
     pic = run(go())
-    assert pic.as_posix() in rig.rows()
+    assert to_posix_path(pic) in rig.rows()
     assert ("library", "media_added", {"count": 1}) in rig.events
-    assert rig.db.candidate_for(pic.as_posix()).phash
+    assert rig.db.candidate_for(to_posix_path(pic)).phash
 
 
 def test_a_file_dropped_under_an_output_root_in_the_folder_ingests(rig):
@@ -152,7 +153,7 @@ def test_a_file_dropped_under_an_output_root_in_the_folder_ingests(rig):
         return pic
 
     pic = run(go())
-    assert pic.as_posix() in rig.rows()
+    assert to_posix_path(pic) in rig.rows()
     assert ("library", "media_added", {"count": 1}) in rig.events
 
 
@@ -206,13 +207,13 @@ def test_a_moved_file_keeps_its_row_and_rating(rig):
     async def go():
         pic = rig.image("a.png", 1)
         await rig.passes(3)
-        old = pic.as_posix()
+        old = to_posix_path(pic)
         rig.db.set_grade(old, "pass")
         dest = rig.lib / "sub" / "b.png"
         dest.parent.mkdir()
         os.rename(pic, dest)
         await rig.passes(3)
-        return old, dest.as_posix()
+        return old, to_posix_path(dest)
 
     old, new = run(go())
     assert rig.rows() == {new}
@@ -239,7 +240,9 @@ def test_folder_rename_moves_every_file_in_one_batch(rig, monkeypatch):
 
     run(go())
     assert len(batches) == 1 and len(batches[0]) == 5
-    assert rig.rows() == {(rig.lib / "new" / f"p{i}.png").as_posix() for i in range(5)}
+    assert rig.rows() == {
+        to_posix_path(rig.lib / "new" / f"p{i}.png") for i in range(5)
+    }
 
 
 def test_a_move_re_keys_the_pending_snapshot_with_the_applied_pairs_only(
@@ -261,7 +264,7 @@ def test_a_move_re_keys_the_pending_snapshot_with_the_applied_pairs_only(
 
     pic = run(go())
     assert seen == [
-        (Path(rig.db.db_path), [(pic.as_posix(), (rig.lib / "b.png").as_posix())])
+        (Path(rig.db.db_path), [(to_posix_path(pic), to_posix_path(rig.lib / "b.png"))])
     ]
 
 
@@ -287,9 +290,9 @@ def test_an_ambiguous_vanish_is_a_new_file_not_a_move(rig):
     a_bytes, a_mtime = a0.read_bytes(), a0.stat().st_mtime
     os.remove(a0)
     a, b, c = run(go())
-    assert c.as_posix() in rig.rows()
+    assert to_posix_path(c) in rig.rows()
     assert rig.moves == 0
-    assert {a.as_posix(), b.as_posix()} <= rig.rows()  # left for hygiene
+    assert {to_posix_path(a), to_posix_path(b)} <= rig.rows()  # left for hygiene
 
 
 def test_vanished_row_is_not_cleaned_by_import(rig):
@@ -302,8 +305,8 @@ def test_vanished_row_is_not_cleaned_by_import(rig):
         return pic
 
     pic = run(go())
-    assert pic.as_posix() in rig.rows()  # hygiene's job, after the grace
-    assert rig.proc.vanished_since(pic.as_posix()) is not None
+    assert to_posix_path(pic) in rig.rows()  # hygiene's job, after the grace
+    assert rig.proc.vanished_since(to_posix_path(pic)) is not None
     assert rig.proc.vanished_since("/never/seen.png") is None
 
 
@@ -318,8 +321,8 @@ def test_case_only_rename_updates_the_stored_spelling(rig, monkeypatch):
         return pic
 
     pic = run(go())
-    assert rig.rows() == {(rig.lib / "pic.png").as_posix()}
-    assert pic.as_posix() not in rig.rows()
+    assert rig.rows() == {to_posix_path(rig.lib / "pic.png")}
+    assert to_posix_path(pic) not in rig.rows()
 
 
 def test_paused_import_catches_up_on_resume(rig):
@@ -335,7 +338,7 @@ def test_paused_import_catches_up_on_resume(rig):
         return pic
 
     pic = run(go())
-    assert rig.rows() == {pic.as_posix()}
+    assert rig.rows() == {to_posix_path(pic)}
 
 
 def test_stop_halts_and_start_catches_up(rig):
@@ -412,7 +415,7 @@ def test_one_bad_file_counts_a_warning_and_import_stays_running(rig):
     st = rig.registry.status("import")
     assert picky.calls.count("bad.png") == 2  # retried once, then left
     assert st.warnings_count == 1 and st.state != State.FAILED
-    assert (rig.lib / "good.png").as_posix() in rig.rows()
+    assert to_posix_path(rig.lib / "good.png") in rig.rows()
     assert "secret" not in (st.activity + (st.error or ""))
     # left alone until it changes
     assert picky.calls.count("bad.png") == 2
@@ -421,7 +424,7 @@ def test_one_bad_file_counts_a_warning_and_import_stays_running(rig):
 def test_unavailable_folder_is_waiting_and_touches_nothing(rig, tmp_path):
     gone = tmp_path / "unplugged_drive"
     rig.config["directories"].append({"filepath": str(gone), "search_subfolders": True})
-    ghost = (gone / "x.png").as_posix()
+    ghost = to_posix_path(gone / "x.png")
     rig.db.save_media(
         __import__("tests.test_taste_snapshot_scan", fromlist=["_media"])._media(ghost)
     )
@@ -525,7 +528,7 @@ def test_a_running_scan_suspends_the_watcher_and_it_reseeds_after(rig):
         return pic
 
     pic = run(go())
-    assert rig.rows() == {pic.as_posix()}
+    assert rig.rows() == {to_posix_path(pic)}
 
 
 def test_pause_is_not_offered_during_a_full_clean(rig):
@@ -553,7 +556,7 @@ def test_a_new_folder_in_config_is_seen_without_a_restart(rig, tmp_path):
         await rig.passes(4)
 
     run(go())
-    assert (other / "a.png").as_posix() in rig.rows()
+    assert to_posix_path(other / "a.png") in rig.rows()
 
 
 def test_the_loop_runs_and_stops_with_aclose(rig):
@@ -758,14 +761,18 @@ def test_vanished_entries_without_a_row_are_pruned(rig):
         await rig.passes(3)
         os.remove(pic)
         await rig.passes(1)
-        assert rig.proc.vanished_since(pic.as_posix()) is not None
-        rig.db.delete_media(pic.as_posix()) if hasattr(rig.db, "delete_media") else None
+        assert rig.proc.vanished_since(to_posix_path(pic)) is not None
+        (
+            rig.db.delete_media(to_posix_path(pic))
+            if hasattr(rig.db, "delete_media")
+            else None
+        )
         rig.proc._last_prune = float("-inf")
         await rig.passes(1)
         return pic
 
     pic = run(go())
-    assert rig.proc.vanished_since(pic.as_posix()) is None
+    assert rig.proc.vanished_since(to_posix_path(pic)) is None
 
 
 def test_a_respelled_pair_that_raised_is_retried(rig, monkeypatch):
@@ -788,7 +795,7 @@ def test_a_respelled_pair_that_raised_is_retried(rig, monkeypatch):
         await rig.passes(3)
 
     run(go())
-    assert rig.rows() == {(rig.lib / "pic.png").as_posix()} and len(calls) == 2
+    assert rig.rows() == {to_posix_path(rig.lib / "pic.png")} and len(calls) == 2
 
 
 def test_aclose_waits_for_the_file_being_written(rig):
@@ -928,7 +935,7 @@ def test_a_hint_ingests_without_a_walk(rig):
         return pic
 
     pic = run(go())
-    assert pic.as_posix() in rig.rows()
+    assert to_posix_path(pic) in rig.rows()
     assert ("library", "media_added", {"count": 1}) in rig.events
 
 
@@ -959,13 +966,13 @@ def test_the_loop_ingests_a_hinted_file_long_before_the_next_walk(rig, monkeypat
         pic = rig.image("a.png", 1)
         rig.watcher.on_path(str(pic))
         for _ in range(300):
-            if pic.as_posix() in rig.rows():
+            if to_posix_path(pic) in rig.rows():
                 break
             await asyncio.sleep(0.01)
         await proc.aclose()
         return pic
 
-    assert run(go()).as_posix() in rig.rows()
+    assert to_posix_path(run(go())) in rig.rows()
 
 
 def test_a_file_a_walk_found_settles_without_a_second_walk(rig, monkeypatch):
@@ -977,13 +984,13 @@ def test_a_file_a_walk_found_settles_without_a_second_walk(rig, monkeypatch):
         pic = rig.image("a.png", 1)
         proc.start_loop()
         for _ in range(300):
-            if pic.as_posix() in rig.rows():
+            if to_posix_path(pic) in rig.rows():
                 break
             await asyncio.sleep(0.01)
         await proc.aclose()
         return pic
 
-    assert run(go()).as_posix() in rig.rows()
+    assert to_posix_path(run(go())) in rig.rows()
 
 
 def test_a_move_seen_by_hints_keeps_the_row(rig):
@@ -993,7 +1000,7 @@ def test_a_move_seen_by_hints_keeps_the_row(rig):
     async def go():
         pic = rig.image("a.png", 1)
         await rig.passes(3, proc=proc)
-        rig.db.set_grade(pic.as_posix(), "pass")
+        rig.db.set_grade(to_posix_path(pic), "pass")
         new = rig.lib / "sub" / "a.png"
         new.parent.mkdir()
         os.rename(pic, new)
@@ -1004,9 +1011,9 @@ def test_a_move_seen_by_hints_keeps_the_row(rig):
         return pic, new
 
     pic, new = run(go())
-    assert new.as_posix() in rig.rows()
-    assert pic.as_posix() not in rig.rows()
-    assert rig.db.get_judgment(new.as_posix()).grade == "pass"
+    assert to_posix_path(new) in rig.rows()
+    assert to_posix_path(pic) not in rig.rows()
+    assert rig.db.get_judgment(to_posix_path(new)).grade == "pass"
 
 
 def test_pausing_closes_the_watcher_and_drops_its_hints(rig):

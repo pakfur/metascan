@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import sys
 import threading
 import time
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -970,6 +971,10 @@ def _slow_loading_factory(urls: Dict[str, str], load_s: float, spawned: List[str
     return make
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="no slow shutdown to race: terminate() is a hard kill on Windows",
+)
 async def test_forced_eviction_during_a_slow_shutdown_never_empties_tags(
     tmp_path: Path,
 ) -> None:
@@ -1057,6 +1062,10 @@ async def test_a_load_slower_than_the_idle_timeout_is_not_evicted(
             await roles.shutdown_all()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="no slow shutdown to race: terminate() is a hard kill on Windows",
+)
 async def test_an_explicit_unload_during_an_eviction_wins(tmp_path: Path) -> None:
     img = _png(tmp_path)
     opts = {

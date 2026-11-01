@@ -39,6 +39,7 @@ from backend.services.judgments_service import faiss_embedding_lookup
 from metascan.core.database_sqlite import DatabaseManager, MigrationError
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_posix_path
 from metascan.workers import embedding_worker as ew
 
 DIM = 32
@@ -228,7 +229,8 @@ def _graded_delete(
         db.mark_embedded([path], embedded_with)
     db.set_grade(path, grade)
     assert db.delete_media(Path(path), thumb)
-    return max(t["id"] for t in db.list_tombstones() if t["file_path"] == path)
+    stored = to_posix_path(path)
+    return max(t["id"] for t in db.list_tombstones() if t["file_path"] == stored)
 
 
 def _flags(db) -> Dict[str, int]:
@@ -691,7 +693,9 @@ def test_a_capture_never_reads_an_in_memory_index_older_than_the_files_mark(
     _run_worker(env, db.get_unembedded_file_paths())  # B's row on disk, B marked
     db.set_grade(p, "fail")  # before the server swaps in the reloaded index
     assert db.delete_media(Path(p))
-    tomb_b = max(t["id"] for t in db.list_tombstones() if t["file_path"] == p)
+    tomb_b = max(
+        t["id"] for t in db.list_tombstones() if t["file_path"] == to_posix_path(p)
+    )
 
     assert db.get_tombstone_vectors(tomb_b) == {}, "T_B took the in-memory A row"
     row = _tombstone(db, tomb_b)
@@ -770,7 +774,7 @@ def test_v7_takes_the_evidence_from_marks_made_before_the_fix(env):
 
     db = DatabaseManager(env["data"])  # the upgrade: no tombstone at p
     assert db.get_unembedded_file_paths() == []  # B stays "embedded"
-    assert _mark_times(db) == {p: None}
+    assert _mark_times(db) == {to_posix_path(p): None}
     db.set_grade(p, "fail")
     assert db.delete_media(Path(p), THUMB)  # archived, no index in memory
     (tomb_b,) = [t["id"] for t in db.list_tombstones()]
@@ -790,10 +794,10 @@ def test_a_file_marked_after_the_upgrade_is_evidence_again(env, monkeypatch):
     db.mark_embedded([p], MODEL)
     _set_user_version(db, 6)
     db = DatabaseManager(env["data"])  # v7 clears the old mark's time
-    assert _mark_times(db) == {p: None}
+    assert _mark_times(db) == {to_posix_path(p): None}
     db.clear_embeddings()
     _run_worker(env, db.get_unembedded_file_paths())  # the fixed worker
-    assert _mark_times(db)[p] is not None
+    assert _mark_times(db)[to_posix_path(p)] is not None
     _marks_a_while_ago(db)
     _server_index(env, db, monkeypatch)
 

@@ -12,7 +12,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import pytest
@@ -23,6 +23,7 @@ from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.embedding_manager import FaissIndexManager
 from metascan.core.faiss_renames import apply_pending_renames
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_posix_path
 from metascan.workers import embedding_worker as ew
 
 DIM = 32
@@ -59,6 +60,13 @@ def env(tmp_path):
 
 def _p(env, name: str) -> str:
     return str(env["lib"] / name)
+
+
+def _stored(pairs) -> List[Tuple[str, str]]:
+    """Move pairs as the database holds them: ``_p`` spells a path the way
+    the walk and the index do (native), the move APIs take stored POSIX
+    paths."""
+    return [(to_posix_path(old), to_posix_path(new)) for old, new in pairs]
 
 
 def _fm(env, rows) -> FaissIndexManager:
@@ -135,21 +143,21 @@ def test_a_move_queues_its_renames_in_the_same_transaction(env):
     db = env["db"]
     a, b = _p(env, "a.png"), _p(env, "b.png")
     db.save_media(_media(a))
-    assert db.move_media_batch_applied([(a, b)]) == [(a, b)]
-    assert db.list_faiss_pending_renames() == [(a, b)]
+    assert db.move_media_batch_applied(_stored([(a, b)])) == _stored([(a, b)])
+    assert db.list_faiss_pending_renames() == _stored([(a, b)])
     # a skipped move queues nothing
-    assert db.move_media_batch_applied([(a, _p(env, "c.png"))]) == []
-    assert db.list_faiss_pending_renames() == [(a, b)]
+    assert db.move_media_batch_applied(_stored([(a, _p(env, "c.png"))])) == []
+    assert db.list_faiss_pending_renames() == _stored([(a, b)])
 
 
 def test_chained_moves_collapse_and_keep_the_old_row(env):
     db = env["db"]
     a, b, c = (_p(env, n) for n in ("a.png", "b.png", "c.png"))
     db.save_media(_media(a))
-    db.move_media_batch_applied([(a, b)])
-    db.move_media_batch_applied([(b, c)])
-    assert db.list_faiss_pending_renames() == [(a, c)]
-    db.move_media_batch_applied([(c, a)])  # back where it started
+    db.move_media_batch_applied(_stored([(a, b)]))
+    db.move_media_batch_applied(_stored([(b, c)]))
+    assert db.list_faiss_pending_renames() == _stored([(a, c)])
+    db.move_media_batch_applied(_stored([(c, a)]))  # back where it started
     assert db.list_faiss_pending_renames() == []
 
 
@@ -158,8 +166,8 @@ def test_a_chain_inside_one_batch_queues_both_rows(env):
     a, b, c = (_p(env, n) for n in ("a.png", "b.png", "c.png"))
     db.save_media(_media(a))
     db.save_media(_media(b))
-    db.move_media_batch_applied([(a, b), (b, c)])
-    assert sorted(db.list_faiss_pending_renames()) == sorted([(a, b), (b, c)])
+    db.move_media_batch_applied(_stored([(a, b), (b, c)]))
+    assert sorted(db.list_faiss_pending_renames()) == sorted(_stored([(a, b), (b, c)]))
 
 
 # ---------------------------------------------------------------- applying
@@ -171,7 +179,7 @@ def test_apply_renames_saves_and_clears_the_pending_rows(env):
     v = _unit(3)
     _fm(env, [(a, v)])
     _embedded_media(env, a)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
 
     fm = _disk(env)
     result = apply_pending_renames(db, fm)
@@ -188,7 +196,7 @@ def test_a_file_never_embedded_is_skipped_and_the_row_clears(env):
     stale = _unit(4)
     _fm(env, [(a, stale)])  # a deleted file's row at a
     db.save_media(_media(a))  # never embedded
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
 
     result = apply_pending_renames(db, _disk(env))
     assert (result.renamed, result.cleared) == (0, 1)
@@ -200,7 +208,7 @@ def test_a_replaced_index_drops_the_pending_rows_without_error(env):
     db = env["db"]
     a, b = _p(env, "a.png"), _p(env, "b.png")
     _embedded_media(env, a)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     fresh = FaissIndexManager(env["index"])
     fresh.create(embedding_dim=DIM, model_key="large")  # a CLIP switch
     result = apply_pending_renames(db, fresh)
@@ -217,7 +225,7 @@ def test_tombstones_at_either_path_are_stamped_before_the_save(env):
         assert db.delete_media(Path(path))
     _fm(env, [(a, _unit(5)), (b, _unit(6))])
     _embedded_media(env, a)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     assert all(t["path_rewritten"] == 0 for t in db.list_tombstones())
 
     order: List[str] = []
@@ -242,7 +250,7 @@ def test_a_failed_stamp_saves_nothing_and_keeps_the_rows_pending(env):
     v = _unit(7)
     _fm(env, [(a, v)])
     _embedded_media(env, a)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
 
     def boom(_paths):
         raise sqlite3.OperationalError("database is locked")
@@ -251,7 +259,7 @@ def test_a_failed_stamp_saves_nothing_and_keeps_the_rows_pending(env):
     fm = _disk(env)
     result = apply_pending_renames(db, fm, delays=(), sleep=lambda s: None)
     assert result.failed
-    assert db.list_faiss_pending_renames() == [(a, b)]
+    assert db.list_faiss_pending_renames() == _stored([(a, b)])
     assert _disk(env).has_file(a) and not _disk(env).has_file(b)
     assert fm.has_file(a)  # the unsaved change was thrown away
 
@@ -263,7 +271,7 @@ def test_a_later_delete_at_the_new_path_still_has_its_evidence(env, monkeypatch)
     _fm(env, [(a, v)])
     _embedded_media(env, a)
     db.set_grade(a, "pass")
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     apply_pending_renames(db, _disk(env))
     # the marks are older than the index the server loads next
     with db.lock, db._get_connection() as conn:
@@ -277,7 +285,7 @@ def test_a_later_delete_at_the_new_path_still_has_its_evidence(env, monkeypatch)
     db.set_embedding_lookup(faiss_embedding_lookup)
 
     assert db.delete_media(Path(b))
-    (tomb,) = [t for t in db.list_tombstones() if t["file_path"] == b]
+    (tomb,) = [t for t in db.list_tombstones() if t["file_path"] == to_posix_path(b)]
     assert tomb["embedded_model"] == MODEL
     blob = db.get_tombstone_vectors(tomb["id"]).get(MODEL)
     assert blob is not None
@@ -317,7 +325,7 @@ def test_search_results_show_the_new_path_before_the_rename_applies(env, server)
     db = env["db"]
     a, b = _p(env, "a.png"), _p(env, "b.png")
     db.save_media(_media(a))
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     assert similarity.map_pending(a) == a  # not refreshed yet
     similarity.refresh_pending_map()
     assert similarity.map_pending(a) == b
@@ -329,11 +337,11 @@ def test_the_server_never_applies_while_a_worker_is_alive(env, server):
     a, b = _p(env, "a.png"), _p(env, "b.png")
     _fm(env, [(a, _unit(9))])
     _embedded_media(env, a)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
 
     server.indexing = True
     assert similarity.apply_pending_faiss_renames() == 0
-    assert db.list_faiss_pending_renames() == [(a, b)]
+    assert db.list_faiss_pending_renames() == _stored([(a, b)])
     assert _disk(env).has_file(a)
 
     server.indexing = False
@@ -412,7 +420,7 @@ def test_the_worker_applies_renames_at_its_start_without_re_embedding(env, monke
     _fm(env, [(a, v)])
     _embedded_media(env, a)
     db.save_media(_media(other))
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
 
     task = {
         "model_key": MODEL,
@@ -444,7 +452,7 @@ def test_the_map_keeps_mapping_after_the_apply_until_the_swap(env, server, monke
     _embedded_media(env, a)
     memory = _disk(env)
     monkeypatch.setattr(similarity, "_faiss_manager", memory)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     similarity.refresh_pending_map()
     reloads: List[int] = []
     monkeypatch.setattr(
@@ -535,7 +543,8 @@ def _file(env, name: str, content: bytes) -> str:
 def _assert_moved_file_has_no_vector(env, moved: str, other_vec: np.ndarray):
     """The moved file is marked not embedded and no row at its path holds
     the other file's vector."""
-    assert moved not in env["db"].embedded_paths([moved])
+    stored = to_posix_path(moved)
+    assert stored not in env["db"].embedded_paths([stored])
     row = _disk(env).get_embedding(moved)
     assert row is None or not np.allclose(row, other_vec)
 
@@ -546,7 +555,7 @@ def test_case_a_a_failed_apply_then_a_new_file_at_the_old_path(env, monkeypatch)
     old_vec = _unit(12)
     _fm(env, [(a, old_vec)])
     _embedded_media(env, a)  # the file that moves a -> b
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     db.save_media(_media(a))  # a different file now lives at a
     run = _worker_env(env, monkeypatch)
     monkeypatch.setattr(
@@ -576,7 +585,7 @@ def test_case_b_a_move_during_the_run_then_the_run_embeds_the_old_path(
 
     def on_embed(path):
         if path == dummy and not moved:  # the move lands mid-run
-            db.move_media_batch_applied([(a, b)])
+            db.move_media_batch_applied(_stored([(a, b)]))
             db.save_media(_media(a))  # and a different file takes a
             moved.append(1)
 
@@ -596,12 +605,12 @@ def test_case_c_a_file_at_a_pending_old_path_moves_on(env):
     old_vec = _unit(14)
     _fm(env, [(a, old_vec)])
     _embedded_media(env, a)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     _embedded_media(env, a)  # a different file at a, marked embedded
-    db.move_media_batch_applied([(a, d)])
+    db.move_media_batch_applied(_stored([(a, d)]))
 
     assert db.list_faiss_pending_renames() == []
-    assert db.embedded_paths([b, d]) == set()
+    assert db.embedded_paths([to_posix_path(b), to_posix_path(d)]) == set()
     result = apply_pending_renames(db, _disk(env))
     assert result.renamed == 0
     for moved in (b, d):
@@ -613,10 +622,10 @@ def test_a_chain_onto_a_pending_old_path_is_not_case_c(env):
     z, a, b, d = (_p(env, n) for n in ("z.png", "a.png", "b.png", "d.png"))
     db.save_media(_media(a))
     db.save_media(_media(z))
-    db.move_media_batch_applied([(a, b)])
-    db.move_media_batch_applied([(z, a)])
-    db.move_media_batch_applied([(a, d)])  # z's file moves on
-    assert sorted(db.list_faiss_pending_renames()) == sorted([(a, b), (z, d)])
+    db.move_media_batch_applied(_stored([(a, b)]))
+    db.move_media_batch_applied(_stored([(z, a)]))
+    db.move_media_batch_applied(_stored([(a, d)]))  # z's file moves on
+    assert sorted(db.list_faiss_pending_renames()) == sorted(_stored([(a, b), (z, d)]))
 
 
 def test_a_moved_file_with_no_row_to_take_is_marked_not_embedded(env):
@@ -624,8 +633,8 @@ def test_a_moved_file_with_no_row_to_take_is_marked_not_embedded(env):
     a, b = _p(env, "a.png"), _p(env, "b.png")
     _fm(env, [(_p(env, "other.png"), _unit(15))])  # no row at a
     _embedded_media(env, a)
-    db.move_media_batch_applied([(a, b)])
+    db.move_media_batch_applied(_stored([(a, b)]))
     result = apply_pending_renames(db, _disk(env))
     assert (result.renamed, result.reset) == (0, 1)
-    assert db.embedded_paths([b]) == set()
+    assert db.embedded_paths([to_posix_path(b)]) == set()
     assert db.list_faiss_pending_renames() == []

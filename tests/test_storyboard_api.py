@@ -23,6 +23,7 @@ from backend.api import storyboard as storyboard_api
 from backend.main import create_app
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path, to_posix_path
 from metascan.core.storyboard_parse import ParseError
 from metascan.core.storyboard_runner import ConfirmRequiredError, StoryboardError
 
@@ -964,7 +965,9 @@ def test_delete_panel_purge_archives_a_graded_render(client, monkeypatch, tmp_pa
     r = client.delete(f"/api/storyboard/panels/{panel_id}?purge_images=true")
 
     assert r.status_code == 200
-    [tomb] = [t for t in client.db.list_tombstones() if t["file_path"] == str(img)]
+    [tomb] = [
+        t for t in client.db.list_tombstones() if t["file_path"] == to_posix_path(img)
+    ]
     assert tomb["grade"] == "pass" and tomb["thumb_path"]
     archived = Path(client.db.db_path) / tomb["thumb_path"]
     assert archived.is_file()
@@ -981,7 +984,7 @@ def test_delete_panel_default_keeps_and_unhides_media(client):
         r2["file_path"]: r2["hidden"]
         for r2 in client.db.get_all_media_summaries(include_hidden=True)
     }
-    assert rows["/tmp/keep-me.png"] is False
+    assert rows[to_native_path("/tmp/keep-me.png")] is False
 
 
 def test_delete_storyboard_purge_images_via_query_param(client, monkeypatch, tmp_path):

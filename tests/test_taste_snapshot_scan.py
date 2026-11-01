@@ -15,6 +15,7 @@ from backend.api import scan as scan_api
 from backend.services import taste_snapshot as ts
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 T0 = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
@@ -204,6 +205,11 @@ def _pending(db):
         return json.loads(f.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
+
+
+def _stored(*paths):
+    """``paths`` as the database and the pending file spell them, sorted."""
+    return sorted(to_posix_path(p) for p in paths)
 
 
 def _pending_paths(db):
@@ -561,12 +567,14 @@ def test_full_clean_keeps_the_lineage_of_t2i_images_and_i2v_clips(monkeypatch, d
 
     # What vanished is tombstoned with its grade AND its lineage.
     tombs = {t["file_path"]: t for t in db.list_tombstones()}
-    assert sorted(tombs) == [clip_gone, gone]
-    assert (tombs[gone]["grade"], tombs[gone]["scorecard_id"]) == ("pass", "card-1")
-    assert _lineage(tombs[gone]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
-    assert tombs[gone]["lineage"]["t2i"]["variant_index"] == 1
-    assert tombs[clip_gone]["grade"] == "fail"
-    assert _lineage(tombs[clip_gone]["lineage"]["i2v"], I2V_LINEAGE) == I2V_LINEAGE
+    assert sorted(tombs) == _stored(clip_gone, gone)
+    image_tomb = tombs[to_posix_path(gone)]
+    clip_tomb = tombs[to_posix_path(clip_gone)]
+    assert (image_tomb["grade"], image_tomb["scorecard_id"]) == ("pass", "card-1")
+    assert _lineage(image_tomb["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert image_tomb["lineage"]["t2i"]["variant_index"] == 1
+    assert clip_tomb["grade"] == "fail"
+    assert _lineage(clip_tomb["lineage"]["i2v"], I2V_LINEAGE) == I2V_LINEAGE
 
     # The full clean is over and nothing is pending: the listings above
     # pruned the rows of what vanished.
@@ -632,14 +640,14 @@ def test_a_cancelled_full_clean_keeps_the_lineage_until_one_completes(monkeypatc
     finally:
         scan_api._cancel_requested = False
     assert not ts.is_full_clean_running()
-    assert _pending_paths(db) == [gone]
+    assert _pending_paths(db) == _stored(gone)
     assert db.list_t2i_images() == []  # the dialog opens: not listed ...
     assert _lineage_rows(db) == (1, 0)  # ... and kept while it is pending
 
     asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
 
     [t] = db.list_tombstones()
-    assert (t["file_path"], t["grade"]) == (gone, "pass")
+    assert (t["file_path"], t["grade"]) == (to_posix_path(gone), "pass")
     assert _lineage(t["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
     assert _pending(db) is None
     assert db.list_t2i_images() == []
@@ -663,7 +671,7 @@ def test_a_shutdown_mid_full_clean_keeps_the_prune_paused(monkeypatch, db):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(scan_api._run_scan(full_cleanup=False, full_clean=True))
     assert not ts.is_full_clean_running()  # cleared on the way out ...
-    assert _pending_paths(db) == [gone]  # ... but the file says pending
+    assert _pending_paths(db) == _stored(gone)  # ... but the file says pending
     assert db.list_t2i_images() == []
     assert _lineage_rows(db) == (1, 0)
 
@@ -1067,7 +1075,7 @@ def test_full_clean_keeps_generated_output_outside_the_scan_folders(
     assert [r["grade"] for r in images] == [None, "pass"]  # ratings put back
     assert db.get_judgment(str(photo)).grade == "pass"
     [t] = db.list_tombstones()
-    assert (t["file_path"], t["grade"]) == (str(gone), "fail")
+    assert (t["file_path"], t["grade"]) == (to_posix_path(gone), "fail")
     assert _lineage(t["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
     assert _pending(db) is None and not _marker_exists(db)
     assert _lineage_rows(db) == (2, 0)  # the vanished row is pruned now
@@ -1541,7 +1549,7 @@ def test_a_folder_lost_below_a_present_output_root_never_holds_a_full_clean_back
 
     assert not _marker_exists(db) and _pending(db) is None
     [t] = db.list_tombstones()
-    assert (t["file_path"], t["grade"]) == (str(gone), "pass")
+    assert (t["file_path"], t["grade"]) == (to_posix_path(gone), "pass")
     assert db.get_judgment(str(keep)).grade == "pass"
     db.list_t2i_images()
     db.list_i2v_videos(source)
@@ -1585,7 +1593,7 @@ def test_a_missing_output_root_holds_the_full_clean_back_and_is_named(
     assert complete["unreachable_output"] == roots
     assert complete["missing_folders"] == []
     assert db.list_tombstones() == []
-    assert _pending_paths(db) == sorted([str(gone), image, clip])
+    assert _pending_paths(db) == _stored(gone, image, clip)
     assert db.get_judgment(str(keep)).grade == "pass"
     assert _marker_exists(db)
     db.list_t2i_images()
@@ -1615,11 +1623,12 @@ def test_a_missing_output_root_holds_the_full_clean_back_and_is_named(
     assert complete["unreachable_output"] == []
     assert not _marker_exists(db) and _pending(db) is None
     tombs = {t["file_path"]: t for t in db.list_tombstones()}
-    assert sorted(tombs) == sorted([str(gone), image, clip])
-    assert tombs[image]["grade"] == "pass"
-    assert _lineage(tombs[image]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
-    assert tombs[clip]["grade"] == "fail"
-    assert _lineage(tombs[clip]["lineage"]["i2v"], I2V_LINEAGE) == I2V_LINEAGE
+    assert sorted(tombs) == _stored(gone, image, clip)
+    image_tomb, clip_tomb = tombs[to_posix_path(image)], tombs[to_posix_path(clip)]
+    assert image_tomb["grade"] == "pass"
+    assert _lineage(image_tomb["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert clip_tomb["grade"] == "fail"
+    assert _lineage(clip_tomb["lineage"]["i2v"], I2V_LINEAGE) == I2V_LINEAGE
 
 
 def test_an_unreadable_output_root_holds_the_full_clean_back_until_it_is_read(
@@ -1654,7 +1663,7 @@ def test_an_unreadable_output_root_holds_the_full_clean_back_until_it_is_read(
     assert complete["unreachable_output"] == [str(root)]
     assert db.list_tombstones() == []
     assert _marker_exists(db)
-    assert _pending_paths(db) == sorted([str(gone), str(image)])
+    assert _pending_paths(db) == _stored(gone, image)
 
     complete = _route_full_clean(monkeypatch, db, config)
 
@@ -1663,7 +1672,7 @@ def test_an_unreadable_output_root_holds_the_full_clean_back_until_it_is_read(
     [row] = db.list_t2i_images()
     assert _lineage(row, T2I_LINEAGE) == T2I_LINEAGE
     [t] = db.list_tombstones()
-    assert t["file_path"] == str(gone)
+    assert t["file_path"] == to_posix_path(gone)
     assert not _marker_exists(db) and _pending(db) is None
 
 
@@ -1684,9 +1693,10 @@ def test_a_missing_file_outside_every_output_root_is_gone(monkeypatch, tmp_path,
 
     assert not _marker_exists(db) and _pending(db) is None
     tombs = {t["file_path"]: t for t in db.list_tombstones()}
-    assert sorted(tombs) == sorted([str(gone), old])
-    assert tombs[old]["grade"] == "pass"
-    assert _lineage(tombs[old]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert sorted(tombs) == _stored(gone, old)
+    old_tomb = tombs[to_posix_path(old)]
+    assert old_tomb["grade"] == "pass"
+    assert _lineage(old_tomb["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
     assert (complete["missing_folders"], complete["unreachable_output"]) == ([], [])
 
 
@@ -1734,7 +1744,7 @@ def test_an_output_root_lost_during_the_reingest_holds_the_full_clean_back(
     [back] = [str(p) for p in renders if str(p) in in_library]
     assert db.get_judgment(back).grade == "pass"  # the one before the unplug
     [other] = [str(p) for p in renders if str(p) != back]
-    assert _pending_paths(db) == sorted([str(gone), other])
+    assert _pending_paths(db) == _stored(gone, other)
 
 
 def test_an_output_root_back_by_its_check_brings_its_files_back(
@@ -1759,7 +1769,7 @@ def test_an_output_root_back_by_its_check_brings_its_files_back(
     assert complete["unreachable_output"] == []
     assert db.get_judgment(str(render)).grade == "pass"
     [t] = db.list_tombstones()
-    assert t["file_path"] == str(gone)
+    assert t["file_path"] == to_posix_path(gone)
     assert not _marker_exists(db)
 
 
@@ -1792,12 +1802,12 @@ def test_a_render_that_cannot_be_read_holds_the_full_clean_back(
     assert f"  in {root}\n" in _marker_block(db)
     assert db.list_tombstones() == []
     assert _marker_exists(db)
-    assert _pending_paths(db) == sorted([str(gone), str(render)])
+    assert _pending_paths(db) == _stored(gone, render)
 
     complete = _route_full_clean(monkeypatch, db, config)
     assert db.get_judgment(str(render)).grade == "pass"
     [t] = db.list_tombstones()
-    assert t["file_path"] == str(gone)
+    assert t["file_path"] == to_posix_path(gone)
     assert not _marker_exists(db)
 
 
@@ -1821,7 +1831,7 @@ def test_the_deepest_output_root_that_holds_a_file_decides(monkeypatch, tmp_path
     assert complete["unreachable_output"] == [str(clips)]
     assert db.list_tombstones() == []
     assert _marker_exists(db)
-    assert _pending_paths(db) == sorted([str(gone), clip])
+    assert _pending_paths(db) == _stored(gone, clip)
 
 
 # ----------------------------------------------------------------------
@@ -1837,7 +1847,7 @@ def _scanner_failing_on(paths, failure="returns None"):
     path in the error's text -- which must never reach a log."""
     from metascan.core.scanner import Scanner
 
-    failing = {str(p) for p in paths}
+    failing = {to_native_path(p) for p in paths}
 
     class FailsToImport(Scanner):
         def ingest_file(self, path):
@@ -1878,8 +1888,9 @@ def test_a_generated_file_that_cannot_be_imported_is_listed_until_dealt_with(
     # the marker kept.
     assert db.list_tombstones() == []
     assert _marker_exists(db)
-    assert _pending_paths(db) == sorted([str(gone), str(render)])
-    [pending] = [j for j in _pending(db)["judgments"] if j["file_path"] == str(render)]
+    assert _pending_paths(db) == _stored(gone, render)
+    stored = to_posix_path(render)
+    [pending] = [j for j in _pending(db)["judgments"] if j["file_path"] == stored]
     assert pending["grade"] == "pass"
     assert str(render) not in db.get_existing_file_paths()
     db.list_t2i_images()
@@ -1912,9 +1923,10 @@ def test_a_generated_file_that_cannot_be_imported_is_listed_until_dealt_with(
     assert complete["unreadable_output_count"] == 0
     assert not _marker_exists(db) and _pending(db) is None
     tombs = {t["file_path"]: t for t in db.list_tombstones()}
-    assert sorted(tombs) == sorted([str(gone), str(render)])
-    assert tombs[str(render)]["grade"] == "pass"
-    assert _lineage(tombs[str(render)]["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
+    assert sorted(tombs) == _stored(gone, render)
+    render_tomb = tombs[to_posix_path(render)]
+    assert render_tomb["grade"] == "pass"
+    assert _lineage(render_tomb["lineage"]["t2i"], T2I_LINEAGE) == T2I_LINEAGE
 
 
 def test_a_failed_file_under_no_output_folder_is_said_to_be_outside_them(
@@ -1955,7 +1967,7 @@ def test_a_failed_file_under_no_output_folder_is_said_to_be_outside_them(
     ) in warning
     assert str(stray) not in " ".join(warnings) + _marker_text(db)
     assert db.list_tombstones() == [] and _marker_exists(db)
-    assert str(stray) in _pending_paths(db)
+    assert to_posix_path(stray) in _pending_paths(db)
 
 
 def test_a_file_that_keeps_failing_is_never_recorded_as_deleted(
@@ -1972,7 +1984,7 @@ def test_a_file_that_keeps_failing_is_never_recorded_as_deleted(
         )
         assert complete["unreadable_output"] == [str(render)]
         assert db.list_tombstones() == []
-        assert str(render) in _pending_paths(db)
+        assert to_posix_path(render) in _pending_paths(db)
         assert _marker_exists(db)
 
 

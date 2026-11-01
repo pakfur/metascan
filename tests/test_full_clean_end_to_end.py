@@ -23,6 +23,7 @@ from backend.api import scan as scan_api
 from backend.services import taste_snapshot as ts
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.scanner import Scanner
+from metascan.utils.path_utils import to_posix_path
 
 T0 = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
 BRIEF_MODEL = "qwen3vl-8b"
@@ -121,12 +122,12 @@ def test_a_full_clean_with_a_drive_lost_mid_run_keeps_everything_until_it_comple
         conn.execute(
             "UPDATE media SET data = json_set(data, '$.prompt', ?) "
             "WHERE file_path = ?",
-            ("a fox in the snow", str(gone)),
+            ("a fox in the snow", to_posix_path(gone)),
         )
         conn.executemany(
             "INSERT OR IGNORE INTO indices (index_type, index_key, file_path) "
             "VALUES ('model', ?, ?)",
-            [(m, str(gone)) for m in MODELS],
+            [(m, to_posix_path(gone)) for m in MODELS],
         )
         conn.commit()
     night = db.create_category("Night")
@@ -196,27 +197,27 @@ def test_a_full_clean_with_a_drive_lost_mid_run_keeps_everything_until_it_comple
     assert _ratings(db, gen) == (False, "pass", [], [])
     briefs = db.get_hindsight_briefs()
     assert {p: briefs[p] for p in briefs} == {
-        str(here): _brief(here),
-        str(gen): _brief(gen),
+        to_posix_path(here): _brief(here),
+        to_posix_path(gen): _brief(gen),
     }
     # The rest waits in the pending file, briefs and prompt included.
     pending = _pending(db)
     assert sorted(j["file_path"] for j in pending["judgments"]) == [
-        str(away),
-        str(gone),
+        to_posix_path(away),
+        to_posix_path(gone),
     ]
     assert {b["file_path"]: b["brief"] for b in pending["briefs"]} == {
-        str(away): _brief(away)["brief"],
-        str(gone): _brief(gone)["brief"],
+        to_posix_path(away): _brief(away)["brief"],
+        to_posix_path(gone): _brief(gone)["brief"],
     }
     assert pending["library_prompts"] == [
         {
-            "file_path": str(gone),
+            "file_path": to_posix_path(gone),
             "prompt": "a fox in the snow",
             "model_name": json.dumps(sorted(MODELS)),
         }
     ]
-    assert [lk["file_path"] for lk in pending["categories"]] == [str(away)]
+    assert [lk["file_path"] for lk in pending["categories"]] == [to_posix_path(away)]
 
     # 2. While the drive is away a full clean is refused, with nothing
     # written: the marker and the pending file stay as they are.
@@ -257,9 +258,9 @@ def test_a_full_clean_with_a_drive_lost_mid_run_keeps_everything_until_it_comple
     assert _ratings(db, gen) == (False, "pass", [], [])
     briefs = db.get_hindsight_briefs()
     assert {p: briefs[p] for p in briefs} == {
-        str(here): _brief(here),
-        str(away): _brief(away),
-        str(gen): _brief(gen),
+        to_posix_path(here): _brief(here),
+        to_posix_path(away): _brief(away),
+        to_posix_path(gen): _brief(gen),
     }
     [row] = db.list_t2i_images()
     assert row["id"] == t2i_id and {k: row[k] for k in T2I_LINEAGE} == T2I_LINEAGE
@@ -267,7 +268,7 @@ def test_a_full_clean_with_a_drive_lost_mid_run_keeps_everything_until_it_comple
     # metadata prompt from the snapshot, and no FAISS evidence (the truncate
     # took its embedding record), so no vector despite the lookup.
     [t] = db.list_tombstones()
-    assert (t["file_path"], t["grade"]) == (str(gone), "pass")
+    assert (t["file_path"], t["grade"]) == (to_posix_path(gone), "pass")
     assert (t["brief"], t["brief_model"]) == (_brief(gone)["brief"], BRIEF_MODEL)
     assert (t["prompt"], t["model_name"]) == (
         "a fox in the snow",

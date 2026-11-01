@@ -16,7 +16,7 @@ from tests.test_comfy_client import _until, params, t2i_workflow
 
 @pytest.fixture
 async def gated(fake_comfy):  # noqa: F811
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         c = ComfyClient(
             base_url=fake_comfy.base_url,
             output_root=Path(tmp) / "out",

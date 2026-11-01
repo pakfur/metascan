@@ -7,6 +7,7 @@ data dir; the dataset builder is replaced by canned examples."""
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -931,7 +932,15 @@ def test_feature_gates_include_writer_training_without_probing(monkeypatch):
 
 
 def _stub_python(tmp_path: Path, name: str, body: str) -> str:
-    """A fake interpreter: a shell script that ignores ``-c <code>``."""
+    """A fake interpreter: a script that ignores ``-c <code>``. ``body`` is
+    one ``sh`` line; Windows runs the batch-file spelling of it."""
+    if sys.platform == "win32":
+        batch = re.sub(r"^echo '(.*)'$", r"echo \1", body)
+        batch = batch.replace("sleep 5", "ping -n 6 127.0.0.1 >nul")
+        batch = batch.replace("exit 3", "exit /b 3")
+        path = tmp_path / f"{name}.cmd"
+        path.write_text("@" + batch + "\n")
+        return str(path)
     path = tmp_path / name
     path.write_text("#!/bin/sh\n" + body + "\n")
     path.chmod(0o755)

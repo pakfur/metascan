@@ -14,6 +14,7 @@ from metascan.core.database_sqlite import (
     DatabaseManager,
     MigrationError,
 )
+from metascan.utils.path_utils import to_posix_path
 from unittest.mock import AsyncMock
 
 from tests.test_vlm_tag_pump import make_client, make_db
@@ -48,7 +49,7 @@ def test_v8_imports_leftover_lines_dedupes_and_removes_the_file(tmp_path):
         ],
     )
     db = DatabaseManager(tmp_path / "db")
-    assert db.next_tag_batch(10) == [str(a)]
+    assert db.next_tag_batch(10) == [to_posix_path(a)]
     assert not f.exists()
 
 
@@ -172,7 +173,7 @@ async def test_pause_finishes_in_flight_and_takes_no_more(tmp_path):
 def test_deleting_media_removes_queue_row(tmp_path):
     db, (a, b) = make_db(tmp_path)
     db.delete_media(a)
-    assert db.next_tag_batch(10) == [str(b)]
+    assert db.next_tag_batch(10) == [to_posix_path(b)]
 
 
 def test_enqueue_skips_unknown_and_duplicates(tmp_path):
@@ -202,7 +203,7 @@ def test_retag_all_clip_enqueues_images_with_no_vlm_tags(tmp_path):
     )
     db.add_tag_indices(a, ["cat"], "vlm")
     db.add_tag_indices(b, ["dog"], "clip")
-    assert db.images_without_vlm_tags() == [str(b)]
+    assert db.images_without_vlm_tags() == [to_posix_path(b)]
 
 
 def test_embedding_worker_enqueues_images_only(tmp_path):
@@ -213,7 +214,7 @@ def test_embedding_worker_enqueues_images_only(tmp_path):
     w.logger = logging.getLogger("t")
     w._enqueue_for_vlm(db, str(a), is_video=False)
     w._enqueue_for_vlm(db, str(tmp_path / "b.jpg"), is_video=True)
-    assert db.next_tag_batch(10) == [str(a)]
+    assert db.next_tag_batch(10) == [to_posix_path(a)]
 
 
 def _attempts(db):

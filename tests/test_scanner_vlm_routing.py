@@ -81,9 +81,11 @@ def _touch_weights(vlm_dir, model_id):
 
 
 def _touch_binary(tmp_path):
+    from metascan.utils.llama_server import binary_filename
+
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    (bin_dir / "llama-server").touch()
+    (bin_dir / binary_filename()).touch()
 
 
 def test_preferred_falls_back_to_installed_30b_when_qwen38_recommended_but_missing(

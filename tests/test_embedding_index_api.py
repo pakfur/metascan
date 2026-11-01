@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from backend.api import similarity as sim_api
+from metascan.utils.path_utils import to_native_path
 
 
 @pytest.fixture(autouse=True)
@@ -371,7 +372,7 @@ def test_get_favorite_file_paths_returns_only_favorites(tmp_path):
     db.save_media(c)
 
     favs = db.get_favorite_file_paths()
-    assert sorted(favs) == ["/m/a.png", "/m/c.png"]
+    assert sorted(favs) == [to_native_path("/m/a.png"), to_native_path("/m/c.png")]
 
 
 # Full-clean snapshot/restore is covered against a real DB in

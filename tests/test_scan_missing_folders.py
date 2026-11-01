@@ -23,6 +23,7 @@ from backend.api import scan as scan_api
 from backend.config import DirectoryConfig
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_posix_path
 
 T0 = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
@@ -124,6 +125,12 @@ def _pending_paths(db):
         | {lk["file_path"] for lk in snap["categories"]}
         | set(snap["favorites"])
     )
+
+
+def _stored(*paths):
+    """``paths`` sorted, spelled as the snapshot and the tombstones store
+    them (``p`` holds native spellings)."""
+    return sorted(to_posix_path(path) for path in paths)
 
 
 def _completes(events):
@@ -316,7 +323,7 @@ def test_a_folder_gone_mid_run_leaves_the_full_clean_incomplete(
     # Incomplete: no tombstones at all -- not even a/deleted.png, whose file
     # really is gone -- and everything that did not come back stays pending.
     assert db.list_tombstones() == []
-    assert _pending_paths(db) == sorted([p["deleted"], p["pass"], p["fail"]])
+    assert _pending_paths(db) == _stored(p["deleted"], p["pass"], p["fail"])
     assert db.list_judgment_events() == events_before
     [complete] = _completes(events)
     assert complete["missing_folders"] == [str(b)]
@@ -343,7 +350,7 @@ def test_a_folder_gone_mid_run_leaves_the_full_clean_incomplete(
     _assert_b_ratings_back(db, p)
     assert _marks(db.get_judgment(p["kept"])) == FAVORITE
     [t] = db.list_tombstones()
-    assert (t["file_path"], t["grade"]) == (p["deleted"], "fail")
+    assert (t["file_path"], t["grade"]) == (to_posix_path(p["deleted"]), "fail")
     assert _pending(db) is None
     assert db.list_judgment_events() == events_before
     [complete] = _completes(events)
@@ -371,7 +378,7 @@ def test_a_folder_lost_during_its_own_scan_leaves_the_full_clean_incomplete(
     assert scanned == [str(a), str(b)]
     assert _marks(db.get_judgment(p["pass"])) == PASS
     assert db.list_tombstones() == []
-    assert _pending_paths(db) == sorted([p["deleted"], p["fail"]])
+    assert _pending_paths(db) == _stored(p["deleted"], p["fail"])
     [complete] = _completes(events)
     assert complete["missing_folders"] == [str(b)]
 
@@ -393,7 +400,7 @@ def test_full_clean_with_every_folder_present_completes_as_before(
     assert scanned == [str(a), str(b)]
     _assert_b_ratings_back(db, p)
     [t] = db.list_tombstones()
-    assert (t["file_path"], t["grade"]) == (p["deleted"], "fail")
+    assert (t["file_path"], t["grade"]) == (to_posix_path(p["deleted"]), "fail")
     assert _pending(db) is None
     [complete] = _completes(events)
     assert complete.get("missing_folders", []) == []
@@ -466,7 +473,7 @@ def test_stale_cleanup_leaves_a_missing_folders_rows_alone(
     assert (_marks(deep), deep.reasons) == (FAIL, ["light"])
     # ... while a deleted file under a folder that is there, and a row of a
     # folder no longer in the config, are cleaned as before.
-    assert [t["file_path"] for t in db.list_tombstones()] == [p["deleted"]]
+    assert [t["file_path"] for t in db.list_tombstones()] == _stored(p["deleted"])
     [complete] = _completes(events)
     assert complete["stale_removed"] == 2
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -585,7 +592,7 @@ def test_an_empty_scan_folder_the_library_has_nothing_from_blocks_nothing(
     [complete] = _completes(events)
     assert complete["missing_folders"] == []
     [t] = db.list_tombstones()
-    assert t["file_path"] == p["deleted"]
+    assert t["file_path"] == to_posix_path(p["deleted"])
     assert _pending(db) is None
 
 
@@ -605,7 +612,7 @@ def test_a_full_clean_is_refused_when_pending_ratings_point_into_an_empty_folder
     _wire(monkeypatch, db, [a, b], scan)
     assert _start(full_clean=True) is None
     pending_before = _pending(db)
-    assert _pending_paths(db) == sorted([p["deleted"], p["pass"], p["fail"]])
+    assert _pending_paths(db) == _stored(p["deleted"], p["pass"], p["fail"])
     assert sorted(db.get_existing_file_paths()) == [p["kept"]]  # none of b
 
     b.mkdir()
@@ -768,7 +775,7 @@ def test_a_folder_emptied_mid_run_leaves_the_full_clean_incomplete(
     assert scanned == [str(a)]
     assert _marks(db.get_judgment(p["kept"])) == FAVORITE
     assert db.list_tombstones() == []
-    assert _pending_paths(db) == sorted([p["deleted"], p["pass"], p["fail"]])
+    assert _pending_paths(db) == _stored(p["deleted"], p["pass"], p["fail"])
     [complete] = _completes(events)
     assert complete["missing_folders"] == [str(b)]
 
@@ -827,7 +834,7 @@ def test_a_folder_missing_at_its_turn_but_back_by_the_end_leaves_it_incomplete(
 
     assert scanned == [str(a), str(c)]
     assert db.list_tombstones() == []
-    assert _pending_paths(db) == [p["b"]]
+    assert _pending_paths(db) == _stored(p["b"])
     assert _marks(db.get_judgment(p["c"])) == FAIL
     [complete] = _completes(events)
     assert complete["missing_folders"] == [str(b)]
@@ -856,7 +863,7 @@ def test_the_scanners_folder_gone_race_skips_that_folder_and_scans_the_rest(
     [complete] = _completes(events)
     assert complete["missing_folders"] == [str(b)]
     assert db.list_tombstones() == []
-    assert _pending_paths(db) == [p["b"]]
+    assert _pending_paths(db) == _stored(p["b"])
     assert _marks(db.get_judgment(p["c"])) == FAIL
 
 
@@ -874,7 +881,7 @@ def test_a_scanner_error_for_a_folder_that_is_there_still_fails_the_run(
     assert scanned == [str(a)]
     assert _errors(events) == [{"message": "bad media"}]
     assert db.list_tombstones() == []
-    assert _pending_paths(db) == sorted(p.values())
+    assert _pending_paths(db) == _stored(*p.values())
 
 
 def test_a_folder_whose_stat_fails_at_its_turn_is_skipped_and_the_rest_scanned(

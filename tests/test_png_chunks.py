@@ -16,6 +16,7 @@ import io
 import json
 import os
 import struct
+import sys
 import time
 import zlib
 from pathlib import Path
@@ -233,6 +234,10 @@ def test_the_walk_never_raises_on_odd_files(tmp_path):
     assert metadata_after_data(tmp_path / "missing.png") is False
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="st_ctime is the creation time on Windows: no stamp shows this change",
+)
 def test_a_file_replaced_with_the_same_size_and_mtime_is_walked_again(tmp_path):
     # Same length on purpose: a 7-byte tIME body against a 7-byte tEXt body.
     p = _with_after_data(_comfy_png(tmp_path / "a.png"), b"tIME", b"\x07" * 7)

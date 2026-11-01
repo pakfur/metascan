@@ -1,6 +1,7 @@
 """Tests for the photo-EXIF columns added to the media table + filter indices."""
 
 import sqlite3
+from contextlib import contextmanager
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,18 @@ import pytest
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media, PhotoExposure
+
+
+@contextmanager
+def _connect(path):
+    """Closes too: ``with sqlite3.connect()`` only commits, and Windows
+    cannot delete a database file left open."""
+    conn = sqlite3.connect(path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -50,7 +63,7 @@ def _make_photo_media(path: str = "/tmp/IMG_001.HEIC") -> Media:
 
 class TestSchema:
     def test_new_columns_exist(self, db):
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(media)")}
         for c in (
             "camera_make",
@@ -66,7 +79,7 @@ class TestSchema:
             assert c in cols, f"missing column {c}"
 
     def test_user_version_advances_to_2(self, db):
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             v = conn.execute("PRAGMA user_version").fetchone()[0]
         assert v >= 2
 
@@ -78,7 +91,7 @@ class TestSchema:
         db_dir = tmp_path / "v1migration"
         db_dir.mkdir()
         db_file = db_dir / "metascan.db"
-        with sqlite3.connect(str(db_file)) as conn:
+        with _connect(str(db_file)) as conn:
             conn.execute(
                 "CREATE TABLE media (file_path TEXT PRIMARY KEY, data TEXT, "
                 "is_favorite INTEGER, playback_speed REAL, "
@@ -99,7 +112,7 @@ class TestSchema:
         # add the EXIF columns + bump user_version to 2.
         manager = DatabaseManager(db_dir)
 
-        with sqlite3.connect(str(manager.db_file)) as conn:
+        with _connect(str(manager.db_file)) as conn:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(media)")}
             for c in (
                 "camera_make",
@@ -134,7 +147,7 @@ class TestSchema:
         manager.close()
 
     def test_summary_indexes_include_new_columns(self, db):
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             for idx in ("idx_media_summary_added", "idx_media_summary_modified"):
                 row = conn.execute(
                     "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
@@ -158,7 +171,7 @@ class TestSaveAndLoadPhotoMedia:
         m = _make_photo_media()
         assert db.save_media(m) is True
 
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             row = conn.execute(
                 "SELECT camera_make, camera_model, lens_model, datetime_original, "
                 "gps_latitude, gps_longitude, gps_altitude, orientation, photo_exposure "
@@ -197,7 +210,7 @@ class TestSaveAndLoadPhotoMedia:
 class TestFilterIndices:
     def test_camera_make_indexed(self, db):
         db.save_media(_make_photo_media("/tmp/a.HEIC"))
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             rows = conn.execute(
                 "SELECT index_key FROM indices "
                 "WHERE index_type='camera_make' AND file_path=?",
@@ -207,7 +220,7 @@ class TestFilterIndices:
 
     def test_camera_model_indexed(self, db):
         db.save_media(_make_photo_media("/tmp/b.HEIC"))
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             rows = conn.execute(
                 "SELECT index_key FROM indices "
                 "WHERE index_type='camera_model' AND file_path=?",
@@ -217,7 +230,7 @@ class TestFilterIndices:
 
     def test_has_gps_indexed_when_present(self, db):
         db.save_media(_make_photo_media("/tmp/c.HEIC"))
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             rows = conn.execute(
                 "SELECT index_key FROM indices "
                 "WHERE index_type='has_gps' AND file_path=?",
@@ -230,7 +243,7 @@ class TestFilterIndices:
         m.gps_latitude = None
         m.gps_longitude = None
         db.save_media(m)
-        with sqlite3.connect(str(db.db_file)) as conn:
+        with _connect(str(db.db_file)) as conn:
             rows = conn.execute(
                 "SELECT index_key FROM indices "
                 "WHERE index_type='has_gps' AND file_path=?",

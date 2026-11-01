@@ -18,6 +18,7 @@ import pytest
 from metascan.core.comfy_bindings import GenerationParams, resolve_bindings
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_posix_path
 from metascan.core.storyboard_runner import (
     ConfirmRequiredError,
     StoryboardError,
@@ -993,7 +994,7 @@ async def test_ingest_event_payload_uses_normalized_paths(
         if ch == "storyboard" and ev == "beat_images_changed" and data["files"]
     ]
     assert changed
-    assert changed[-1]["files"] == [f"NATIVE::{str(f1)}"]
+    assert changed[-1]["files"] == [f"NATIVE::{to_posix_path(f1)}"]
 
 
 async def test_ingest_video_job_lands_on_panel_videos(

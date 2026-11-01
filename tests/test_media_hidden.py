@@ -7,6 +7,7 @@ import pytest
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 
 
 @pytest.fixture
@@ -45,7 +46,7 @@ def test_default_summaries_exclude_hidden(db):
     db.save_media(_media("/pics/b.png"))
     db.set_media_hidden("/pics/b.png", True)
     default = db.get_all_media_summaries()
-    assert [r["file_path"] for r in default] == ["/pics/a.png"]
+    assert [r["file_path"] for r in default] == [to_native_path("/pics/a.png")]
     both = db.get_all_media_summaries(include_hidden=True)
     assert len(both) == 2
 
@@ -64,7 +65,7 @@ def test_favorites_and_hidden_filters_compose(db):
     db.set_favorite(Path("/pics/b.png"), True)
     db.set_media_hidden("/pics/b.png", True)
     rows = db.get_all_media_summaries(favorites_only=True)
-    assert [r["file_path"] for r in rows] == ["/pics/a.png"]
+    assert [r["file_path"] for r in rows] == [to_native_path("/pics/a.png")]
 
 
 def test_covering_indexes_include_hidden(db):

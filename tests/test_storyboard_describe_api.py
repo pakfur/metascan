@@ -23,6 +23,7 @@ from backend.api import vlm as vlm_api
 from backend.main import create_app
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 
 
 class StubRunner:
@@ -171,7 +172,10 @@ def test_describe_subject_sends_both_refs_in_order(
     )
     client.post(f"/api/storyboard/subjects/{sid}/describe")
     sent = fake_vlm.calls[0]["image_paths"]
-    assert [str(p) for p in sent] == [media_path, media_path_2]
+    assert [str(p) for p in sent] == [
+        to_native_path(media_path),
+        to_native_path(media_path_2),
+    ]
 
 
 def test_describe_400_when_no_refs(client, db, board_id, fake_vlm):

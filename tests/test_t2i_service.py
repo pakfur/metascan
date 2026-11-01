@@ -13,6 +13,7 @@ from unittest import mock
 from backend.services.t2i_service import T2iService
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_posix_path
 
 
 class ServiceCase(unittest.IsolatedAsyncioTestCase):
@@ -60,7 +61,9 @@ class TestListing(ServiceCase):
         self.assertEqual(rows[1]["form_state"]["mode"], "manual")
         for row in rows:
             self.assertEqual(len(row["form_state"]), 11)
-            self.assertEqual(row["file_name"], row["file_path"].rsplit("/", 1)[-1])
+            self.assertEqual(
+                row["file_name"], to_posix_path(row["file_path"]).rsplit("/", 1)[-1]
+            )
 
     async def test_paging(self) -> None:
         ids = [self.add(f"{n}.png") for n in range(4)]

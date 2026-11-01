@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import logging
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,10 @@ def test_header_is_rewritten_into_every_rolled_file(tmp_path):
     assert all(p.read_text().splitlines()[0] == "a,b" for p in family)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows refuses to delete a file that is open",
+)
 def test_a_log_file_deleted_underneath_the_handler_is_recreated(tmp_path):
     path = tmp_path / "a.log"
     logger = get_file_logger(path)

@@ -204,7 +204,8 @@ async def test_a_bodyless_interrupt_kills_whatever_is_running(
         await client.post(f"{fake_comfy.base_url}/interrupt")
 
     assert fake_comfy.interrupted_prompts == [running]
-    assert pending in fake_comfy.pending_prompts
+    # The bystander lives: still queued, or already next in line.
+    assert pending in fake_comfy.pending_prompts or fake_comfy.running_prompt == pending
 
 
 async def test_an_interrupt_naming_a_pending_prompt_is_a_no_op(

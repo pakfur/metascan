@@ -29,6 +29,7 @@ from metascan.core.comfy_bindings import BindingError, GenerationParams
 from metascan.core.comfy_client import ComfyClient, ComfyError
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_posix_path
 from metascan.core.scanner import Scanner
 from metascan.core.t2i_captions import CaptionFilterError, CaptionPicker, CaptionStore
 from metascan.core.t2i_characters import resolve_caption
@@ -3683,7 +3684,7 @@ class TestCategoryTagging(AccountingCase):
             rows = conn.execute(
                 "SELECT c.name, mc.source FROM media_categories mc "
                 "JOIN categories c ON c.id = mc.category_id WHERE mc.file_path = ?",
-                (Path(path).as_posix(),),
+                (to_posix_path(path),),
             ).fetchall()
         return {r["name"]: r["source"] for r in rows}
 

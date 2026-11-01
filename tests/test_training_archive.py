@@ -34,6 +34,7 @@ from metascan.core.training_archive import (
     archive_dir,
     archive_thumbnail,
 )
+from metascan.utils.path_utils import to_native_path, to_posix_path
 
 _NAME = re.compile(r"[0-9a-f]{32}\.jpg")
 
@@ -71,7 +72,8 @@ def _archived(db: DatabaseManager) -> List[Path]:
 
 
 def _tomb(db: DatabaseManager, path: str) -> Dict[str, Any]:
-    [t] = [t for t in db.list_tombstones() if t["file_path"] == path]
+    posix = to_posix_path(path)
+    [t] = [t for t in db.list_tombstones() if t["file_path"] == posix]
     return t
 
 
@@ -312,7 +314,8 @@ async def test_only_graded_images_are_archived(db: Any, tmp_path: Path) -> None:
     assert _tomb(db, paths["video"])["thumb_path"] is None
     assert _tomb(db, clip_path)["thumb_path"] is None
     # ★ alone is no judgment: nothing to tombstone.
-    assert [t for t in db.list_tombstones() if t["file_path"] == paths["star"]] == []
+    star = to_posix_path(paths["star"])
+    assert [t for t in db.list_tombstones() if t["file_path"] == star] == []
 
 
 # ---- failures keep the row ---------------------------------------------------
@@ -414,7 +417,7 @@ async def test_a_storyboard_that_changes_its_mind_mid_delete(
     assert db.get_media(Path(taken)) is not None  # released, not purged
     # Only the purged image is tombstoned (no archive: it looked kept).
     assert [(t["file_path"], t["thumb_path"]) for t in db.list_tombstones()] == [
-        (let_go, None)
+        (to_posix_path(let_go), None)
     ]
     assert _archived(db) == []
 
@@ -448,7 +451,7 @@ def test_purgeable_paths_follow_the_purge_survival_rule(db: Any) -> None:
     db.create_subject(sb, name="Ann", description="", reference_path="/p/subject.png")
     assert db.purgeable_paths(
         ["/p/plain.png", "/p/beat.png", "/p/subject.png", "/p/none.png"]
-    ) == ["/p/plain.png", "/p/none.png"]
+    ) == [to_native_path("/p/plain.png"), to_native_path("/p/none.png")]
 
 
 def test_trash_file_falls_back_to_unlink_and_raises_when_both_fail(
@@ -515,7 +518,8 @@ def _render(db: DatabaseManager, beat_id: int, path: Path, grade: Optional[str])
 
 
 def _no_tombstone(db: DatabaseManager, path: str) -> bool:
-    return not [t for t in db.list_tombstones() if t["file_path"] == path]
+    posix = to_posix_path(path)
+    return not [t for t in db.list_tombstones() if t["file_path"] == posix]
 
 
 def _assert_kept_signal(db: DatabaseManager, board: Any) -> None:

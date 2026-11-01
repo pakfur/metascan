@@ -39,6 +39,7 @@ from metascan.core.taste_labels import (
     TRAINING_EVENT_KINDS,
     build_label_set,
 )
+from metascan.utils.path_utils import to_native_path
 from tests.test_grades_migration import (
     EXPECTED_GRADES,
     EXPECTED_TOMB_GRADES,
@@ -379,9 +380,11 @@ def test_an_old_reject_history_never_reads_as_a_pass(tmp_path):
 
     # Judgments, the library grid and the T2I strip.
     assert {p: db.get_judgment(p).grade for p in live} == live
-    assert {r["file_path"]: r["grade"] for r in db.get_all_media_summaries()} == live
+    native_live = {to_native_path(p): g for p, g in live.items()}
+    summaries = db.get_all_media_summaries()
+    assert {r["file_path"]: r["grade"] for r in summaries} == native_live
     rows = db.list_t2i_images()
-    assert {r["file_path"]: r["grade"] for r in rows} == live
+    assert {r["file_path"]: r["grade"] for r in rows} == native_live
     assert not [r for r in rows if "passed" in r]
     # The taste scorer: labels, and the score_shown halving of the grade
     # the old event really set (the old reject "pass" halves a ✗ only).
@@ -522,7 +525,7 @@ def test_an_old_sqlite_keeps_the_legacy_columns_unread(tmp_path, monkeypatch):
     graded = {**EXPECTED_GRADES, "/lib/new.png": "pass"}
     del graded["/lib/seen.png"], graded["/lib/reject.png"]
     summaries = {r["file_path"]: r["grade"] for r in db.get_all_media_summaries()}
-    assert {p: summaries[p] for p in graded} == graded
+    assert {p: summaries[to_native_path(p)] for p in graded} == graded
     assert {p: db.get_judgment(p).grade for p in graded} == graded
     assert {p: db.get_grade(p) for p in graded} == graded
     raw = db.taste_training_raw()

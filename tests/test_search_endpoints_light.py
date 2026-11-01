@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from metascan.core.embedding_manager import FaissIndexManager
+from metascan.utils.path_utils import to_native_path
 
 DIM = 32  # FAISS test vectors must use dim >= 32 (ARM SIMD alignment)
 
@@ -65,9 +66,9 @@ def test_content_search_unbounded_light_shape(light_api):
     body = light_api.ContentSearchRequest(query="anything")
     out = asyncio.run(light_api.content_search(body))
     assert [o["file_path"] for o in out] == [
-        "/lib/high.png",
-        "/lib/mid.png",
-        "/lib/low.png",
+        to_native_path("/lib/high.png"),
+        to_native_path("/lib/mid.png"),
+        to_native_path("/lib/low.png"),
     ]
     assert all(set(o) == {"file_path", "similarity_score"} for o in out)
     assert out[0]["similarity_score"] == pytest.approx(0.9, abs=1e-3)
@@ -76,21 +77,24 @@ def test_content_search_unbounded_light_shape(light_api):
 def test_content_search_threshold_filters(light_api):
     body = light_api.ContentSearchRequest(query="anything", threshold=0.4)
     out = asyncio.run(light_api.content_search(body))
-    assert [o["file_path"] for o in out] == ["/lib/high.png", "/lib/mid.png"]
+    assert [o["file_path"] for o in out] == [
+        to_native_path("/lib/high.png"),
+        to_native_path("/lib/mid.png"),
+    ]
 
 
 def test_content_search_max_results_caps(light_api):
     body = light_api.ContentSearchRequest(query="anything", max_results=1)
     out = asyncio.run(light_api.content_search(body))
-    assert [o["file_path"] for o in out] == ["/lib/high.png"]
+    assert [o["file_path"] for o in out] == [to_native_path("/lib/high.png")]
 
 
 def test_search_similar_light_shape(light_api):
     body = light_api.SimilaritySearchRequest(file_path="/lib/query.png", threshold=0.0)
     out = asyncio.run(light_api.search_similar(body))
     assert [o["file_path"] for o in out] == [
-        "/lib/high.png",
-        "/lib/mid.png",
-        "/lib/low.png",
+        to_native_path("/lib/high.png"),
+        to_native_path("/lib/mid.png"),
+        to_native_path("/lib/low.png"),
     ]
     assert all(set(o) == {"file_path", "similarity_score"} for o in out)

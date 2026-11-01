@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.core.media import Media
+from metascan.utils.path_utils import to_native_path
 
 
 def _seed_media(db, paths):
@@ -313,7 +314,7 @@ class TestT2iImagesDb(unittest.TestCase):
         image_id = self._create(1)
         self.db.create_folder("f_1", "manual", "Renders", items=[OUT[0], OUT[1]])
         self.db.delete_t2i_image(image_id)
-        self.assertEqual(self.db.get_folder("f_1")["items"], [OUT[1]])
+        self.assertEqual(self.db.get_folder("f_1")["items"], [to_native_path(OUT[1])])
 
     def test_delete_missing_image(self):
         self.assertEqual(self.db.delete_t2i_image(9999), (False, []))

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import create_app
 from backend.api import vlm as vlm_api
+from metascan.utils.path_utils import to_posix_path
 
 
 def _make_stub() -> MagicMock:
@@ -151,7 +152,7 @@ def test_retag_cancel_endpoint(app_with_stub_vlm, queue_db):
     r2 = c.delete(f"/api/vlm/retag/{job_id}")
     assert r2.status_code == 200
     assert r2.json()["status"] == "cancelled"
-    assert db.next_tag_batch(10) == [str(b)]
+    assert db.next_tag_batch(10) == [to_posix_path(b)]
 
 
 async def test_active_endpoint_calls_swap(app_with_stub_vlm):
