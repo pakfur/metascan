@@ -192,7 +192,7 @@ cd metascan
 
 The rest of this guide assumes the `metascan` directory is your working directory.
 
-**Windows:** clone onto an NTFS drive such as `C:`, not exFAT, because SQLite's write-ahead log has not been tested on exFAT. Your media can stay on any drive. Ignore the `venv-win` folder in the repo: it is a broken leftover tracked in git, and `run.bat` uses it, so [don't use `run.bat`](#windows-installer-rebuild-notes).
+**Windows:** clone onto an NTFS drive such as `C:`, not exFAT, because SQLite's write-ahead log has not been tested on exFAT. Your media can stay on any drive. Ignore the `venv-win` folder in the repo: it is a broken leftover tracked in git, and nothing uses it.
 
 ## 4. Create the Python virtual environment
 
@@ -329,13 +329,7 @@ cd ..
 
 `npm install` reads `frontend/package.json` and pulls in Vue, Vite, PrimeVue, Pinia, MapLibre GL, and the rest. Expect about 160 MB in `frontend/node_modules/` and a minute or less on a fast connection. `npm audit` warnings at the end don't stop anything.
 
-**Windows:** also build the UI, so the backend can serve it on its own (re-run this after pulling frontend changes):
-
-```powershell
-cd frontend
-npm run build
-cd ..
-```
+**Windows:** you can skip this step. `run.bat` in step 8 installs the packages and builds the UI when they are out of date.
 
 For contributors, also do a one-time type-check pass to make sure your install is clean:
 
@@ -347,14 +341,20 @@ cd frontend && npx vue-tsc -b && cd ..
 
 ### Windows
 
-**Do not start the backend with `python run_server.py` on Windows, or with `run.bat`.** It looks fine, and imports and thumbnails work, but with its auto-reload on, CLIP search hangs and fails with `NotImplementedError`, and the taste scorer and writer training can't start. Start uvicorn directly, which runs without auto-reload:
+```powershell
+.\run.bat
+```
+
+Open <http://localhost:8700>. That one terminal runs everything; Ctrl+C stops it.
+
+Each start, `run.bat` checks the frontend. It runs `npm install` if `package-lock.json` changed, rebuilds the UI if any frontend source is newer than the last build, and then starts the backend. A failed build stops the start, so you never get an old UI by accident. Set `METASCAN_SKIP_FRONTEND=1` to skip the check, `METASCAN_PORT` for another port, and `METASCAN_HOST=127.0.0.1` to keep it on this PC (by default, other devices on your network can connect, and Windows Firewall may ask).
+
+**Do not start the backend with `python run_server.py` on Windows.** It looks fine, and imports and thumbnails work, but with its auto-reload on, CLIP search hangs and fails with `NotImplementedError`, and the taste scorer and writer training can't start. `run.bat` starts uvicorn directly to avoid this. To do the same by hand:
 
 ```powershell
 venv\Scripts\Activate.ps1
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8700
 ```
-
-Open <http://localhost:8700>. This one terminal serves the built UI. `--host 0.0.0.0` lets other devices on your network connect (Windows Firewall may ask); use `--host 127.0.0.1` to keep it on this PC. To use another port, change `--port`: this command ignores the `METASCAN_PORT` variable.
 
 For frontend work, also run `npm run dev` in `frontend/` and use `http://localhost:5173`. Its proxy always targets port 8700. Backend changes need a manual restart.
 
@@ -400,7 +400,7 @@ If ComfyUI is running on `127.0.0.1:8188`, Metascan connects to it without any s
 | `WinError 10013` or `10048` starting the server (Windows) | Port 8700 is blocked. A Metascan running in WSL with `networkingMode=mirrored` does this while it runs, and the port can stay blocked after that server stops, with nothing listening in Linux or shown by `netstat`. `wsl --shutdown` cleared it on the test machine, but it stops everything running in WSL. Otherwise, start on another port (`--port 8702`) and open that port's URL. |
 | A page answers on port 8700, but shows the wrong library (Windows) | It may be a WSL server: with mirrored networking it answers on Windows' `localhost`. `GET /api/models/hardware` says `"is_wsl": true`. |
 | `torch.cuda.is_available()` is `False` (Windows) | PyPI's CPU-only torch was installed. Delete `venv`, recreate it, and install torch first (step 5). |
-| CLIP search hangs, then fails; `NotImplementedError` in `logs\server.log` (Windows) | The server was started with `run_server.py` or `run.bat`. Use the uvicorn command in step 8. |
+| CLIP search hangs, then fails; `NotImplementedError` in `logs\server.log` (Windows) | The server was started with `run_server.py`. Use `run.bat` (step 8). |
 | `llama-server --list-devices` prints `(none)` (Windows) | The CUDA runtime DLLs are missing (step 6). |
 | `Failed to extract video metadata ... [WinError 2]` (Windows) | `exiftool` isn't on that server's PATH. Install it, then restart the server from a new terminal. |
 | `venv\Scripts\Activate.ps1 cannot be loaded` | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. |
@@ -426,7 +426,7 @@ Run on 2026-11-01: Windows 11 Pro, RTX 5090, driver 610.88, Python 3.11.9, Node 
 | Import | Files found and imported in seconds, `Watching 1 folder live` |
 | Library | Thumbnails, image and video streaming, and details, for paths with spaces too. The built UI rendered the grid in headless Chrome |
 | CLIP | Embedding 6 of 6, text and image search, on CUDA |
-| Step 8 | The uvicorn command on port 8700, and the Vite proxy for HTTP, WebSocket and search |
+| Step 8 | `run.bat` on port 8700: first run, nothing changed, a changed source, a missing venv, a blocked port. The Vite proxy for HTTP, WebSocket and search |
 | `llama-server` | Runs and lists the GPU once the runtime DLLs are in place |
 | ComfyUI | Connects to a local ComfyUI at startup |
 
@@ -446,17 +446,17 @@ Each workaround above exists because of something below. The new installer shoul
 
 | Problem | Where | What the rebuild should do |
 |---|---|---|
-| CLIP search, taste scorer and writer training fail. `reload=True` makes uvicorn pick `SelectorEventLoop`, which cannot spawn subprocesses | `run_server.py`; callers in `inference_client.py`, `taste_runner.py`, `training_manager.py` | Turn reload off on Windows, or set the loop explicitly. Fail loudly: today the search request hangs after the error |
+| With `run_server.py`, CLIP search, the taste scorer and writer training fail. `reload=True` makes uvicorn pick `SelectorEventLoop`, which cannot spawn subprocesses. `run.bat` avoids it | `run_server.py`; callers in `inference_client.py`, `taste_runner.py`, `training_manager.py` | Turn reload off on Windows, or set the loop explicitly. Fail loudly: today the search request hangs after the error |
 | Plain install gives CPU torch and exits 0 | `requirements.txt` (`torch>=2.0.0`) | Detect the CUDA version, pick the index, and verify `torch.cuda.is_available()`. `install.sh` has the same gap |
 | `llama-server` can't see the GPU | `setup_models.py` (`resolve_vlm_targets`), `backend/api/models.py` (`_download_vlm`), `metascan/utils/llama_server.py` | Also fetch `cudart-llama-bin-win-cuda-<ver>-x64.zip`, then check `--list-devices`. Decide between the 12.4 and 13.3 builds for Blackwell |
-| `run.bat` is unsafe. `venv-win` is tracked in git, so its `activate.bat` exists but its `python.exe` doesn't: the script skips creating the venv and would run `pip install` into whatever `python` is on PATH (read from the script, not run) | `run.bat`, `venv-win/` | Remove `venv-win` from git. Pick Python with `py -3.11` and refuse other versions. Also fix its "3.11 or 3.12" message |
+| `venv-win` is a broken leftover tracked in git, with no `python.exe`. Nothing uses it since `run.bat` moved to `venv` | `venv-win/` | Remove it from git |
 | `setup_models.py` says "All AI models downloaded successfully" after RIFE failed. The code looks for `rife-ncnn-vulkan` without `.exe`, and leaves `rife.zip` and `rife_binary` behind | `metascan/core/media_upscaler.py` (lines 194, 349, 972) | Moot once upscaling moves to ComfyUI: drop the download and `realesrgan`, `basicsr`, `gfpgan`. Otherwise fix the name |
 | CLIP isn't fetched at install, and the first Embedding looks stuck | `setup_models.py` | Download the chosen model, and show progress |
 | The default CLIP model is `small` even on a workstation-tier GPU | `config_example.json` | Use the hardware tier's recommendation |
 | The Models tab shows NLTK as missing after setup. Script and tab use different folders, and the tab offers `punkt` while NLTK 3.9.1 needs `punkt_tab` | `setup_models.py`, `backend/api/models.py` (`_nltk_data_dir`, `_NLTK_MODELS`) | Use one folder and one list. Only `stopwords` is read at run time |
 | `exiftool` missing shows up only as an error per video | `metascan/extractors/comfyui_video.py`; `install.sh` only warns | Check for it at install, including PATH |
-| A leftover WSL port block stops the server, and the error doesn't say why | `run_server.py` | Check the port first and explain it |
+| A leftover WSL port block stops the server. `run.bat` explains it after the failure | `run.bat` | Check the port first |
 | `requirements.txt` carries dev tools (`mypy`, `black`), and `requirements-dev.txt` conflicts with `huggingface-hub` on `click` | requirements files | Move them, and loosen the `click` pin |
 | A FAISS index built on WSL is keyed by `/mnt/d/...`, so on Windows `has_file` misses every entry and re-embedding a file adds a second row. Search still works. `windows-migration.md` copies that index across and says nothing re-embeds | `metascan/core/embedding_manager.py` (`add`, `has_file`), `faiss_renames.py`, `backend/api/similarity.py` | Key the index by the stored path, or rebuild it as part of the move |
 | `make` targets don't exist on Windows, and CI has no Windows job | `Makefile`, `.github/workflows/python-package.yml` | Provide a script, and add a Windows job |
-| Other docs repeat the old steps | `windows-migration.md` (`--vlm` with no id, `cu128`, which stops at torch 2.11, `run.bat`), `installation.md`, `writer-training.md`, `SYSTEM_REQUIREMENTS.md`, `install.sh` (Node 20) | Update them, or point them here |
+| Other docs repeat the old steps | `windows-migration.md` (`--vlm` with no id, `cu128`, which stops at torch 2.11), `installation.md`, `writer-training.md`, `SYSTEM_REQUIREMENTS.md`, `install.sh` (Node 20) | Update them, or point them here |

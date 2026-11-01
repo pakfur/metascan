@@ -58,24 +58,19 @@ prints, then clone again.
 
 ## 3. Create the Python environment
 
-Create it as `venv-win`, the folder `run.bat` uses. The copy in git is Python 3.10, which
-Metascan does not support, so replace it. Install CUDA torch **first**, or `pip` installs a
-CPU-only build. An RTX 5090 needs the cu128 build.
+Create it as `venv`, the folder `run.bat` uses. Install CUDA torch **first**, or `pip`
+installs a CPU-only build. See [step 5 of the setup guide](first_time_setup.md#5-install-backend-dependencies)
+to pick the index for your driver. An RTX 5090 on a current driver takes `cu132`.
 
 ```powershell
-Remove-Item -Recurse -Force venv-win
-py -3.11 -m venv venv-win
-venv-win\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-venv-win\Scripts\python.exe -m pip install -r requirements.txt
-New-Item venv-win\.deps-installed -ItemType File
-venv-win\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+py -3.11 -m venv venv
+venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
+venv\Scripts\python.exe -m pip install -r requirements.txt
+venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
 The last line must print `True` and your GPU's name. For LoRA training, also install
 `requirements-train.txt`.
-
-`venv-win` is tracked in git, so replacing it shows up as changes in `git status`. Don't
-commit those by accident.
 
 ## 4. Copy your data
 
@@ -102,20 +97,19 @@ is treated as missing and nothing gets scanned:
 `t2i.output_root` and `i2v.output_root` are converted for you and can stay as they are.
 Don't add a `/mnt/d` value for `comfy.output_root`: that one is not converted.
 
-## 6. Install the llama-server and frontend
+## 6. Install the llama-server
 
 This fetches the Windows `llama-server`, along with the VLM model and the NLTK data. The
-upscaling models are skipped because you copied them:
+upscaling models are skipped because you copied them. Name the model you use:
 
 ```powershell
-venv-win\Scripts\python.exe setup_models.py --vlm --skip-upscaling
+venv\Scripts\python.exe setup_models.py --vlm qwen3vl-8b --skip-upscaling
 ```
 
-Then build the UI:
+Then add the CUDA runtime DLLs, or `llama-server` cannot see your GPU: see
+[step 6 of the setup guide](first_time_setup.md#optional-vlm-tagging-and-prompt-writing).
 
-```powershell
-.\setup-frontend.bat
-```
+`run.bat` builds the UI on first start.
 
 ## 7. First start
 

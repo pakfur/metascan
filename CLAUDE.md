@@ -11,6 +11,9 @@ Metascan is an AI-generated media browser with metadata extraction, similarity s
 source venv/bin/activate && python run_server.py   # Backend: http://localhost:8700
 cd frontend && npm run dev                          # Frontend: http://localhost:5173
 
+# On Windows, one terminal (rebuilds the UI when stale; never run_server.py there)
+.\run.bat                                           # http://localhost:8700
+
 # Quality checks (must pass before committing)
 make quality test     # flake8 + black --check + mypy + pytest
 
@@ -20,7 +23,7 @@ cd frontend && npm run build    # Type-check + production build
 
 ## Key Technical Decisions
 
-- **No UI framework in Python code.** The legacy PyQt6 desktop UI (`metascan/ui/`, `main.py`, `run.bat`, `build_app.py`, `metascan.spec`) was removed; the web stack (Vue 3 + FastAPI) is the only UI. Backend Python must never import `PyQt6` or `qt_material`.
+- **No UI framework in Python code.** The legacy PyQt6 desktop UI (`metascan/ui/`, `main.py`, `build_app.py`, `metascan.spec`) was removed; the web stack (Vue 3 + FastAPI) is the only UI. Backend Python must never import `PyQt6` or `qt_material`.
 - **Database access is synchronous** — wrapped with `asyncio.to_thread()` in the service layer for FastAPI compatibility. The threading.Lock in DatabaseManager handles concurrency.
 - **Background workers use subprocesses** (not threads) for embedding generation and upscaling, communicating via JSON files. This avoids GIL issues with heavy AI workloads.
 - **Two separate CLIP subprocesses.** `embedding_worker.py` is one-shot batch (computes embeddings + CLIP tags for unembedded files and exits). `inference_worker.py` is long-running (NDJSON stdio — answers `encode_text` / `encode_image` / `encode_video` for live searches). Both load their own CLIP model; do not share state. The live path is supervised by `InferenceClient` (asyncio) installed on the FastAPI app via `lifespan`.
