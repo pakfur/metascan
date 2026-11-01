@@ -4,6 +4,7 @@ import pytest
 
 
 from metascan.utils.fs_compat import (
+    native_watch_reliable,
     can_open_for_read,
     is_ignored_name,
     is_partial_download,
@@ -110,3 +111,50 @@ def test_casefold_result_is_nfc(platform):
     key = path_key("\u0390", platform)
     assert unicodedata.is_normalized("NFC", key)
     assert key == path_key("\u03b9\u0308\u0301", platform)
+
+
+# ------------------------------------------- can a native watcher be trusted
+
+MOUNTINFO = (
+    "60 59 8:32 / / rw,relatime shared:1 - ext4 /dev/sdc rw\n"
+    "70 60 0:47 / /mnt/d rw,noatime shared:2 - 9p D:\\134 rw,aname=drvfs\n"
+    "71 60 0:48 / /mnt/my\\040nas rw shared:3 - cifs //nas/x rw\n"
+    "72 60 0:49 / /home/jk/nfs rw shared:4 - nfs4 s:/x rw\n"
+)
+
+
+@pytest.mark.parametrize(
+    "path,want",
+    [
+        ("/home/jk/media", True),
+        ("/mnt/d/Media/Staging", False),
+        ("/mnt/d", False),
+        ("/mnt/data/x", True),
+        ("/mnt/my nas/x", False),
+        ("/home/jk/nfs/a", False),
+    ],
+)
+def test_linux_trusts_only_local_filesystems(path, want):
+    assert native_watch_reliable(path, "linux", MOUNTINFO) is want
+
+
+def test_unreadable_mountinfo_means_no_native_watch():
+    assert native_watch_reliable("/x", "linux", "") is False
+
+
+@pytest.mark.parametrize(
+    "path,drive_type,want",
+    [
+        ("D:\\Media", 3, True),  # fixed: exFAT included
+        ("E:\\Media", 2, True),  # removable
+        ("Z:\\Media", 4, False),  # mapped network drive
+        ("\\\\nas\\share\\x", 3, False),  # UNC
+    ],
+)
+def test_windows_trusts_only_local_drives(path, drive_type, want):
+    got = native_watch_reliable(path, "win32", drive_type=lambda root: drive_type)
+    assert got is want
+
+
+def test_macos_is_trusted():
+    assert native_watch_reliable("/Volumes/x", "darwin") is True

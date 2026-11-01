@@ -13,12 +13,18 @@ lie under it (it cannot be told from an unmounted drive). A walk that finds
 fewer files than expected can still report many vanished at once, so the
 consumer must guard mass vanishes (hygiene's mass-removal guard does).
 
+``poll_paths`` is the same look at a few paths, for a caller that knows where
+to look (a native watcher's hints, a file a walk left unsettled). The walk stays
+the truth: a hint only brings a look forward, so losing one costs time, not a
+file.
+
 Paths are normalised (``abspath`` + ``normpath``) at the boundary (seed,
 folders, walk), then keyed by ``path_key``: the database holds
 POSIX spellings, the walk native ones, and they must key equal.
 """
 
 import os
+import stat
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -196,6 +202,117 @@ class FolderPoller:
 
     # -- polling ---------------------------------------------------------
 
+    def _visible(self, spec: FolderSpec) -> bool:
+        state = self._probe(spec.filepath)
+        if state in (PROBE_MISSING, PROBE_UNREADABLE):
+            return False
+        # An unmounted drive's mount point is an empty directory.
+        return not (state == PROBE_EMPTY and self._known_under(spec))
+
+    def _vanish(self, key: str, result: PollResult) -> None:
+        result.vanished.append(self._spelling.pop(key, key))
+        del self._known[key]
+        self._changing.pop(key, None)
+
+    def _observe(
+        self, key: str, path: str, stamp: FileStamp, result: PollResult
+    ) -> None:
+        """One sighting of a file, walked or hinted: new files wait for two
+        equal stamps, non-empty and openable."""
+        before = self._spelling.get(key)
+        self._spelling[key] = path
+        if key in self._known:
+            if before is not None and self._respelled(before, path):
+                result.respelled.append((before, path))
+            old = self._known[key]
+            if old is None:
+                self._known[key] = stamp
+            elif _same(old, stamp):
+                self._changing.pop(key, None)
+            else:
+                # Report only once the new stamp has held for two looks, so
+                # an in-place write is one change, not one per step.
+                cand = self._changing.get(key)
+                if cand is not None and _same(cand, stamp):
+                    del self._changing[key]
+                    self._known[key] = stamp
+                    result.changed.append(path)
+                else:
+                    self._changing[key] = stamp
+            return
+        prev = self._pending.get(key)
+        if (
+            prev is not None
+            and _same(prev[1], stamp)
+            and stamp.size > 0
+            and can_open_for_read(path)
+        ):
+            del self._pending[key]
+            self._known[key] = stamp
+            result.settled_new.append(path)
+        else:
+            self._pending[key] = (path, stamp)
+
+    def poll_paths(self, paths: Iterable[str]) -> PollResult:
+        """Look at these paths only: files, or folders (a folder moved in or
+        out raises one event for itself, not one per file)."""
+        result = PollResult()
+        seen: Dict[FolderSpec, bool] = {}
+        for raw in dict.fromkeys(paths):
+            path = self._normalize(raw)
+            key = self._key(path)
+            specs = [s for s in self._folders if self._covers(s, key)]
+            for spec in specs:
+                if spec not in seen:
+                    seen[spec] = self._visible(spec)
+                    if not seen[spec]:
+                        result.unavailable.append(spec.filepath)
+            if not specs or not all(seen[s] for s in specs):
+                continue
+            try:
+                st = os.stat(path)
+            except (FileNotFoundError, NotADirectoryError):
+                self._gone(key, result)
+                continue
+            except OSError:
+                continue  # the walk decides
+            if stat.S_ISDIR(st.st_mode):
+                self._look_in(path, specs, result)
+                continue
+            name = os.path.basename(path)
+            if (
+                is_ignored_name(name)
+                or is_partial_download(name)
+                or not self._is_media(path)
+            ):
+                continue
+            self._observe(key, path, FileStamp(st.st_size, st.st_mtime), result)
+        return result
+
+    def _look_in(
+        self, path: str, specs: Sequence[FolderSpec], result: PollResult
+    ) -> None:
+        if os.path.islink(path) or not any(s.search_subfolders for s in specs):
+            return  # the walk does not follow these either
+        try:
+            found = self._walk(FolderSpec(path, True))
+        except _WalkError:
+            return
+        for key, (p, stamp) in found.items():
+            self._observe(key, p, stamp, result)
+        prefix = self._prefix(path)
+        for key in [k for k in self._known if k.startswith(prefix)]:
+            if key not in found:
+                self._vanish(key, result)
+
+    def _gone(self, key: str, result: PollResult) -> None:
+        """A path is not there: a file, or a folder and everything under it."""
+        prefix = key + self._sep
+        for k in [k for k in self._pending if k == key or k.startswith(prefix)]:
+            del self._pending[k]
+        for k in [k for k in self._known if k == key or k.startswith(prefix)]:
+            self._vanish(k, result)
+
     def poll(self) -> PollResult:
         t0 = time.monotonic()
         result = PollResult()
@@ -203,12 +320,7 @@ class FolderPoller:
         disk: Dict[str, tuple] = {}
 
         for spec in self._folders:
-            state = self._probe(spec.filepath)
-            if state in (PROBE_MISSING, PROBE_UNREADABLE):
-                result.unavailable.append(spec.filepath)
-                continue
-            if state == PROBE_EMPTY and self._known_under(spec):
-                # An unmounted drive's mount point is an empty directory.
+            if not self._visible(spec):
                 result.unavailable.append(spec.filepath)
                 continue
             try:
@@ -223,41 +335,8 @@ class FolderPoller:
             s for s in self._folders if s.filepath in result.unavailable
         ]
 
-        # New files: wait for two equal stamps, non-empty, openable.
         for key, (path, stamp) in disk.items():
-            before = self._spelling.get(key)
-            self._spelling[key] = path
-            if key in self._known:
-                if before is not None and self._respelled(before, path):
-                    result.respelled.append((before, path))
-                old = self._known[key]
-                if old is None:
-                    self._known[key] = stamp
-                elif _same(old, stamp):
-                    self._changing.pop(key, None)
-                else:
-                    # Report only once the new stamp has held for two polls,
-                    # so an in-place write is one change, not one per step.
-                    cand = self._changing.get(key)
-                    if cand is not None and _same(cand, stamp):
-                        del self._changing[key]
-                        self._known[key] = stamp
-                        result.changed.append(path)
-                    else:
-                        self._changing[key] = stamp
-                continue
-            prev = self._pending.get(key)
-            if (
-                prev is not None
-                and _same(prev[1], stamp)
-                and stamp.size > 0
-                and can_open_for_read(path)
-            ):
-                del self._pending[key]
-                self._known[key] = stamp
-                result.settled_new.append(path)
-            else:
-                self._pending[key] = (path, stamp)
+            self._observe(key, path, stamp, result)
 
         # A pending file that vanished while settling is dropped silently.
         for key in list(self._pending):
@@ -273,9 +352,7 @@ class FolderPoller:
                 continue
             if any(self._covers(s, key) for s in unavailable_specs):
                 continue
-            result.vanished.append(self._spelling.pop(key, key))
-            del self._known[key]
-            self._changing.pop(key, None)
+            self._vanish(key, result)
 
         self._last_walk_s = time.monotonic() - t0
         result.walk_s = self._last_walk_s
@@ -290,3 +367,9 @@ class FolderPoller:
     def pending_paths(self) -> List[str]:
         """New files still settling (the consumer's "settling" activity)."""
         return [p for p, _ in self._pending.values()]
+
+    def unsettled_paths(self) -> List[str]:
+        """Everything waiting for another look: new files and known files
+        whose new stamp has not held yet."""
+        changing = [self._spelling.get(k, k) for k in self._changing]
+        return [*self.pending_paths(), *changing]

@@ -259,3 +259,115 @@ def test_path_reached_from_two_folders_not_vanished_if_one_unavailable(tmp_path)
     r = p.poll()  # "mount" is empty with a known file: unavailable
     assert r.unavailable == [str(sub)]
     assert r.vanished == []
+
+
+# ---------------------------------------------- poll_paths: a targeted look
+
+
+def test_poll_paths_settles_a_new_file_on_the_second_look(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    assert p.poll_paths([f]).settled_new == []
+    assert p.poll_paths([f]).settled_new == [f]
+
+
+def test_poll_paths_waits_while_the_file_grows(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    p.poll_paths([f])
+    _write(tmp_path / "a.png", b"x" * 20)
+    assert p.poll_paths([f]).settled_new == []
+    assert p.poll_paths([f]).settled_new == [f]
+
+
+def test_poll_paths_ignores_what_a_walk_ignores(tmp_path):
+    partial = _write(tmp_path / "a.png.crdownload")
+    junk = _write(tmp_path / "Thumbs.db")
+    text = _write(tmp_path / "notes.txt")
+    p = _poller(tmp_path)
+    for _ in range(2):
+        assert p.poll_paths([partial, junk, text]).settled_new == []
+    assert p.pending_paths() == []
+
+
+def test_poll_paths_ignores_a_path_outside_the_folders(tmp_path):
+    outside = _write(tmp_path / "out" / "a.png")
+    p = _poller(tmp_path, folders=[FolderSpec(str(tmp_path / "lib"), True)])
+    (tmp_path / "lib").mkdir()
+    p.poll_paths([outside])
+    assert p.poll_paths([outside]).settled_new == []
+
+
+def test_poll_paths_keeps_a_shallow_folder_shallow(tmp_path):
+    deep = _write(tmp_path / "sub" / "a.png")
+    p = _poller(tmp_path, sub=False)
+    p.poll_paths([deep])
+    assert p.poll_paths([deep]).settled_new == []
+
+
+def test_poll_paths_reports_a_deleted_file_vanished(tmp_path):
+    f = _write(tmp_path / "a.png")
+    _write(tmp_path / "keep.png")
+    p = _poller(tmp_path)
+    p.seed([f])
+    p.poll()
+    os.remove(f)
+    assert p.poll_paths([f]).vanished == [f]
+
+
+def test_poll_paths_walks_a_folder_moved_in_whole(tmp_path):
+    """A folder moved into the tree raises one event, for the folder."""
+    p = _poller(tmp_path)
+    a = _write(tmp_path / "drop" / "a.png")
+    b = _write(tmp_path / "drop" / "deep" / "b.png")
+    p.poll_paths([str(tmp_path / "drop")])
+    assert sorted(p.pending_paths()) == sorted([a, b])
+    assert sorted(p.poll_paths([a, b]).settled_new) == sorted([a, b])
+
+
+def test_poll_paths_reports_a_removed_folder_as_its_files(tmp_path):
+    a = _write(tmp_path / "drop" / "a.png")
+    b = _write(tmp_path / "drop" / "deep" / "b.png")
+    _write(tmp_path / "keep.png")
+    p = _poller(tmp_path)
+    p.seed([a, b])
+    p.poll()
+    import shutil
+
+    shutil.rmtree(tmp_path / "drop")
+    assert sorted(p.poll_paths([str(tmp_path / "drop")]).vanished) == sorted([a, b])
+
+
+def test_poll_paths_vanishes_nothing_in_a_folder_it_cannot_see(tmp_path):
+    lib = tmp_path / "lib"
+    f = _write(lib / "a.png")
+    p = _poller(tmp_path, folders=[FolderSpec(str(lib), True)])
+    p.seed([f])
+    p.poll()
+    import shutil
+
+    shutil.rmtree(lib)  # the drive went away
+    result = p.poll_paths([f])
+    assert result.vanished == []
+    assert result.unavailable == [str(lib)]
+
+
+def test_poll_paths_reports_a_changed_file_once_it_holds(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    p.seed([f])
+    p.poll()
+    _write(tmp_path / "a.png", b"x" * 20)
+    assert p.poll_paths([f]).changed == []
+    assert p.poll_paths([f]).changed == [f]
+
+
+def test_unsettled_paths_lists_new_and_changing_files(tmp_path):
+    known = _write(tmp_path / "known.png")
+    p = _poller(tmp_path)
+    p.seed([known])
+    p.poll()
+    _write(tmp_path / "known.png", b"x" * 20)
+    new = _write(tmp_path / "new.png")
+    p.poll_paths([known, new])
+    assert sorted(p.unsettled_paths()) == sorted([known, new])

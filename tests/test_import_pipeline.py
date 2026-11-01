@@ -15,7 +15,7 @@ from PIL import Image
 from backend import dependencies
 from backend.api import scan as scan_api
 from backend.services import taste_snapshot as ts
-from backend.services.background.import_process import ImportProcess
+from backend.services.background.import_process import NATIVE_WALK_S, ImportProcess
 from backend.services.background.protocol import State
 from backend.services.background.registry import ProcessRegistry
 from metascan.core import folder_poller as fp
@@ -25,8 +25,27 @@ from metascan.utils.fs_compat import path_key
 from tests.test_background_services import Stub
 
 
+class FakeWatcher:
+    """A native watcher that hears what the test tells it."""
+
+    def __init__(self, on_path, live=True):
+        self.on_path = on_path
+        self.live = live
+        self.synced = []
+        self.closes = 0
+
+    def sync(self, folders):
+        self.synced.append(list(folders))
+        return list(folders) if self.live else []
+
+    def close(self):
+        self.closes += 1
+
+
 class Rig:
     def __init__(self, tmp_path, monkeypatch):
+        self.watcher = None
+        self.live = False
         self.lib = tmp_path / "lib"
         self.lib.mkdir()
         self.db = DatabaseManager(tmp_path / "db")
@@ -57,6 +76,10 @@ class Rig:
         async def after_move():
             self.moves += 1
 
+        def make_watcher(on_path):
+            self.watcher = FakeWatcher(on_path, self.live)
+            return self.watcher
+
         scanner = kw.pop("scanner", None) or Scanner(self.db, None)
         return ImportProcess(
             self.registry,
@@ -71,6 +94,7 @@ class Rig:
             after_move=after_move,
             announce_interval_s=0.0,
             embed_debounce_s=0.05,
+            make_watcher=make_watcher,
             **kw,
         )
 
@@ -876,3 +900,269 @@ def test_the_loser_of_the_race_does_not_clear_a_running_scans_state(rig, monkeyp
     assert run(go()) == 409
     assert scan_api._progress == {"phase": "scanning", "current": 3}
     assert scan_api._cancel_requested is True and scan_api._scan_error == "Boom"
+
+
+# ------------------------------------------------------- native notifications
+
+
+def _spy_walks(proc):
+    walks = []
+    poller = proc._poller
+    real = poller.poll
+    poller.poll = lambda: walks.append(1) or real()
+    return walks
+
+
+def test_a_hint_ingests_without_a_walk(rig):
+    rig.live = True
+    proc = rig.make(hint_quiet_s=0.0)
+
+    async def go():
+        await proc.run_pass()
+        walks = _spy_walks(proc)
+        pic = rig.image("a.png", 1)
+        rig.watcher.on_path(str(pic))
+        for _ in range(3):
+            await proc.run_pass(full=False)
+        assert walks == []
+        return pic
+
+    pic = run(go())
+    assert pic.as_posix() in rig.rows()
+    assert ("library", "media_added", {"count": 1}) in rig.events
+
+
+def test_a_hint_waits_for_the_file_to_go_quiet(rig):
+    rig.live = True
+    proc = rig.make(hint_quiet_s=3600.0)
+
+    async def go():
+        await proc.run_pass()
+        rig.watcher.on_path(str(rig.image("a.png", 1)))
+        for _ in range(3):
+            await proc.run_pass(full=False)
+
+    run(go())
+    assert not rig.rows()
+
+
+def test_the_loop_ingests_a_hinted_file_long_before_the_next_walk(rig, monkeypatch):
+    rig.live = True
+    proc = rig.make(hint_quiet_s=0.01, hint_tick_s=0.02)
+
+    async def go():
+        monkeypatch.setattr(fp.FolderPoller, "next_interval", lambda self: 3600.0)
+        proc.start_loop()
+        while proc._poller is None or rig.watcher is None:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        pic = rig.image("a.png", 1)
+        rig.watcher.on_path(str(pic))
+        for _ in range(300):
+            if pic.as_posix() in rig.rows():
+                break
+            await asyncio.sleep(0.01)
+        await proc.aclose()
+        return pic
+
+    assert run(go()).as_posix() in rig.rows()
+
+
+def test_a_file_a_walk_found_settles_without_a_second_walk(rig, monkeypatch):
+    """Polling alone gains too: one slow walk finds it, a look confirms it."""
+    proc = rig.make(hint_quiet_s=0.0, hint_tick_s=0.02)
+
+    async def go():
+        monkeypatch.setattr(fp.FolderPoller, "next_interval", lambda self: 3600.0)
+        pic = rig.image("a.png", 1)
+        proc.start_loop()
+        for _ in range(300):
+            if pic.as_posix() in rig.rows():
+                break
+            await asyncio.sleep(0.01)
+        await proc.aclose()
+        return pic
+
+    assert run(go()).as_posix() in rig.rows()
+
+
+def test_a_move_seen_by_hints_keeps_the_row(rig):
+    rig.live = True
+    proc = rig.make(hint_quiet_s=0.0)
+
+    async def go():
+        pic = rig.image("a.png", 1)
+        await rig.passes(3, proc=proc)
+        rig.db.set_grade(pic.as_posix(), "pass")
+        new = rig.lib / "sub" / "a.png"
+        new.parent.mkdir()
+        os.rename(pic, new)
+        rig.watcher.on_path(str(pic))
+        rig.watcher.on_path(str(new))
+        for _ in range(4):
+            await proc.run_pass(full=False)
+        return pic, new
+
+    pic, new = run(go())
+    assert new.as_posix() in rig.rows()
+    assert pic.as_posix() not in rig.rows()
+    assert rig.db.get_judgment(new.as_posix()).grade == "pass"
+
+
+def test_pausing_closes_the_watcher_and_drops_its_hints(rig):
+    rig.live = True
+    proc = rig.proc  # the registered one: pause reaches it
+    proc._hint_quiet_s = 0.0
+
+    async def go():
+        await proc.run_pass()
+        await rig.registry.command("import", "pause")
+        rig.watcher.on_path(str(rig.image("a.png", 1)))
+        await proc.run_pass(full=False)
+        assert rig.watcher.closes == 1
+        proc._next_walk = proc._clock() + 100
+        assert proc._wait_s() > proc._hint_tick_s
+
+    run(go())
+    assert not rig.rows()
+
+
+def test_a_scan_closes_the_watcher_and_its_end_arms_it_again(rig):
+    rig.live = True
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        rig.scan["running"] = True
+        await proc.run_pass()
+        assert rig.watcher.closes == 1
+        rig.scan["running"] = False
+        before = len(rig.watcher.synced)
+        await proc.run_pass()
+        assert len(rig.watcher.synced) == before + 1
+
+    run(go())
+
+
+def test_watching_off_closes_the_watcher(rig):
+    rig.live = True
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        rig.config["watch_directories"] = False
+        await proc.run_pass()
+
+    run(go())
+    assert rig.watcher.closes == 1
+
+
+def test_an_unavailable_folder_is_not_armed(rig):
+    rig.live = True
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        first = rig.watcher.synced[-1]
+        assert [s.filepath for s in first] == [str(rig.lib)]
+        rig.db.save_media(
+            Scanner(rig.db, None)._process_media_file(rig.image("a.png", 1))
+        )
+        os.remove(rig.lib / "a.png")
+        rig.config["directories"][0]["filepath"] = str(rig.lib / "gone")
+        await proc.run_pass()
+        await proc.run_pass()
+        assert rig.watcher.synced[-1] == []
+
+    run(go())
+
+
+def test_a_flood_of_hints_becomes_one_walk(rig, monkeypatch):
+    import backend.services.background.import_process as ip
+
+    monkeypatch.setattr(ip, "MAX_HINTS", 3)
+    rig.live = True
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        for i in range(5):
+            rig.watcher.on_path(f"/nowhere/{i}.png")
+        assert proc._walk_due
+        assert len(proc._hints) < 3
+
+    run(go())
+
+
+def test_a_file_that_never_settles_stops_being_looked_at(rig):
+    rig.live = True
+    proc = rig.make(hint_quiet_s=0.0, hint_max_s=0.0)
+
+    async def go():
+        await proc.run_pass()
+        empty = rig.lib / "empty.png"
+        empty.write_bytes(b"")
+        rig.watcher.on_path(str(empty))
+        for _ in range(3):
+            await proc.run_pass(full=False)
+        assert not proc._hints
+        proc._next_walk = proc._clock() + 100
+        assert proc._wait_s() > proc._hint_tick_s
+        await proc.run_pass()  # the walk still sees it, without a new look
+        assert not proc._hints
+
+    run(go())
+
+
+def test_a_fully_watched_library_walks_as_a_backstop(rig):
+    rig.live = True
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        assert proc._walk_interval() == NATIVE_WALK_S
+
+    run(go())
+
+
+def test_a_library_it_cannot_watch_walks_at_the_polling_pace(rig):
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        assert proc._walk_interval() == proc._poller.next_interval()
+
+    run(go())
+
+
+def test_the_panel_says_when_watching_is_live(rig):
+    rig.live = True
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        assert proc.report().activity == "Watching 1 folder live"
+
+    run(go())
+
+
+def test_the_panel_keeps_its_words_when_polling(rig):
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        assert proc.report().activity == "Watching 1 folder"
+
+    run(go())
+
+
+def test_aclose_closes_the_watcher(rig):
+    rig.live = True
+    proc = rig.make()
+
+    async def go():
+        await proc.run_pass()
+        await proc.aclose()
+
+    run(go())
+    assert rig.watcher.closes == 1

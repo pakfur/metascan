@@ -279,6 +279,13 @@ attempts, last_error)`. Migration v8 creates it and imports any leftover
 
 ### 9.1 Why polling
 
+(Amended 2026-10-31: tested at last on this machine. inotify on `/mnt/d` delivers
+nothing at all, even for writes from inside WSL, and exFAT does not bump a parent
+directory's mtime. Windows' own API hears every change in milliseconds. So native
+notifications now bring a look forward where they can be trusted, and the poller
+below stays the truth and the only path on a silent mount:
+`metascan/core/native_watcher.py`.)
+
 `metascan/core/watcher.py` is not connected to anything, and `watch_directories`
 does nothing. Native file notifications are not reliable for this library: it is on
 `/mnt/d`, a 9p mount in WSL2, where changes made from Windows are not expected to
