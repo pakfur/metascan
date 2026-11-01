@@ -192,7 +192,7 @@ cd metascan
 
 The rest of this guide assumes the `metascan` directory is your working directory.
 
-**Windows:** clone onto an NTFS drive such as `C:`, not exFAT, because SQLite's write-ahead log has not been tested on exFAT. Your media can stay on any drive. Ignore the `venv-win` folder in the repo: it is a broken leftover tracked in git, and nothing uses it.
+**Windows:** clone onto an NTFS drive such as `C:`, not exFAT, because SQLite's write-ahead log has not been tested on exFAT. Your media can stay on any drive.
 
 ## 4. Create the Python virtual environment
 
@@ -449,7 +449,6 @@ Each workaround above exists because of something below. The new installer shoul
 | With `run_server.py`, CLIP search, the taste scorer and writer training fail. `reload=True` makes uvicorn pick `SelectorEventLoop`, which cannot spawn subprocesses. `run.bat` avoids it | `run_server.py`; callers in `inference_client.py`, `taste_runner.py`, `training_manager.py` | Turn reload off on Windows, or set the loop explicitly. Fail loudly: today the search request hangs after the error |
 | Plain install gives CPU torch and exits 0 | `requirements.txt` (`torch>=2.0.0`) | Detect the CUDA version, pick the index, and verify `torch.cuda.is_available()`. `install.sh` has the same gap |
 | `llama-server` can't see the GPU | `setup_models.py` (`resolve_vlm_targets`), `backend/api/models.py` (`_download_vlm`), `metascan/utils/llama_server.py` | Also fetch `cudart-llama-bin-win-cuda-<ver>-x64.zip`, then check `--list-devices`. Decide between the 12.4 and 13.3 builds for Blackwell |
-| `venv-win` is a broken leftover tracked in git, with no `python.exe`. Nothing uses it since `run.bat` moved to `venv` | `venv-win/` | Remove it from git |
 | `setup_models.py` says "All AI models downloaded successfully" after RIFE failed. The code looks for `rife-ncnn-vulkan` without `.exe`, and leaves `rife.zip` and `rife_binary` behind | `metascan/core/media_upscaler.py` (lines 194, 349, 972) | Moot once upscaling moves to ComfyUI: drop the download and `realesrgan`, `basicsr`, `gfpgan`. Otherwise fix the name |
 | CLIP isn't fetched at install, and the first Embedding looks stuck | `setup_models.py` | Download the chosen model, and show progress |
 | The default CLIP model is `small` even on a workstation-tier GPU | `config_example.json` | Use the hardware tier's recommendation |
