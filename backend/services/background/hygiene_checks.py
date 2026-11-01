@@ -139,12 +139,10 @@ async def _survey(ctx: HygieneContext, stored: Sequence[str]) -> Dict[str, Any]:
 
     directories = get_directories(ctx.config)
     specs = [FolderSpec(d.filepath, d.search_subfolders) for d in directories]
-    roots = scan._generated_output_roots(ctx.config)
     supported = Scanner.SUPPORTED_EXTENSIONS
     poller = FolderPoller(
         specs,
         scan._probe_folder,
-        roots,
         lambda p: Path(p).suffix.lower() in supported,
     )
     known = {_key(p) for p in stored}

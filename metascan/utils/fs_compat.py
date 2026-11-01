@@ -3,8 +3,10 @@
 Everything that differs per OS lives here; callers use these functions only.
 """
 
+import re
 import sys
 import unicodedata
+from typing import Callable, Optional
 
 _CASE_INSENSITIVE_PLATFORMS = ("win32", "darwin")
 
@@ -13,6 +15,17 @@ _IGNORED_NAMES = frozenset({"thumbs.db", "desktop.ini", ".ds_store", ".spotlight
 
 # Same set on every OS; ".download" is macOS (Safari) but harmless elsewhere.
 _PARTIAL_SUFFIXES = (".crdownload", ".part", ".tmp", ".download")
+
+
+# Linux filesystems whose changes can happen where inotify never hears of them:
+# a Windows drive under WSL2 (the watch is accepted and then nothing arrives,
+# measured on /mnt/d, even for writes from inside WSL), or another machine.
+_SILENT_FSTYPES = frozenset(
+    {"9p", "v9fs", "drvfs", "nfs", "nfs4", "cifs", "smb3", "smbfs", "virtiofs"}
+    | {"vboxsf", "fuse.sshfs", "fuse.rclone"}
+)
+
+_DRIVE_REMOTE = 4  # GetDriveTypeW
 
 
 def path_key(path: str, platform: str = sys.platform) -> str:
@@ -47,3 +60,55 @@ def can_open_for_read(path: str) -> bool:
             return True
     except OSError:
         return False
+
+
+def _read_mountinfo() -> str:
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _mount_fstype(path: str, mountinfo: str) -> Optional[str]:
+    """The filesystem type of the deepest mount holding ``path``."""
+    best, best_len = None, -1
+    for line in mountinfo.splitlines():
+        left, sep, right = line.partition(" - ")
+        fields = left.split(" ")
+        if not sep or len(fields) < 5 or not right:
+            continue
+        # mountinfo escapes space, tab, newline and backslash as \ooo.
+        point = re.sub(
+            r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4]
+        ).rstrip("/")
+        if (path == point or path.startswith(point + "/")) and len(point) > best_len:
+            best, best_len = right.split(" ")[0], len(point)
+    return best
+
+
+def _windows_drive_type(root: str) -> int:
+    import ctypes
+
+    return int(ctypes.windll.kernel32.GetDriveTypeW(root))  # type: ignore[attr-defined]
+
+
+def native_watch_reliable(
+    path: str,
+    platform: str = sys.platform,
+    mountinfo: Optional[str] = None,
+    drive_type: Callable[[str], int] = _windows_drive_type,
+) -> bool:
+    """Whether a native watcher on ``path`` can be expected to hear changes.
+    False leaves the folder to the poller alone, which always works."""
+    if platform == "win32":
+        if path.startswith(("\\\\", "//")):
+            return False
+        try:
+            return drive_type(path[:3]) != _DRIVE_REMOTE
+        except OSError:
+            return False
+    if platform == "darwin":
+        return True
+    fstype = _mount_fstype(path, _read_mountinfo() if mountinfo is None else mountinfo)
+    return fstype is not None and fstype not in _SILENT_FSTYPES

@@ -17,9 +17,9 @@ def _is_media(path):
     return path.lower().endswith((".png", ".jpg", ".mp4"))
 
 
-def _poller(tmp_path, skip=(), sub=True, folders=None):
+def _poller(tmp_path, sub=True, folders=None):
     specs = folders or [FolderSpec(str(tmp_path), sub)]
-    return FolderPoller(specs, _probe, list(skip), _is_media)
+    return FolderPoller(specs, _probe, _is_media)
 
 
 def _write(path: Path, data=b"x" * 10):
@@ -75,14 +75,6 @@ def test_ignored_and_partial_names_skipped(tmp_path):
     p = _poller(tmp_path)
     p.poll()
     assert p.poll().settled_new == [good]
-
-
-def test_paths_under_skip_roots_skipped(tmp_path):
-    _write(tmp_path / "lib" / "a.png")
-    other = _write(tmp_path / "library" / "b.png")
-    p = _poller(tmp_path, skip=[str(tmp_path / "lib")])
-    p.poll()
-    assert p.poll().settled_new == [other]
 
 
 def test_seed_reports_unknown_disk_files_as_new(tmp_path):
@@ -162,7 +154,7 @@ def test_vanished_while_settling_is_dropped_silently(tmp_path):
 
 
 def test_interval_scales_with_a_slow_walk():
-    p = FolderPoller([], _probe, [], _is_media)
+    p = FolderPoller([], _probe, _is_media)
     assert p.next_interval() == folder_poller.WATCH_INTERVAL_S
     p._last_walk_s = 2.0
     assert p.next_interval() == 40.0
@@ -195,11 +187,10 @@ def test_mixed_spellings_key_equal_on_posix(tmp_path, monkeypatch):
     assert f  # file is the same one the messy spelling names
 
 
-def test_relative_folder_and_skip_root(tmp_path, monkeypatch):
+def test_relative_folder(tmp_path, monkeypatch):
     _write(tmp_path / "in" / "a.png")
-    _write(tmp_path / "in" / "skip" / "b.png")
     monkeypatch.chdir(tmp_path)
-    p = FolderPoller([FolderSpec("in", True)], _probe, ["in/skip/"], _is_media)
+    p = FolderPoller([FolderSpec("in", True)], _probe, _is_media)
     p.poll()
     assert p.poll().settled_new == [str(tmp_path / "in" / "a.png")]
 
@@ -213,7 +204,6 @@ def test_windows_spellings_key_equal():
     p = FolderPoller(
         [FolderSpec("D:/Media/", True)],
         _probe,
-        ["D:/Media/skip"],
         _is_media,
         normalize=win,
         sep="\\",
@@ -222,8 +212,6 @@ def test_windows_spellings_key_equal():
     spec = p._folders[0]
     assert p._covers(spec, p._key("D:/Media/sub/a.png"))
     assert not p._covers(spec, p._key("D:\\MediaX\\a.png"))
-    assert p._skipped("D:\\Media\\skip\\b.png")
-    assert not p._skipped("D:\\Media\\skipper\\b.png")
 
 
 def test_jittering_mtime_does_not_report_changed_or_block_settling(tmp_path):
@@ -271,3 +259,115 @@ def test_path_reached_from_two_folders_not_vanished_if_one_unavailable(tmp_path)
     r = p.poll()  # "mount" is empty with a known file: unavailable
     assert r.unavailable == [str(sub)]
     assert r.vanished == []
+
+
+# ---------------------------------------------- poll_paths: a targeted look
+
+
+def test_poll_paths_settles_a_new_file_on_the_second_look(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    assert p.poll_paths([f]).settled_new == []
+    assert p.poll_paths([f]).settled_new == [f]
+
+
+def test_poll_paths_waits_while_the_file_grows(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    p.poll_paths([f])
+    _write(tmp_path / "a.png", b"x" * 20)
+    assert p.poll_paths([f]).settled_new == []
+    assert p.poll_paths([f]).settled_new == [f]
+
+
+def test_poll_paths_ignores_what_a_walk_ignores(tmp_path):
+    partial = _write(tmp_path / "a.png.crdownload")
+    junk = _write(tmp_path / "Thumbs.db")
+    text = _write(tmp_path / "notes.txt")
+    p = _poller(tmp_path)
+    for _ in range(2):
+        assert p.poll_paths([partial, junk, text]).settled_new == []
+    assert p.pending_paths() == []
+
+
+def test_poll_paths_ignores_a_path_outside_the_folders(tmp_path):
+    outside = _write(tmp_path / "out" / "a.png")
+    p = _poller(tmp_path, folders=[FolderSpec(str(tmp_path / "lib"), True)])
+    (tmp_path / "lib").mkdir()
+    p.poll_paths([outside])
+    assert p.poll_paths([outside]).settled_new == []
+
+
+def test_poll_paths_keeps_a_shallow_folder_shallow(tmp_path):
+    deep = _write(tmp_path / "sub" / "a.png")
+    p = _poller(tmp_path, sub=False)
+    p.poll_paths([deep])
+    assert p.poll_paths([deep]).settled_new == []
+
+
+def test_poll_paths_reports_a_deleted_file_vanished(tmp_path):
+    f = _write(tmp_path / "a.png")
+    _write(tmp_path / "keep.png")
+    p = _poller(tmp_path)
+    p.seed([f])
+    p.poll()
+    os.remove(f)
+    assert p.poll_paths([f]).vanished == [f]
+
+
+def test_poll_paths_walks_a_folder_moved_in_whole(tmp_path):
+    """A folder moved into the tree raises one event, for the folder."""
+    p = _poller(tmp_path)
+    a = _write(tmp_path / "drop" / "a.png")
+    b = _write(tmp_path / "drop" / "deep" / "b.png")
+    p.poll_paths([str(tmp_path / "drop")])
+    assert sorted(p.pending_paths()) == sorted([a, b])
+    assert sorted(p.poll_paths([a, b]).settled_new) == sorted([a, b])
+
+
+def test_poll_paths_reports_a_removed_folder_as_its_files(tmp_path):
+    a = _write(tmp_path / "drop" / "a.png")
+    b = _write(tmp_path / "drop" / "deep" / "b.png")
+    _write(tmp_path / "keep.png")
+    p = _poller(tmp_path)
+    p.seed([a, b])
+    p.poll()
+    import shutil
+
+    shutil.rmtree(tmp_path / "drop")
+    assert sorted(p.poll_paths([str(tmp_path / "drop")]).vanished) == sorted([a, b])
+
+
+def test_poll_paths_vanishes_nothing_in_a_folder_it_cannot_see(tmp_path):
+    lib = tmp_path / "lib"
+    f = _write(lib / "a.png")
+    p = _poller(tmp_path, folders=[FolderSpec(str(lib), True)])
+    p.seed([f])
+    p.poll()
+    import shutil
+
+    shutil.rmtree(lib)  # the drive went away
+    result = p.poll_paths([f])
+    assert result.vanished == []
+    assert result.unavailable == [str(lib)]
+
+
+def test_poll_paths_reports_a_changed_file_once_it_holds(tmp_path):
+    f = _write(tmp_path / "a.png")
+    p = _poller(tmp_path)
+    p.seed([f])
+    p.poll()
+    _write(tmp_path / "a.png", b"x" * 20)
+    assert p.poll_paths([f]).changed == []
+    assert p.poll_paths([f]).changed == [f]
+
+
+def test_unsettled_paths_lists_new_and_changing_files(tmp_path):
+    known = _write(tmp_path / "known.png")
+    p = _poller(tmp_path)
+    p.seed([known])
+    p.poll()
+    _write(tmp_path / "known.png", b"x" * 20)
+    new = _write(tmp_path / "new.png")
+    p.poll_paths([known, new])
+    assert sorted(p.unsettled_paths()) == sorted([known, new])

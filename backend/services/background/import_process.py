@@ -2,11 +2,16 @@
 
 Two jobs behind one panel row.
 
-*The watcher* polls the configured scan folders (``FolderPoller``), ingests
+*The watcher* polls the configured scan folders (``FolderPoller``), hears of
+changes between walks from native notifications where they can be trusted
+(``NativeWatcher``: hints that bring a look forward, never more), ingests
 what settles with ``Scanner.ingest_file`` one file at a time on a thread,
 recognises moved and renamed files (``move_detector``) and re-keys their rows
 with everything attached (``move_media_batch_applied``), then kicks Embedding
-(debounced) so new files are embedded and tagged. It only reports ``running``
+(debounced) so new files are embedded and tagged. Generated-output roots are
+watched like any folder: they usually sit inside the scan folder, files are
+dropped there by hand, and ComfyClient's own ingest has written its row by the
+time a file settles (``_ingest_one`` then skips it). It only reports ``running``
 while it ingests, moves or settles files; polling alone is ``idle``. It is off
 when ``watch_directories`` is false, suspended while a scan or Full clean runs
 (the scan owns the library then, and the pending snapshot file), and
@@ -55,6 +60,7 @@ from metascan.core.folder_poller import (
     FolderSpec,
 )
 from metascan.core.move_detector import MOVE_GRACE_S, Candidate, match_moves
+from metascan.core.native_watcher import NativeWatcher
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
@@ -63,6 +69,11 @@ ANNOUNCE_INTERVAL_S = 2.0  # at most one `library` event this often
 EMBED_DEBOUNCE_S = 5.0  # after the last ingest
 CLOSE_WAIT_S = 10.0  # aclose waits this long for a file being written
 SETTLE_REPORT_S = 60.0  # a file still settling counts as work this long
+HINT_QUIET_S = 1.0  # a path is looked at once it has been quiet this long
+HINT_TICK_S = 1.0  # how often files waiting for a look get one
+HINT_MAX_S = 120.0  # a file unsettled this long is left to the walks
+MAX_HINTS = 20_000  # more paths than this at once: one walk instead
+NATIVE_WALK_S = 60.0  # the backstop walk's pace when every folder is watched
 
 
 INGESTED, SKIPPED, FAILED = "ingested", "skipped", "failed"
@@ -88,15 +99,18 @@ class ImportProcess:
         get_config: Optional[Callable[[], Dict[str, Any]]] = None,
         make_scanner: Optional[Callable[[], Any]] = None,
         probe: Optional[Callable[[str], str]] = None,
-        output_roots: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
         broadcast: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         kick_embedding: Optional[Callable[[], Awaitable[Any]]] = None,
         after_move: Optional[Callable[[], Awaitable[Any]]] = None,
         compute_phash: Optional[Callable[[Path], Optional[str]]] = None,
         move_gate: Optional[threading.Lock] = None,
+        make_watcher: Optional[Callable[[Callable[[str], None]], Any]] = None,
         clock: Callable[[], float] = time.monotonic,
         announce_interval_s: float = ANNOUNCE_INTERVAL_S,
         embed_debounce_s: float = EMBED_DEBOUNCE_S,
+        hint_quiet_s: float = HINT_QUIET_S,
+        hint_tick_s: float = HINT_TICK_S,
+        hint_max_s: float = HINT_MAX_S,
     ) -> None:
         self._registry = registry
         self._status = status
@@ -105,7 +119,6 @@ class ImportProcess:
         self._get_config = get_config
         self._make_scanner = make_scanner
         self._probe = probe
-        self._output_roots = output_roots
         self._broadcast = broadcast
         self._kick_embedding = kick_embedding
         self._after_move = after_move
@@ -114,11 +127,15 @@ class ImportProcess:
         self._clock = clock
         self._announce_interval_s = announce_interval_s
         self._embed_debounce_s = embed_debounce_s
+        self._make_watcher = make_watcher
+        self._hint_quiet_s = hint_quiet_s
+        self._hint_tick_s = hint_tick_s
+        self._hint_max_s = hint_max_s
 
         # watcher state (the event loop's; read by report() from any thread)
         self._watch_on: Optional[bool] = None  # None until the first pass
         self._poller: Optional[FolderPoller] = None
-        self._signature: Optional[Tuple[Any, ...]] = None
+        self._signature: Optional[Tuple[FolderSpec, ...]] = None
         self._folder_count = 0
         self._unavailable: List[str] = []
         self._resync = True
@@ -151,6 +168,16 @@ class ImportProcess:
         self._task: Optional[asyncio.Task] = None
         self._wake: Optional[asyncio.Event] = None
         self._closed = False
+
+        # native notifications. Hints arrive on the observer's thread, hence
+        # the lock; everything else here is the event loop's.
+        self._watcher: Any = None
+        self._armed = 0
+        self._hint_lock = threading.Lock()
+        self._hints: Dict[str, Tuple[float, float]] = {}  # path -> first, last
+        self._expired: Set[str] = set()  # unsettled past HINT_MAX_S
+        self._walk_due = True
+        self._next_walk = float("-inf")
 
     # protocol ----------------------------------------------------------
     def capabilities(self) -> Capabilities:
@@ -197,6 +224,9 @@ class ImportProcess:
             return ProcessReport(State.IDLE, None, intent.capitalize(), None, warnings)
         n = self._folder_count
         what = "no folders" if n == 0 else f"{n} folder{'s' if n != 1 else ''}"
+        if self._armed:
+            live = " live" if self._armed >= n else f", {self._armed} live"
+            what = f"{what}{live}"
         return ProcessReport(State.IDLE, None, f"Watching {what}", None, warnings)
 
     def _working(self, warnings: int, winding: bool) -> ProcessReport:
@@ -366,6 +396,7 @@ class ImportProcess:
             _, late = await asyncio.wait(set(self._threads), timeout=CLOSE_WAIT_S)
             if late:
                 logger.warning("import: a file was still being written at shutdown")
+        await self._disarm()
 
     async def _thread(self, fn: Callable[..., Any], *args: Any) -> Any:
         """``to_thread`` that ``aclose`` can wait for: cancelling the loop
@@ -379,8 +410,10 @@ class ImportProcess:
     async def _run(self) -> None:
         assert self._wake is not None
         while not self._closed:
+            full = self._walk_due or self._clock() >= self._next_walk
+            self._walk_due = False
             try:
-                await self.run_pass()
+                await self.run_pass(full=full)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -388,15 +421,36 @@ class ImportProcess:
                 logger.exception("import pass failed")
                 self._error = type(exc).__name__
                 self.poke()
-            poller = self._poller
-            wait = poller.next_interval() if poller else WATCH_INTERVAL_S
-            self._wake.clear()
+            if full:
+                self._next_walk = self._clock() + self._walk_interval()
+            self._wake.clear()  # before the wait is worked out: no lost wake
             try:
-                await asyncio.wait_for(self._wake.wait(), timeout=wait)
+                await asyncio.wait_for(self._wake.wait(), timeout=self._wait_s())
             except asyncio.TimeoutError:
                 pass
 
+    def _walk_interval(self) -> float:
+        """A walk is the whole job while polling, and a backstop for what
+        notifications miss once every folder has them."""
+        poller = self._poller
+        base = poller.next_interval() if poller else WATCH_INTERVAL_S
+        if self._armed and self._armed >= self._folder_count:
+            return max(base, NATIVE_WALK_S)
+        return base
+
+    def _wait_s(self) -> float:
+        wait = max(0.0, self._next_walk - self._clock())
+        if self._hints or self._held:
+            return min(wait, self._hint_tick_s)
+        return wait
+
     def _wake_loop(self) -> None:
+        """Something changed that only a walk can answer (start, resume, a
+        scan's end, files from hygiene)."""
+        self._walk_due = True
+        self._wake_up()
+
+    def _wake_up(self) -> None:
         loop, wake = self._loop, self._wake
         if loop is not None and wake is not None and not loop.is_closed():
             loop.call_soon_threadsafe(wake.set)
@@ -434,9 +488,10 @@ class ImportProcess:
         return any(now - t < SETTLE_REPORT_S for t in self._settle_seen.values())
 
     # one pass --------------------------------------------------------------
-    async def run_pass(self) -> None:
-        """Poll once, apply moves, ingest what settled. Never blocks the event
-        loop: polling and database work run in threads."""
+    async def run_pass(self, full: bool = True) -> None:
+        """Walk the folders (``full``) or look only at the paths waiting for
+        a look, apply moves, ingest what settled. Never blocks the event loop:
+        polling and database work run in threads."""
         config = await asyncio.to_thread(self._config)
         on = bool(config.get("watch_directories", True))
         if on != self._watch_on:
@@ -447,13 +502,27 @@ class ImportProcess:
         scanning = self._scan_running()
         self._note_scan(scanning)
         if not on or scanning or self._halted():
+            await self._disarm()
             return
+        full = full or self._poller is None or self._resync
         await self._ensure_poller(config)
         poller = self._poller
         assert poller is not None
-        result = await asyncio.to_thread(poller.poll)
-        self._unavailable = list(result.unavailable)
+        if full:
+            # Armed before the walk: a change during it is heard.
+            await self._sync_watcher()
+            result = await asyncio.to_thread(poller.poll)
+            due: List[Tuple[str, Tuple[float, float]]] = []
+            self._unavailable = list(result.unavailable)
+        else:
+            due = self._due_hints()
+            result = await asyncio.to_thread(
+                poller.poll_paths, [path for path, _ in due]
+            )
+            if result.unavailable:
+                self._walk_due = True  # a folder went away: a walk says what
         self._track_settling(poller)
+        self._refresh_hints(poller, due)
         now = self._clock()
         self._forget(result.vanished)
         for path in result.vanished:
@@ -472,6 +541,77 @@ class ImportProcess:
             await self._kick()
         self._error = None  # a clean pass ends a transient failure
         self.poke()
+
+    # native notifications ---------------------------------------------------
+    def _on_native_path(self, path: str) -> None:
+        """The observer's thread: remember the path, wake the loop if it was
+        not already ticking."""
+        if self._closed:
+            return
+        now = self._clock()
+        with self._hint_lock:
+            flood = len(self._hints) >= MAX_HINTS and path not in self._hints
+            if flood:
+                self._hints.clear()
+                self._walk_due = True
+            first = not self._hints
+            if not flood:
+                entry = self._hints.get(path)
+                self._hints[path] = (entry[0] if entry else now, now)
+        if flood or first:
+            self._wake_up()
+
+    def _due_hints(self) -> List[Tuple[str, Tuple[float, float]]]:
+        now = self._clock()
+        with self._hint_lock:
+            return [
+                (path, entry)
+                for path, entry in self._hints.items()
+                if now - entry[1] >= self._hint_quiet_s
+            ]
+
+    def _refresh_hints(
+        self, poller: FolderPoller, due: Sequence[Tuple[str, Tuple[float, float]]]
+    ) -> None:
+        """A looked-at path is done unless it still needs another look. What
+        a walk or a folder left unsettled gets looks too, so one slow walk
+        finds a file and it need not wait for the next to be confirmed."""
+        now = self._clock()
+        unsettled = set(poller.unsettled_paths())
+        self._expired &= unsettled
+        with self._hint_lock:
+            for path, entry in due:
+                if path not in unsettled and self._hints.get(path) == entry:
+                    del self._hints[path]
+            for path in unsettled - self._expired:
+                held = self._hints.get(path)
+                if held is None:
+                    self._hints[path] = (now, now - self._hint_quiet_s)
+                elif now - held[0] >= self._hint_max_s:
+                    del self._hints[path]
+                    self._expired.add(path)
+
+    async def _sync_watcher(self) -> None:
+        if self._watcher is None:
+            make = self._make_watcher or NativeWatcher
+            self._watcher = make(self._on_native_path)
+        folders = [
+            spec
+            for spec in (self._signature or ())
+            if spec.filepath not in self._unavailable
+        ]
+        armed = await self._thread(self._watcher.sync, folders)
+        self._armed = len(armed)
+
+    async def _disarm(self) -> None:
+        """Paused, stopped, off or a scan running: nobody is looking, and the
+        catch-up on the way back compares disk with the database anyway."""
+        with self._hint_lock:
+            self._hints.clear()
+        self._expired.clear()
+        if self._armed:
+            self._armed = 0
+            await self._thread(self._watcher.close)
 
     async def _respell(self, found: Sequence[Tuple[str, str]]) -> None:
         """Case-only renames: the poller records the new spelling once, so a
@@ -534,8 +674,7 @@ class ImportProcess:
         folders = [
             FolderSpec(d.filepath, d.search_subfolders) for d in get_directories(config)
         ]
-        roots = self._roots(config)
-        signature = (tuple(folders), tuple(roots))
+        signature = tuple(folders)
         if (
             self._poller is not None
             and signature == self._signature
@@ -550,7 +689,6 @@ class ImportProcess:
         poller = FolderPoller(
             folders,
             probe,
-            roots,
             lambda p: Path(p).suffix.lower() in supported,
         )
         # The database holds POSIX spellings; the walk reports native ones.
@@ -562,13 +700,6 @@ class ImportProcess:
         self._resync = False
         # What the old poller had half-settled is found again by the new one.
         self._held.clear()
-
-    def _roots(self, config: Dict[str, Any]) -> List[str]:
-        if self._output_roots is not None:
-            return list(self._output_roots(config))
-        from backend.api.scan import _generated_output_roots
-
-        return _generated_output_roots(config)
 
     def _track_settling(self, poller: FolderPoller) -> None:
         now = self._clock()

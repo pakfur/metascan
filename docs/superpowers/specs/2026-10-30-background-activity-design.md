@@ -279,6 +279,13 @@ attempts, last_error)`. Migration v8 creates it and imports any leftover
 
 ### 9.1 Why polling
 
+(Amended 2026-10-31: tested at last on this machine. inotify on `/mnt/d` delivers
+nothing at all, even for writes from inside WSL, and exFAT does not bump a parent
+directory's mtime. Windows' own API hears every change in milliseconds. So native
+notifications now bring a look forward where they can be trusted, and the poller
+below stays the truth and the only path on a silent mount:
+`metascan/core/native_watcher.py`.)
+
 `metascan/core/watcher.py` is not connected to anything, and `watch_directories`
 does nothing. Native file notifications are not reliable for this library: it is on
 `/mnt/d`, a 9p mount in WSL2, where changes made from Windows are not expected to
@@ -313,8 +320,11 @@ thousand-file drop ingests steadily and never blocks the UI.
 
 - Each failed file is retried once on the next scan of it, then counted in
   `warnings_count`. Import does not fail for one bad file.
-- A path under a generated output root (`_generated_output_roots`) is left to its
-  owner, since ComfyClient ingests it with lineage. Hygiene is the safety net.
+- A path under a generated output root (`_generated_output_roots`) is watched like
+  any other. ComfyClient ingests its own output with lineage, and Import skips a path
+  that already has a row. (Amended 2026-10-31: the roots were skipped at first, which
+  hid every file under them from Import and hygiene alike when a root sits inside a
+  scan folder.)
 - A configured folder that is unavailable (`_probe_folder`) sets Import to `waiting`
   and nothing in it is touched.
 
