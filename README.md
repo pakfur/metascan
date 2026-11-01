@@ -48,7 +48,7 @@ Metascan now features a modern Vue.js web frontend with a FastAPI backend server
 - **CLIP-powered content search** (text-to-image) and FAISS similarity search with threshold slider
 - **Duplicate finder** with pHash grouping, thumbnail previews, and batch deletion
 - **Upscale queue** with Real-ESRGAN options, GFPGAN face enhancement, RIFE frame interpolation, pause/resume
-- **Similarity settings** dialog with CLIP model/device selection, embedding index build with live progress
+- **Similarity settings** tab in Configuration with CLIP model/device selection, embedding index build with live progress
 - **Configuration dialog** for directory management
 - **Always-on import**: files added to the scan folders appear in the grid on their own
 - **Right-click context menu** on thumbnails (Open, Find Similar, Upscale, Delete)

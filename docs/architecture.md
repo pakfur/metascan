@@ -97,9 +97,10 @@ frontend/src/
     thumbnails/ # ThumbnailGrid (virtual scroll), ThumbnailCard
     metadata/   # MetadataPanel, MetadataField
     viewer/     # MediaViewer, ImageViewer, VideoPlayer, SlideshowViewer
-    dialogs/    # ScanDialog, SimilaritySettings, DuplicateFinder,
+    dialogs/    # ScanDialog, DuplicateFinder,
                 #   UpscaleDialog, UpscaleQueue, ConfigDialog (+ ConfigModelsTab,
-                #   ConfigTrainingTab and the ModelStatusRow they share),
+                #   ConfigTrainingTab and the ModelStatusRow they share,
+                #   ConfigSimilarityTab),
                 #   NewFolderDialog, SmartFolderEditor
   types/        # TypeScript interfaces (Media, FilterData, WsMessage, folders, hardware)
 ```

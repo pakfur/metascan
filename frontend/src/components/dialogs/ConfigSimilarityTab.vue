@@ -108,163 +108,130 @@ async function rebuildAll() {
 </script>
 
 <template>
-  <div class="dialog-overlay" @click.self="emit('close')">
-    <div class="dialog-card">
-      <h3>Similarity Settings</h3>
+  <div v-if="loading" class="muted">Loading settings...</div>
 
-      <div v-if="loading" class="muted">Loading settings...</div>
-
-      <template v-else>
-        <!-- CLIP Model -->
-        <div class="form-group">
-          <label>CLIP Model</label>
-          <select v-model="clipModel">
-            <option v-for="opt in modelOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-        </div>
-
-        <!-- Device -->
-        <div class="form-group">
-          <label>Device</label>
-          <select v-model="device">
-            <option v-for="opt in deviceOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}
-            </option>
-          </select>
-        </div>
-
-        <!-- Search Results Count -->
-        <div class="form-group">
-          <label>Max Search Results</label>
-          <input type="number" v-model.number="searchResultsCount" min="10" max="500" step="10" />
-        </div>
-
-        <!-- Video Keyframes -->
-        <div class="form-group">
-          <label>Video Keyframes</label>
-          <input type="number" v-model.number="videoKeyframes" min="1" max="16" />
-        </div>
-
-        <!-- Embedding Index -->
-        <section v-if="settings" class="embed-section">
-          <h4>Embedding Index</h4>
-          <p class="stats">
-            Files:
-            <strong>{{ settings.embedding_stats.total_media }}</strong> total |
-            <strong>{{ settings.embedding_stats.hashed }}</strong> hashed |
-            <strong>{{ settings.embedding_stats.embedded }}</strong> embedded
-            <span v-if="missingCount > 0" class="missing">
-              ({{ missingCount }} missing)
-            </span>
-          </p>
-
-          <!-- Embedding progress -->
-          <template v-if="scanStore.embeddingPhase === 'building'">
-            <div class="progress-section">
-              <div class="progress-bar">
-                <div class="progress-fill" :style="{ width: embPct + '%' }" />
-              </div>
-              <span class="progress-text">
-                {{ scanStore.embeddingCurrent }} / {{ scanStore.embeddingTotal }} ({{ embPct }}%)
-              </span>
-            </div>
-            <p class="building">
-              {{ scanStore.embeddingLabel || 'Indexing...' }}
-              <span v-if="scanStore.embeddingTotal > 0">
-                — {{ scanStore.embeddingCurrent }} / {{ scanStore.embeddingTotal }}
-              </span>
-            </p>
-          </template>
-          <template v-else-if="scanStore.embeddingPhase === 'complete'">
-            <p class="success-msg">Index build complete.</p>
-          </template>
-          <template v-else-if="scanStore.embeddingPhase === 'error'">
-            <p class="error-msg">{{ scanStore.embeddingError }}</p>
-          </template>
-
-          <div class="embed-actions">
-            <button
-              class="btn-primary"
-              :disabled="missingCount === 0 || scanStore.embeddingPhase === 'building'"
-              @click="buildMissing"
-            >
-              Build Index ({{ missingCount }} missing)
-            </button>
-            <button
-              class="btn-secondary"
-              :disabled="scanStore.embeddingPhase === 'building'"
-              @click="rebuildAll"
-            >
-              Rebuild All
-            </button>
-            <button
-              v-if="scanStore.embeddingPhase === 'building'"
-              class="btn-danger"
-              @click="scanStore.cancelEmbedding()"
-            >
-              Cancel
-            </button>
-          </div>
-
-          <label class="setting-toggle">
-            <input
-              type="checkbox"
-              :checked="settings.auto_index_after_scan"
-              @change="toggleAutoIndex(($event.target as HTMLInputElement).checked)"
-            />
-            Auto-index after scan completes
-          </label>
-
-          <label class="setting-toggle">
-            <input
-              type="checkbox"
-              :checked="settings.compute_phash_during_scan"
-              @change="toggleComputePhash(($event.target as HTMLInputElement).checked)"
-            />
-            Compute pHash during scan (used for duplicate detection)
-          </label>
-        </section>
-
-        <!-- Actions -->
-        <div class="dialog-actions">
-          <button class="btn-primary" @click="save">Save</button>
-          <button class="btn-secondary" @click="emit('close')">Cancel</button>
-        </div>
-      </template>
+  <template v-else>
+    <!-- CLIP Model -->
+    <div class="form-group">
+      <label>CLIP Model</label>
+      <select v-model="clipModel">
+        <option v-for="opt in modelOptions" :key="opt.value" :value="opt.value">
+          {{ opt.label }}
+        </option>
+      </select>
     </div>
-  </div>
+
+    <!-- Device -->
+    <div class="form-group">
+      <label>Device</label>
+      <select v-model="device">
+        <option v-for="opt in deviceOptions" :key="opt.value" :value="opt.value">
+          {{ opt.label }}
+        </option>
+      </select>
+    </div>
+
+    <!-- Search Results Count -->
+    <div class="form-group">
+      <label>Max Search Results</label>
+      <input type="number" v-model.number="searchResultsCount" min="10" max="500" step="10" />
+    </div>
+
+    <!-- Video Keyframes -->
+    <div class="form-group">
+      <label>Video Keyframes</label>
+      <input type="number" v-model.number="videoKeyframes" min="1" max="16" />
+    </div>
+
+    <!-- Embedding Index -->
+    <section v-if="settings" class="embed-section">
+      <h4>Embedding Index</h4>
+      <p class="stats">
+        Files:
+        <strong>{{ settings.embedding_stats.total_media }}</strong> total |
+        <strong>{{ settings.embedding_stats.hashed }}</strong> hashed |
+        <strong>{{ settings.embedding_stats.embedded }}</strong> embedded
+        <span v-if="missingCount > 0" class="missing">
+          ({{ missingCount }} missing)
+        </span>
+      </p>
+
+      <!-- Embedding progress -->
+      <template v-if="scanStore.embeddingPhase === 'building'">
+        <div class="progress-section">
+          <div class="progress-bar">
+            <div class="progress-fill" :style="{ width: embPct + '%' }" />
+          </div>
+          <span class="progress-text">
+            {{ scanStore.embeddingCurrent }} / {{ scanStore.embeddingTotal }} ({{ embPct }}%)
+          </span>
+        </div>
+        <p class="building">
+          {{ scanStore.embeddingLabel || 'Indexing...' }}
+          <span v-if="scanStore.embeddingTotal > 0">
+            — {{ scanStore.embeddingCurrent }} / {{ scanStore.embeddingTotal }}
+          </span>
+        </p>
+      </template>
+      <template v-else-if="scanStore.embeddingPhase === 'complete'">
+        <p class="success-msg">Index build complete.</p>
+      </template>
+      <template v-else-if="scanStore.embeddingPhase === 'error'">
+        <p class="error-msg">{{ scanStore.embeddingError }}</p>
+      </template>
+
+      <div class="embed-actions">
+        <button
+          class="btn-primary"
+          :disabled="missingCount === 0 || scanStore.embeddingPhase === 'building'"
+          @click="buildMissing"
+        >
+          Build Index ({{ missingCount }} missing)
+        </button>
+        <button
+          class="btn-secondary"
+          :disabled="scanStore.embeddingPhase === 'building'"
+          @click="rebuildAll"
+        >
+          Rebuild All
+        </button>
+        <button
+          v-if="scanStore.embeddingPhase === 'building'"
+          class="btn-danger"
+          @click="scanStore.cancelEmbedding()"
+        >
+          Cancel
+        </button>
+      </div>
+
+      <label class="setting-toggle">
+        <input
+          type="checkbox"
+          :checked="settings.auto_index_after_scan"
+          @change="toggleAutoIndex(($event.target as HTMLInputElement).checked)"
+        />
+        Auto-index after scan completes
+      </label>
+
+      <label class="setting-toggle">
+        <input
+          type="checkbox"
+          :checked="settings.compute_phash_during_scan"
+          @change="toggleComputePhash(($event.target as HTMLInputElement).checked)"
+        />
+        Compute pHash during scan (used for duplicate detection)
+      </label>
+    </section>
+
+    <!-- Actions -->
+    <div class="dialog-actions">
+      <button class="btn-primary" @click="save">Save</button>
+      <button class="btn-secondary" @click="emit('close')">Cancel</button>
+    </div>
+  </template>
 </template>
 
 <style scoped>
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 900;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.dialog-card {
-  background: var(--surface-section);
-  border-radius: 12px;
-  padding: 28px 32px;
-  min-width: 440px;
-  max-width: 520px;
-  max-height: 85vh;
-  overflow-y: auto;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-}
-
-h3 {
-  margin: 0 0 20px;
-  font-size: 18px;
-  color: var(--text-color);
-}
-
 h4 {
   margin: 0 0 12px;
   font-size: 14px;

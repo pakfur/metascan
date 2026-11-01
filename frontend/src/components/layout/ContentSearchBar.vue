@@ -9,7 +9,6 @@ const emit = defineEmits<{
   refresh: []
   'upscale-queue': []
   'find-duplicates': []
-  'similarity-settings': []
   config: []
   t2i: []
 }>()
@@ -70,15 +69,6 @@ function openStoryboards() {
         rounded
         aria-label="Duplicates"
         @click="emit('find-duplicates')"
-      />
-      <Button
-        v-tooltip.bottom="'Similarity Settings'"
-        icon="pi pi-ellipsis-v"
-        severity="secondary"
-        text
-        rounded
-        aria-label="Similarity"
-        @click="emit('similarity-settings')"
       />
       <Button
         v-tooltip.bottom="'Configuration'"

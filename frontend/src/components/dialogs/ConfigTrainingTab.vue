@@ -327,7 +327,7 @@ function rateTitle(cell: WriterWindowStat | undefined): string {
         <span class="taste-hint">(only grades train it: ★ favorites and views never do)</span>
         <template v-if="tasteStatus?.missing_reason === 'vectors'">
           with a CLIP vector to train: build the similarity index
-          (Similarity Settings &rarr; Build Index) and let it finish.
+          (Similarity tab &rarr; Build Index) and let it finish.
         </template>
         <template v-else>to train.</template>
       </div>

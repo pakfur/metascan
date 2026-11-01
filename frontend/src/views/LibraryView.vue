@@ -20,7 +20,6 @@ import MetadataPanel from '../components/metadata/MetadataPanel.vue'
 import MediaViewer from '../components/viewer/MediaViewer.vue'
 import SlideshowViewer from '../components/viewer/SlideshowViewer.vue'
 import ScanDialog from '../components/dialogs/ScanDialog.vue'
-import SimilaritySettings from '../components/dialogs/SimilaritySettings.vue'
 import DuplicateFinder from '../components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from '../components/dialogs/UpscaleDialog.vue'
 import PromptPlayground from '../components/dialogs/PromptPlayground.vue'
@@ -58,7 +57,6 @@ const thumbnailGridRef = ref<InstanceType<typeof ThumbnailGrid> | null>(null)
 const viewerOpen = ref(false)
 const viewerIndex = ref(0)
 const slideshowOpen = ref(false)
-const simSettingsOpen = ref(false)
 const dupFinderOpen = ref(false)
 const upscaleDialogOpen = ref(false)
 const upscaleQueueOpen = ref(false)
@@ -199,7 +197,6 @@ watch(isMobile, () => {
             @refresh="mediaStore.loadAllMedia()"
             @upscale-queue="upscaleQueueOpen = true"
             @find-duplicates="dupFinderOpen = true"
-            @similarity-settings="simSettingsOpen = true"
             @config="configOpen = true"
             @t2i="t2iOpen = true"
           />
@@ -262,12 +259,6 @@ watch(isMobile, () => {
     <ScanDialog
       v-if="scanStore.phase !== 'idle'"
       @close="closeScan"
-    />
-
-    <!-- Similarity Settings dialog -->
-    <SimilaritySettings
-      v-if="simSettingsOpen"
-      @close="simSettingsOpen = false"
     />
 
     <!-- Duplicate Finder dialog -->

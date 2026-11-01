@@ -75,7 +75,7 @@ class _Index:
         meta_path = index_dir / "index_meta.json"
         if not meta_path.exists():
             raise TasteWorkerError(
-                "Build the similarity index first (Similarity Settings > Build Index)"
+                "Build the similarity index first (Configuration > Similarity > Build Index)"
             )
         meta = json.loads(meta_path.read_text())
         self.model_key = str(meta.get("model_key") or "")
