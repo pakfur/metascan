@@ -2976,8 +2976,6 @@ class DatabaseManager:
         are updated by hand (no ON UPDATE clause) and checked at commit, so
         any failure rolls the whole batch back. Tombstones are history and
         are untouched; ``judgment_events`` is re-keyed."""
-        from metascan.utils.path_utils import to_native_path
-
         cleaned: List[Tuple[str, str]] = []
         seen_src: Set[str] = set()
         seen_dst: Set[str] = set()
@@ -3025,7 +3023,7 @@ class DatabaseManager:
                     "json_valid(data) AND json_type(data, '$.file_path') "
                     "IS NOT NULL THEN json_set(data, '$.file_path', ?) "
                     "ELSE data END WHERE file_path = ?",
-                    [(n, to_native_path(n), o) for o, n in plan],
+                    [(n, n, o) for o, n in plan],
                 )
                 for table, column in MOVE_PATH_COLUMNS[1:]:
                     conn.executemany(

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from metascan.workers.writer_train_profile import PROFILE_NAME
+from metascan.utils.replace_file import replace_file
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def write_json_durable(path: Path, data: Any) -> None:
             json.dump(data, fh)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

@@ -145,7 +145,7 @@ async def _survey(ctx: HygieneContext, stored: Sequence[str]) -> Dict[str, Any]:
         scan._probe_folder,
         lambda p: Path(p).suffix.lower() in supported,
     )
-    known = {_key(p) for p in stored}
+    known = {_key(to_native_path(p)) for p in stored}
     unavailable = await asyncio.to_thread(
         scan._unavailable_folders,
         directories,

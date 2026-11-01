@@ -430,7 +430,7 @@ Run on 2026-11-01: Windows 11 Pro, RTX 5090, driver 610.88, Python 3.11.9, Node 
 | `llama-server` | Runs and lists the GPU once the runtime DLLs are in place |
 | ComfyUI | Connects to a local ComfyUI at startup |
 
-`pytest` on Windows: 5,162 passed, 189 failed, 21 errors, 9 skipped. The failures are not triaged. The main groups are tests that assume POSIX paths (`/mnt/d/...` is not absolute on Windows) and SQLite files still open when a temp folder is deleted (`WinError 32`). Ten were a guard against touching real data, and a test server was running alongside the suite, so those may be noise. CI runs Linux only, so this is the first Windows baseline.
+`pytest` on Windows: 5,350 passed, 16 skipped, none failed. On Linux, 5,361 passed, 5 skipped. Seven of the Windows skips test things Windows cannot do, such as deleting an open file. The first Windows run had 189 failures and 21 errors. Most were tests assuming stored paths are native, and three were real bugs, since fixed: training runs dying when the server read `progress.json` during a replace, hygiene treating every library file as new, and moves writing a native path into the stored `media.data` blob. CI still runs Linux only, so Windows can regress unnoticed.
 
 Not tested yet:
 
@@ -457,5 +457,6 @@ Each workaround above exists because of something below. The new installer shoul
 | `exiftool` missing shows up only as an error per video | `metascan/extractors/comfyui_video.py`; `install.sh` only warns | Check for it at install, including PATH |
 | A leftover WSL port block stops the server, and the error doesn't say why | `run_server.py` | Check the port first and explain it |
 | `requirements.txt` carries dev tools (`mypy`, `black`), and `requirements-dev.txt` conflicts with `huggingface-hub` on `click` | requirements files | Move them, and loosen the `click` pin |
-| `make` targets don't exist on Windows | `Makefile` | Provide a script |
+| A FAISS index built on WSL is keyed by `/mnt/d/...`, so on Windows `has_file` misses every entry and re-embedding a file adds a second row. Search still works. `windows-migration.md` copies that index across and says nothing re-embeds | `metascan/core/embedding_manager.py` (`add`, `has_file`), `faiss_renames.py`, `backend/api/similarity.py` | Key the index by the stored path, or rebuild it as part of the move |
+| `make` targets don't exist on Windows, and CI has no Windows job | `Makefile`, `.github/workflows/python-package.yml` | Provide a script, and add a Windows job |
 | Other docs repeat the old steps | `windows-migration.md` (`--vlm` with no id, `cu128`, which stops at torch 2.11, `run.bat`), `installation.md`, `writer-training.md`, `SYSTEM_REQUIREMENTS.md`, `install.sh` (Node 20) | Update them, or point them here |

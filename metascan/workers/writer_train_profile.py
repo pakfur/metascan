@@ -61,6 +61,7 @@ from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Sequence
+from metascan.utils.replace_file import replace_file
 
 logger = logging.getLogger("writer_train_worker")
 
@@ -124,7 +125,7 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

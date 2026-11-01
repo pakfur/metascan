@@ -133,6 +133,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from metascan.workers import writer_train_profile as wp
+from metascan.utils.replace_file import replace_file
 
 logger = logging.getLogger("writer_train_worker")
 
@@ -490,7 +491,7 @@ def write_json_atomic(path: Path, data: Any) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

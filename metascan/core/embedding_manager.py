@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from metascan.utils.heic import register_heif_opener
+from metascan.utils.replace_file import replace_file
 
 register_heif_opener()
 
@@ -884,18 +885,18 @@ class FaissIndexManager:
             # Write to temp files first, then atomically replace
             temp_index = self._index_path.with_suffix(".tmp")
             _faiss.write_index(self._index, str(temp_index))
-            os.replace(str(temp_index), str(self._index_path))
+            replace_file(temp_index, self._index_path)
 
             temp_mapping = self._mapping_path.with_suffix(".tmp")
             with open(temp_mapping, "w") as f:
                 json.dump(self._id_to_path, f)
-            os.replace(str(temp_mapping), str(self._mapping_path))
+            replace_file(temp_mapping, self._mapping_path)
 
             self._meta["file_count"] = len(self._id_to_path)
             temp_meta = self._meta_path.with_suffix(".tmp")
             with open(temp_meta, "w") as f:
                 json.dump(self._meta, f, indent=2)
-            os.replace(str(temp_meta), str(self._meta_path))
+            replace_file(temp_meta, self._meta_path)
 
             self._dirty = False
             logger.info(f"Saved FAISS index ({len(self._id_to_path)} vectors)")
