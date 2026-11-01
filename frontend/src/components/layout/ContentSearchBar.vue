@@ -7,7 +7,6 @@ import ActivityPill from '../background/ActivityPill.vue'
 
 const emit = defineEmits<{
   refresh: []
-  'upscale-queue': []
   'find-duplicates': []
   config: []
   t2i: []
@@ -51,15 +50,6 @@ function openStoryboards() {
         rounded
         aria-label="Refresh"
         @click="emit('refresh')"
-      />
-      <Button
-        v-tooltip.bottom="'Upscale Queue'"
-        icon="pi pi-file-arrow-up"
-        severity="secondary"
-        text
-        rounded
-        aria-label="Upscale Queue"
-        @click="emit('upscale-queue')"
       />
       <Button
         v-tooltip.bottom="'Find Duplicates (Ctrl+Shift+D)'"

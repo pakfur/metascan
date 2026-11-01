@@ -195,7 +195,6 @@ watch(isMobile, () => {
         <div class="center-stack">
           <ContentSearchBar
             @refresh="mediaStore.loadAllMedia()"
-            @upscale-queue="upscaleQueueOpen = true"
             @find-duplicates="dupFinderOpen = true"
             @config="configOpen = true"
             @t2i="t2iOpen = true"
