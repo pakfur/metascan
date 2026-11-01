@@ -44,6 +44,11 @@ useWebSocket('folders', (event, data) => {
   }
 })
 
+// An import of library data adds folders in bulk, with no per-folder events.
+useWebSocket('library', (event) => {
+  if (event === 'data_imported') void foldersStore.loadFolders()
+})
+
 // Category mutations from any tab (or a sticky category riding a grade)
 // refresh the list the media viewer's category picker reads.
 useWebSocket('categories', (event) => {

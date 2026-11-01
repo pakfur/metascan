@@ -44,6 +44,7 @@ from backend.api import (
     t2i,
     taste as taste_api,
     background as background_api,
+    library_transfer as library_transfer_api,
     websocket,
 )
 from backend.dependencies import (
@@ -75,6 +76,7 @@ from backend.services.background.taste import TasteProcess
 from backend.services.background.training import WriterTrainingProcess
 from backend.services.background.upscale import UpscaleProcess
 from backend.services.judgments_service import faiss_embedding_lookup
+from backend.services.library_transfer_service import clean_leftovers
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
 from backend.services.taste_service import TasteService
@@ -541,6 +543,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _install_lineage_prune_guard(get_db())
 
     await _apply_pending_taste_snapshot(get_db(), get_data_dir())
+    await asyncio.to_thread(clean_leftovers, get_data_dir())
 
     app_config = load_app_config()
     models_cfg = get_models_config(app_config)
@@ -1088,6 +1091,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(t2i.router)
     app.include_router(taste_api.router)
     app.include_router(background_api.router)
+    app.include_router(library_transfer_api.router)
     app.include_router(websocket.router)
 
     # Serve Vue frontend production build (npm run build -> frontend/dist/)

@@ -6,6 +6,7 @@ import ConfigSimilarityTab from './ConfigSimilarityTab.vue'
 import ConfigTrainingTab from './ConfigTrainingTab.vue'
 import ConfigI2VTab from './ConfigI2VTab.vue'
 import ConfigT2ITab from './ConfigT2ITab.vue'
+import ConfigTransferTab from './ConfigTransferTab.vue'
 import { useScanStore } from '../../stores/scan'
 import { useViewport } from '../../composables/useViewport'
 
@@ -18,7 +19,15 @@ interface DirEntry {
   search_subfolders: boolean
 }
 
-type TabKey = 'directories' | 'models' | 'similarity' | 'training' | 'i2v' | 't2i' | 'maintenance'
+type TabKey =
+  | 'directories'
+  | 'models'
+  | 'similarity'
+  | 'training'
+  | 'i2v'
+  | 't2i'
+  | 'transfer'
+  | 'maintenance'
 
 const activeTab = ref<TabKey>('directories')
 
@@ -128,6 +137,14 @@ async function saveDirectories() {
         <button
           v-if="!isMobile"
           class="tab"
+          :class="{ active: activeTab === 'transfer' }"
+          @click="activeTab = 'transfer'"
+        >
+          Import / Export
+        </button>
+        <button
+          v-if="!isMobile"
+          class="tab"
           :class="{ active: activeTab === 'maintenance' }"
           @click="activeTab = 'maintenance'"
         >
@@ -224,6 +241,13 @@ async function saveDirectories() {
 
       <div v-else-if="activeTab === 't2i'" class="tab-panel">
         <ConfigT2ITab />
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="emit('close')">Close</button>
+        </div>
+      </div>
+
+      <div v-else-if="activeTab === 'transfer'" class="tab-panel">
+        <ConfigTransferTab />
         <div class="dialog-actions">
           <button class="btn-secondary" @click="emit('close')">Close</button>
         </div>

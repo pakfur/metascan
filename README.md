@@ -154,6 +154,7 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[Tech Stack](docs/tech-stack.md)** — backend, frontend, AI/media processing, infrastructure, and dev tooling
 - **[First-Time Setup](docs/first_time_setup.md)** — step-by-step, per-platform install of Python, Node, FFmpeg, virtualenv, and all dependencies
 - **[Installation](docs/installation.md)** — prerequisites, end-user setup, contributor setup, environment variables
+- **[Moving a Library](docs/library-transfer.md)** — export your favorites, grades, T2I / I2V settings and training data, and import them on another PC
 - **[Configuration](docs/configuration.md)** — `config.json` reference, including the `similarity`, `ui`, `models`, `comfy`, `i2v`, and `t2i` sections
 - **[Image-to-Video Workflow Setup](docs/i2v-workflow-setup.md)** — step-by-step ComfyUI build and registration for the MiniMax H3 turbo and high-quality presets
 - **[Image-to-Video cadence templates](docs/i2v-templates.md)** — the JSON découpage-template format that fixes an i2v clip's shot structure

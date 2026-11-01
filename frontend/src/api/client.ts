@@ -72,6 +72,43 @@ export function del<T>(path: string, body?: unknown): Promise<T> {
   })
 }
 
+function bearerHeaders(): Record<string, string> {
+  const apiKey = localStorage.getItem('metascan_api_key')
+  return apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+}
+
+async function failure(res: Response): Promise<ApiError> {
+  const body = await res.json().catch(() => ({ detail: res.statusText }))
+  const detail = (body as { detail?: unknown }).detail
+  return new ApiError(res.status, detail, errorMessage(detail, `HTTP ${res.status}`))
+}
+
+/** Sends a file as the raw request body. */
+export async function uploadFile<T>(path: string, file: File): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', ...bearerHeaders() },
+    body: file,
+  })
+  if (!res.ok) throw await failure(res)
+  return res.json()
+}
+
+/** Fetches a file and hands it to the browser's save flow. */
+export async function downloadFile(path: string, fallbackName: string): Promise<string> {
+  const res = await fetch(`${API_BASE}${path}`, { headers: bearerHeaders() })
+  if (!res.ok) throw await failure(res)
+  const named = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') ?? '')
+  const name = named?.[1] ?? fallbackName
+  const url = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  URL.revokeObjectURL(url)
+  return name
+}
+
 export function thumbnailUrl(filePath: string): string {
   return `${API_BASE}/thumbnails/${encodeURIComponent(filePath)}`
 }
