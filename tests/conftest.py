@@ -10,6 +10,8 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("METASCAN_LOG_FILE", "0")
 
 
+import socket  # noqa: E402
+import sqlite3  # noqa: E402
 import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -23,6 +25,46 @@ from metascan.utils import app_paths  # noqa: E402
 _REAL_BASE = Path(app_paths.__file__).resolve().parent.parent.parent
 _GUARDED_NAMES = ("config.json",)
 _GUARDED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3")
+
+
+def _live_server_running() -> bool:
+    """Is a Metascan server listening? Its own writes are not a test's fault."""
+    port = int(os.environ.get("METASCAN_PORT", "8700"))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.2)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+_LIVE_SERVER = _live_server_running()
+
+
+def pytest_xdist_auto_num_workers(config):
+    """``-n auto``: 32 workers were no faster than 16, and started timing out."""
+    return min(16, os.cpu_count() or 1)
+
+
+def pytest_report_header(config):
+    if _LIVE_SERVER:
+        return (
+            "A Metascan server is running: the real-data guard checks config.json "
+            "only. Stop the server for the full check."
+        )
+    return None
+
+
+# Durability buys a test nothing: its database is deleted when it ends, and
+# fsync is most of the cost of writing one (43 -> 25 ms to create a database
+# on Windows). Tests that open their own connections get this too.
+_real_sqlite_connect = sqlite3.connect
+
+
+def _connect_without_fsync(*args, **kwargs):
+    conn = _real_sqlite_connect(*args, **kwargs)
+    conn.execute("PRAGMA synchronous = OFF")
+    return conn
+
+
+sqlite3.connect = _connect_without_fsync
 
 
 def _snapshot_real_state() -> dict:
@@ -53,7 +95,12 @@ def _snapshot_real_state() -> dict:
 
 
 def _changed(before: dict, after: dict) -> list:
-    return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    changed = sorted(
+        k for k in set(before) | set(after) if before.get(k) != after.get(k)
+    )
+    if _LIVE_SERVER:
+        return [k for k in changed if Path(k).name in _GUARDED_NAMES]
+    return changed
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -64,9 +111,11 @@ def _guard_real_data_dir():
     one also catches changes made outside any test body (fixtures, import-time
     code, subprocesses).
 
-    Caveat: a dev server (or any other process) running against the same
-    checkout legitimately writes data/metascan.db and logs/server.log while the
-    suite runs, which trips both checks. Stop it before running the tests.
+    Caveat: a dev server running against the same checkout legitimately writes
+    data/metascan.db and logs/ while the suite runs. With parallel workers one
+    such write would fail a test per worker, so while a server is listening both
+    checks cover config.json only (``_LIVE_SERVER``; the run's header says so).
+    Any other process writing those files still trips them.
     """
     before = _snapshot_real_state()
     yield
