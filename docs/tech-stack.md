@@ -21,9 +21,7 @@
 - **open_clip_torch** - CLIP embeddings for content search and similarity
 - **faiss-cpu** - Vector similarity index for fast nearest-neighbor search
 - **imagehash** - Perceptual hashing for duplicate detection
-- **Real-ESRGAN** - AI image/video upscaling
-- **GFPGAN** - Face enhancement
-- **RIFE** - Video frame interpolation
+- **ComfyUI** - Image and video generation and upscaling, through your own workflows
 - **Pillow** - Image processing and thumbnail generation
 - **pillow-heif** - HEIC/HEIF decoding
 - **ffmpeg-python** - Video processing and thumbnail extraction

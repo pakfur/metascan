@@ -112,11 +112,13 @@ async def test_the_batch_id_reaches_create_generation_job_positionally(client):
 
     ((args, kwargs),) = calls
     # (preset_id, params_json, panel_id, output_dir, beat_id, output_prefix,
-    #  i2v_source_path, output_name, t2i_batch_id) -- all positional.
+    #  i2v_source_path, output_name, t2i_batch_id, upscale_source_path) -- all
+    #  positional.
     assert kwargs == {}
-    assert len(args) == 9
+    assert len(args) == 10
     assert args[7] == "stem"
     assert args[8] == "b1"
+    assert args[9] is None
 
 
 async def test_a_batch_job_keeps_its_batch_id_through_to_done(started_client):
@@ -131,7 +133,7 @@ async def test_a_batch_job_keeps_its_batch_id_through_to_done(started_client):
 
 def test_the_signatures_only_grew_at_the_end_of_submit():
     submit = list(inspect.signature(ComfyClient.submit).parameters)
-    assert submit[-2:] == ["output_name", "t2i_batch_id"]
+    assert submit[-3:] == ["output_name", "t2i_batch_id", "upscale_source_path"]
     # submit_now is unchanged: nothing in the t2i flow uses it.
     assert list(inspect.signature(ComfyClient.submit_now).parameters) == [
         "self",

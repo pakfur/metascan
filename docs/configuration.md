@@ -77,7 +77,17 @@ Managed by the Models tab in the config dialog. Both fields are surfaced via the
 - **`writer_train_python`** — optional Python interpreter for the training worker (default: the server's own). Use it when the training packages live in a separate virtualenv.
 - **`writer_train_vram_cap_gb`** — optional VRAM-cap rehearsal for prompt-writer training (GB, at least 8; `0` or absent = off): the training worker limits itself to that much GPU memory so a 32 GB card behaves like a smaller one. The training window's Advanced setting overrides it per run. See [Training profiles](writer-training.md#training-profiles-vram-and-performance).
 
-Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `resr-x2|x4|x4-anime`, `gfpgan-v1.4`, `rife`, `nltk-punkt|punkt-tab|stopwords`, `qwen3vl-2b|4b|8b|30b-a3b`, `qwen38-27b`, `writer-train-base`, `llama-cpp-converter`. The same ids are keys in the `gates` map; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — feature_gates marks exactly one available based on the installed NLTK version. The VLM ids are also the valid keys for `vlm_repos` above.
+Model ids surfaced by `GET /api/models/status`: `clip-small|medium|large`, `nltk-punkt|punkt-tab|stopwords`, `qwen3vl-2b|4b|8b|30b-a3b`, `qwen38-27b`, `writer-train-base`, `llama-cpp-converter`. The same ids are keys in the `gates` map; `nltk-punkt` vs `nltk-punkt-tab` are mutually exclusive — feature_gates marks exactly one available based on the installed NLTK version. The VLM ids are also the valid keys for `vlm_repos` above.
+
+## `upscale`
+
+Read by `backend.config.get_upscale_config`, and edited in **Config → Upscale** and **Config → Directories**. See [Upscaling](upscaling.md).
+
+- **`original_root`** — the Original folder. Empty means `<data dir>/_original`. It must not overlap a scan folder or generated-output folder, and a change with originals present moves them, so set it from **Config → Directories**.
+- **`default_image_preset_id`**, **`default_video_preset_id`** — the workflow the Upscale window starts on. Default: the first listed.
+- **`max_count`** — most results in one run. Default `8`.
+- **`window`** — unfinished jobs one run keeps in the queue. Default `2`.
+- **`scales`**, **`default_scale`** — the Scale menu, offered when a workflow has `MS_SCALE`. Default `[2, 4]`, `2`.
 
 ## `comfy`
 
@@ -87,6 +97,7 @@ Read by `backend.config.get_comfy_config` and consumed by the FastAPI lifespan t
 - **`in_flight`** — max jobs `ComfyClient` holds inside ComfyUI at once; metascan queues the rest itself so a reroll can jump the line and cancellation stays responsive. Default `2`, floored at `1`.
 - **`unload_vlm_during_generation`** — reserved for the storyboard feature (Phase B/C), which will pause VLM tagging while ComfyUI is busy to free VRAM. Default `true`.
 - **`output_root`** — directory generated images are written to, relative to the repo root. Default `"data/storyboards"`.
+- **`transfer_timeout_s`** — limit in seconds for one upload to or download from ComfyUI (a whole video). Default `600`.
 - **`request_timeout_s`** — HTTP timeout (seconds) for calls to ComfyUI (`/prompt`, `/upload/image`, `/history`, `/view`). Default `30.0`.
 
 ## `i2v`

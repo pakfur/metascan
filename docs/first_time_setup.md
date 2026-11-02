@@ -51,7 +51,7 @@ You need five things on every platform:
 |---|---|
 | **Python 3.11** (with `pip` and `venv`) | Backend runtime |
 | **Node.js 20.19+ or 22.12+** (with `npm`) | Frontend build/dev server (Vite 8 needs one of these) |
-| **FFmpeg** (with `ffprobe`) | Video thumbnail generation, video upscaling |
+| **FFmpeg** (with `ffprobe`) | Video thumbnail generation and reading video properties |
 | **ExifTool** | Video metadata. Without it, every imported video logs an error |
 | **Git** | Cloning the repo |
 
@@ -270,20 +270,17 @@ pip install -r requirements-dev.txt
 
 `pip` then warns that `huggingface-hub` wants a newer `click` than the `click==8.2.2` pin. The app's model downloads and CLIP work anyway. On Windows, `make` does not exist: run `pytest`, `black --check`, `mypy` and `flake8` directly (`pip install flake8` first).
 
-## 6. Download AI models and NLTK data
+## 6. Download NLTK data
 
-The data for prompt tokenization and the upscaling models are not bundled — fetch them with the helper script:
+The data for prompt tokenization is not bundled — fetch it with the helper script:
 
 ```bash
 python setup_models.py
 ```
 
-**On Windows, use `python setup_models.py --skip-upscaling`.** A plain run reports success, but its RIFE step fails on Windows and leaves about 860 MB of leftovers in `data/models/` (`rife.zip`, `rife_binary`). Upscaling is due to be replaced by ComfyUI workflows, so there is no reason to download it.
-
 The script downloads:
 
 - **NLTK data** (`punkt`, `stopwords`) — ~5 MB, into NLTK's default folder (`%APPDATA%\nltk_data` on Windows). Only `stopwords` is used at run time.
-- **Real-ESRGAN, GFPGAN, RIFE** — ~915 MB total into `data/models/`, used by the upscale queue.
 
 **CLIP weights are not part of this script.** They download the first time Embedding runs, or from **Config → Models**, into the Hugging Face cache (`~/.cache/huggingface/`). A new `config.json` uses the small model (ViT-B-16, about 600 MB of VRAM). `medium` is ViT-L-14 and `large` is ViT-H-14; pick one in **Config → Models**. While it downloads, the panel stays at "Embedding 0 of N".
 
@@ -300,7 +297,7 @@ Tagging with a vision model, and T2I / I2V prompt writing, need a VLM and the `l
 | `qwen3vl-30b-a3b` / `qwen38-27b` | 22 GB | Workstation cards. `qwen38-27b` cannot write prompts |
 
 ```bash
-python setup_models.py --skip-nltk --skip-upscaling --vlm qwen3vl-8b
+python setup_models.py --skip-nltk --vlm qwen3vl-8b
 ```
 
 **Windows with an NVIDIA GPU: add the CUDA runtime.** That command, and the Models tab's Download button, fetch a `llama-server` that cannot see your GPU, because upstream ships the CUDA DLLs in a second archive. Fetch them into the same folder, keeping the release (`b10456`) and CUDA version (`12.4`) the same as in the `llama-server` URL the setup prints:
@@ -405,7 +402,6 @@ If ComfyUI is running on `127.0.0.1:8188`, Metascan connects to it without any s
 | `Failed to extract video metadata ... [WinError 2]` (Windows) | `exiftool` isn't on that server's PATH. Install it, then restart the server from a new terminal. |
 | `venv\Scripts\Activate.ps1 cannot be loaded` | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. |
 | `No module named 'faiss.swigfaiss_avx512'` in the log | Harmless. FAISS tries that build, then falls back. |
-| `No module named 'torchvision.transforms.functional_tensor'` importing `basicsr` or `realesrgan` directly | Expected. `metascan/core/media_upscaler.py` installs a shim before it imports them. |
 | `error: Microsoft Visual C++ 14.0 or greater is required` (Windows) | Install the Visual Studio Build Tools (see the end of step 1 → Windows). |
 | `pip install` hangs on `torch` | Network throttle or proxy issue. Try `pip install --no-cache-dir -r requirements.txt`, or pre-download the wheel from [download.pytorch.org](https://download.pytorch.org/whl/torch_stable.html). |
 | `pillow-heif` fails to build / segfaults at scan time | Some macOS ARM builds of `libheif` are broken. Metascan auto-disables HEIC if a decode probe fails — scanning still works, HEIC files are just skipped. |
@@ -435,7 +431,6 @@ Run on 2026-11-01: Windows 11 Pro, RTX 5090, driver 610.88, Python 3.11.9, Node 
 Not tested yet:
 
 - Loading a VLM and tagging (no weights were downloaded, so `--vlm` ran for the binary only), T2I and I2V generation through ComfyUI, writer training, `requirements-train.txt`.
-- Upscaling, skipped because it is being replaced. RIFE is known to be broken (below).
 - A truly clean machine. Python, Git, Node, FFmpeg and the driver were already there, and the winget commands for Node, Git, FFmpeg and the Install Manager were confirmed to resolve but not run. ExifTool and `py install 3.11` were run.
 - `Set-ExecutionPolicy`: the test machine was already `RemoteSigned`.
 - The whole-library move in [windows-migration.md](windows-migration.md).
@@ -449,7 +444,6 @@ Each workaround above exists because of something below. The new installer shoul
 | With `run_server.py`, CLIP search, the taste scorer and writer training fail. `reload=True` makes uvicorn pick `SelectorEventLoop`, which cannot spawn subprocesses. `run.bat` avoids it | `run_server.py`; callers in `inference_client.py`, `taste_runner.py`, `training_manager.py` | Turn reload off on Windows, or set the loop explicitly. Fail loudly: today the search request hangs after the error |
 | Plain install gives CPU torch and exits 0 | `requirements.txt` (`torch>=2.0.0`) | Detect the CUDA version, pick the index, and verify `torch.cuda.is_available()`. `install.sh` has the same gap |
 | `llama-server` can't see the GPU | `setup_models.py` (`resolve_vlm_targets`), `backend/api/models.py` (`_download_vlm`), `metascan/utils/llama_server.py` | Also fetch `cudart-llama-bin-win-cuda-<ver>-x64.zip`, then check `--list-devices`. Decide between the 12.4 and 13.3 builds for Blackwell |
-| `setup_models.py` says "All AI models downloaded successfully" after RIFE failed. The code looks for `rife-ncnn-vulkan` without `.exe`, and leaves `rife.zip` and `rife_binary` behind | `metascan/core/media_upscaler.py` (lines 194, 349, 972) | Moot once upscaling moves to ComfyUI: drop the download and `realesrgan`, `basicsr`, `gfpgan`. Otherwise fix the name |
 | CLIP isn't fetched at install, and the first Embedding looks stuck | `setup_models.py` | Download the chosen model, and show progress |
 | The default CLIP model is `small` even on a workstation-tier GPU | `config_example.json` | Use the hardware tier's recommendation |
 | The Models tab shows NLTK as missing after setup. Script and tab use different folders, and the tab offers `punkt` while NLTK 3.9.1 needs `punkt_tab` | `setup_models.py`, `backend/api/models.py` (`_nltk_data_dir`, `_NLTK_MODELS`) | Use one folder and one list. Only `stopwords` is read at run time |

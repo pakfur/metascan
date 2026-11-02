@@ -6,7 +6,7 @@
 
 - **Python 3.11** — 3.11.x only. Not 3.12, and not 3.13+ (see [why](first_time_setup.md#why-python-311)).
 - **Node.js 18+** (for the Vue frontend)
-- **FFMPEG** — required for video thumbnail generation and upscaling
+- **FFMPEG** — required for video thumbnail generation and reading video properties
   - macOS: `brew install ffmpeg`
   - Ubuntu/Debian: `sudo apt install ffmpeg`
   - Windows: Download from [FFmpeg.org](https://ffmpeg.org/download.html)
@@ -45,8 +45,6 @@
    ```
    This will download:
    - NLTK data packages for prompt tokenization (~5 MB)
-   - AI upscaling models: RealESRGAN, GFPGAN, RIFE (~915 MB total)
-   - Models can be downloaded later when first using upscaling features
 
 4. **Set up Vue frontend:**
    ```bash

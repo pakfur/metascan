@@ -82,14 +82,6 @@
  - Directories
    - Missing a "Select folder" option (though how would that work remotely?)
 
-#### Upscale processing dialog
-  - Percent is orders of magnitude off (100 -> 4000%)
-
-#### Upscaling 
-  - after upscaling, the database metadata is not updated.
-    - or it is not visible in the ui, even after a page refresh. should be updated in the ui via a /ws event
-
-
 ### Changes to existing features (Under consideration)
 - (v1+) Replace favorite with Ranking Tier (S, A, B, C, D) with UI and ranking choice. "S" == Favorite
 

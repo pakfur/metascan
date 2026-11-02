@@ -398,7 +398,9 @@ class TestGenerationJobsT2iColumn(unittest.TestCase):
 
     def test_the_new_parameter_is_last_so_existing_positional_calls_still_work(self):
         names = list(inspect.signature(self.db.create_generation_job).parameters)
-        self.assertEqual(names[-2:], ["output_name", "t2i_batch_id"])
+        self.assertEqual(
+            names[-3:], ["output_name", "t2i_batch_id", "upscale_source_path"]
+        )
         job_id = self.db.create_generation_job(
             self.preset_id, "{}", 3, "/out", 4, "pre_", "/lib/src.png", "stem"
         )

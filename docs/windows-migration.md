@@ -79,7 +79,7 @@ binaries, thumbnails that would be rebuilt anyway, and old database backups.
 
 ```powershell
 $wsl = "\\wsl.localhost\Ubuntu\home\jk\gws\metascan"
-robocopy "$wsl\data" C:\metascan\data /E /XD bin thumbnails rife-ncnn-vulkan-20221029-ubuntu /XF *.bak metascan.db-wal metascan.db-shm
+robocopy "$wsl\data" C:\metascan\data /E /XD bin thumbnails rife /XF *.bak metascan.db-wal metascan.db-shm
 Copy-Item "$wsl\config.json" C:\metascan\config.json
 ```
 
@@ -99,11 +99,11 @@ Don't add a `/mnt/d` value for `comfy.output_root`: that one is not converted.
 
 ## 6. Install the llama-server
 
-This fetches the Windows `llama-server`, along with the VLM model and the NLTK data. The
-upscaling models are skipped because you copied them. Name the model you use:
+This fetches the Windows `llama-server`, along with the VLM model and the NLTK data. Name
+the model you use:
 
 ```powershell
-venv\Scripts\python.exe setup_models.py --vlm qwen3vl-8b --skip-upscaling
+venv\Scripts\python.exe setup_models.py --vlm qwen3vl-8b
 ```
 
 Then add the CUDA runtime DLLs, or `llama-server` cannot see your GPU: see
@@ -138,10 +138,6 @@ Pressing play confirms the removal. Stop and check the folder in `config.json`.
 
 ## Known gaps on Windows
 
-- **RIFE frame interpolation won't work yet.** The code looks for `rife-ncnn-vulkan`
-  without `.exe` (`metascan/core/media_upscaler.py`), so it reports the binary as missing.
-- **Cancelling an upscale is a hard kill.** The worker can't clean up the way it does on
-  Linux, so it may leave a partial output file.
 - **Deleted files bypass the Recycle Bin on `D:`** if Windows has no Recycle Bin for that
   drive, so a delete from Metascan can be permanent. Try it on a throwaway file.
 - **`make` and the other Linux scripts don't apply.** Use `run.bat`, and run `pytest`,
