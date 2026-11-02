@@ -663,8 +663,9 @@ def test_deleting_the_item_trashes_its_original_and_candidates(env):
 
 def test_a_stale_candidate_goes_when_a_new_run_starts(env):
     path = env.media()
-    env.accept(env.candidate(path))
+    chosen = env.candidate(path)
     old = env.candidate(path)
+    env.accept(chosen)
     assert env.store.purge_stale_candidates(to_posix_path(path)) == 1
     assert env.db.get_upscale_candidate(old) is None
 
