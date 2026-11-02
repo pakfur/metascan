@@ -4,9 +4,10 @@ import asyncio
 import logging
 import mimetypes
 from pathlib import Path
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from backend.dependencies import get_db, get_thumbnail_cache
 from backend.services.media_service import MediaService
@@ -114,6 +115,22 @@ async def update_media(
     return summary
 
 
+def _revalidated(path: Path) -> Dict[str, str]:
+    """A file may be swapped under the same URL (an upscale, a revert), so the
+    browser asks each time; an ETag keeps that a cheap 304."""
+    st = path.stat()
+    return {
+        "Cache-Control": "no-cache",
+        "ETag": f'"{st.st_mtime_ns:x}-{st.st_size:x}"',
+    }
+
+
+def _not_modified(request: Request, headers: Dict[str, str]) -> Optional[Response]:
+    if request.headers.get("if-none-match") == headers["ETag"]:
+        return Response(status_code=304, headers=headers)
+    return None
+
+
 @router.get("/stream/{file_path:path}")
 async def stream_file(file_path: str, request: Request):
     """Serve a media file with HTTP Range support for streaming."""
@@ -123,6 +140,10 @@ async def stream_file(file_path: str, request: Request):
 
     file_size = path.stat().st_size
     content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    cache = _revalidated(path)
+    unchanged = _not_modified(request, cache)
+    if unchanged is not None:
+        return unchanged
 
     range_header = request.headers.get("range")
     if range_header:
@@ -153,27 +174,33 @@ async def stream_file(file_path: str, request: Request):
                 "Content-Range": f"bytes {start}-{end}/{file_size}",
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(content_length),
+                **cache,
             },
         )
 
     return FileResponse(
         path,
         media_type=content_type,
-        headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            **cache,
+        },
     )
 
 
 @router.get("/thumbnails/{file_path:path}")
 async def get_thumbnail(
     file_path: str,
+    request: Request,
     service: MediaService = Depends(_get_service),
 ):
     """Serve a cached thumbnail, generating it if needed."""
     thumbnail_path = await service.get_thumbnail_path(file_path)
     if not thumbnail_path or not thumbnail_path.exists():
         raise HTTPException(status_code=404, detail="Thumbnail not available")
-    return FileResponse(
-        thumbnail_path,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    cache = _revalidated(thumbnail_path)
+    unchanged = _not_modified(request, cache)
+    if unchanged is not None:
+        return unchanged
+    return FileResponse(thumbnail_path, media_type="image/jpeg", headers=cache)

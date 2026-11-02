@@ -1,4 +1,4 @@
-"""The T2I, I2V and Storyboard processes: batches behind the registry (spec 6.2, 6.3, 7).
+"""The T2I, I2V, Upscaling and Storyboard processes: batches behind the registry (spec 6.2, 6.3, 7).
 
 Pause is a gate, not a cancel. ``ComfyClient.set_source_paused`` keeps the
 source's queued jobs in the client's queue (order kept, other sources still
@@ -255,6 +255,45 @@ class I2vProcess(_GenerationProcess):
             return None
         ended, total, phase = self._runner.progress_counts()
         return ended, total, "writing prompts" if phase == "writing" else phase
+
+
+class UpscaleProcess(_GenerationProcess):
+    """ComfyUI upscale runs. A job rehydrated after a restart belongs to no
+    in-memory run, so the counts fall back on the source's jobs, and Stop
+    cancels the jobs before the gate opens: no gated job renders on Stop."""
+
+    id = "upscale"
+    label = "Upscaling"
+    order = 60
+    noun = "File"
+    unit = "files"
+
+    def _job_count(self) -> int:
+        try:
+            return int(self._comfy.source_job_count(self.id))
+        except Exception:
+            logger.debug("%s job count failed", self.id, exc_info=True)
+            return 0
+
+    def _batch_ids(self) -> List[str]:
+        return [str(r["batch_id"]) for r in self._runner.active_batches()]
+
+    def _counts(self) -> Optional[Tuple[int, int, str]]:
+        if not self._runner.active_batches():
+            return (0, 0, "rendering") if self._job_count() else None
+        return self._runner.progress_counts()  # type: ignore[no-any-return]
+
+    def _activity(self, ended: int, total: int, phase: str) -> str:
+        if not total:
+            return f"Rendering {self._job_count()} jobs"
+        return super()._activity(ended, total, phase)
+
+    async def stop(self) -> None:
+        try:
+            await self._comfy.cancel_source(self.id)
+        except Exception:
+            logger.warning("%s: cancelling its jobs failed", self.id, exc_info=True)
+        await super().stop()
 
 
 class StoryboardProcess(_GenerationProcess):

@@ -31,6 +31,7 @@ from backend.api import (
     scan,
     similarity,
     duplicates,
+    upscale,
     config,
     embeddings,
     models,
@@ -54,6 +55,8 @@ from backend.dependencies import (
     set_import_process,
     set_taste_process,
     set_training_process,
+    set_upscale_store,
+    get_embedding_process,
     get_training_process,
     set_registry,
     set_embedding_process,
@@ -64,18 +67,22 @@ from backend.services.background.generation import (
     I2vProcess,
     StoryboardProcess,
     T2iProcess,
+    UpscaleProcess,
 )
 from backend.services.background.hygiene import HygieneProcess
 from backend.services.background.idle import ActivityMiddleware, idle_tracker
 from backend.services.background.import_process import ImportProcess
+from backend.services.background.originals_move import OriginalsMoveProcess
 from backend.services.background.registry import ProcessRegistry
 from backend.services.background.tagging import TaggingProcess
 from backend.services.background.taste import TasteProcess
 from backend.services.background.training import WriterTrainingProcess
+from backend.services import upscale_folders
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.library_transfer_service import clean_leftovers
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
 from backend.services.taste_examples_service import TasteExamplesService
+from backend.services.upscale_service import UpscaleService
 from backend.services.taste_service import TasteService
 from backend.services.taste_snapshot import (
     apply_pending_taste_snapshot,
@@ -113,6 +120,8 @@ from metascan.core.comfy_client import ComfyClient
 from metascan.core.database_sqlite import MigrationError
 from metascan.core.storyboard_runner import StoryboardRunner
 from metascan.core.i2v_runner import I2vRunner
+from metascan.core.upscale_runner import UpscaleRunner
+from metascan.core.upscale_store import UpscaleStore
 from metascan.core.t2i_captions import CaptionStore
 from metascan.core.t2i_runner import T2iRunner
 from metascan.core.t2i_directions import DIRECTIONS_DIRNAME, SnippetCache
@@ -363,6 +372,8 @@ def _build_training_manager(
             reasons.append("storyboard")
         if similarity.is_indexing():
             reasons.append("index_build")
+        if upscale.upscale_active():
+            reasons.append("upscale_active")
         if scorecard_mod.scorecard_busy():
             reasons.append("scorecard")
         return reasons
@@ -540,6 +551,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _apply_pending_taste_snapshot(get_db(), get_data_dir())
     await asyncio.to_thread(clean_leftovers, get_data_dir())
 
+    # Before anything watches the library: a swap a crash cut short is finished
+    # or undone first, so Import never meets it. Files and database only.
+    upscale_scanner = Scanner(get_db(), thumbnail_cache=get_thumbnail_cache())
+    upscale_store = UpscaleStore(
+        get_db(),
+        lambda: upscale_folders.original_root(load_app_config()),
+        upscale_scanner.read_technical,
+        supported=Scanner.SUPPORTED_EXTENSIONS,
+    )
+    set_upscale_store(upscale_store)
+    await asyncio.to_thread(upscale_store.recover)
+
     app_config = load_app_config()
     models_cfg = get_models_config(app_config)
     _inject_huggingface_token(models_cfg["huggingface_token"])
@@ -620,6 +643,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     comfy_client.on_job_event(i2v_runner.handle_job_event)
     i2v.set_i2v_runner(i2v_runner)
 
+    upscale_runner = UpscaleRunner(
+        db=get_db(),
+        comfy=comfy_client,
+        staging_root=upscale_folders.staging_root,
+        technical=upscale_scanner.read_technical,
+        supported=Scanner.SUPPORTED_EXTENSIONS,
+        get_all_vlms=get_all_vlm_clients,
+        unload_vlm_during_generation=comfy_cfg["unload_vlm_during_generation"],
+        purge_stale=upscale_store.purge_stale_candidates,
+    )
+    upscale_runner.on_event(
+        lambda channel, event, data: ws_manager.broadcast_sync(channel, event, data)
+    )
+    comfy_client.on_job_event(upscale_runner.handle_job_event)
+    # ComfyClient started before anyone subscribed: what landed since is
+    # recorded now.
+    await asyncio.to_thread(upscale_runner.recover_finished)
+
     # The caption CSV and the wildcard lists live side by side. Both are
     # lazy: nothing is read until the first request, and both reload on
     # change, so a missing CSV only turns Random mode off.
@@ -651,6 +692,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # still writing prompts with it.
     i2v_runner.prompting_elsewhere = t2i_runner.is_prompting
     t2i_runner.prompting_elsewhere = i2v_runner.is_prompting
+    upscale_runner.prompting_elsewhere = t2i_runner.is_prompting
 
     # Writer-adapter scorecards: base vs adapter on fixed briefs, judged
     # blind; started from the training window or after a completed run.
@@ -750,6 +792,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # queue writes; the service retrains in the background and rescores
     # new images after every embedding run (the hook fires on a worker
     # thread and only posts onto this loop).
+    async def _kick_embedding_for_upscale() -> None:
+        process = get_embedding_process()
+        if process is not None:
+            await process.kick(True)
+
+    upscale_service = UpscaleService(
+        get_db(),
+        upscale_store,
+        get_thumbnail_cache(),
+        get_data_dir(),
+        ws_manager.broadcast_sync,
+        similarity.is_indexing,
+        similarity.after_media_move,
+        _kick_embedding_for_upscale,
+    )
+    upscale_service.attach_loop(asyncio.get_running_loop())
+
     taste_runner = TasteRunner(
         get_db(),
         index_dir=similarity.embedding_index_dir(),
@@ -772,9 +831,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         t2i_runner=t2i_runner,
         comfy_client=comfy_client,
     )
-    similarity.set_embedding_complete_hook(
-        _after_embedding_run(taste_service, reembedder)
-    )
+    after_embedding_run = _after_embedding_run(taste_service, reembedder)
+
+    def _embedding_run_finished() -> None:
+        after_embedding_run()
+        upscale_service.embedding_run_finished()
+
+    similarity.set_embedding_complete_hook(_embedding_run_finished)
     taste_service.start_retrain_loop()
     # Once at startup: tombstones still without a vector for the model.
     reembedder.notify()
@@ -815,6 +878,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     storyboard_process = StoryboardProcess(
         background_registry, storyboard_runner, comfy_client
     )
+    upscale_process = UpscaleProcess(background_registry, upscale_runner, comfy_client)
 
     def _poke_on_job_update(process: Any) -> Callable[[str, Dict[str, Any]], None]:
         def handler(event: str, payload: Dict[str, Any]) -> None:
@@ -823,7 +887,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         return handler
 
-    for process in (t2i_process, i2v_process, storyboard_process):
+    for process in (t2i_process, i2v_process, upscale_process, storyboard_process):
         background_registry.register(process)
         set_generation_process(process.id, process)
         # Batch and job events move the panel (progress, ends, jobs leaving
@@ -831,6 +895,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         comfy_client.on_job_event(_poke_on_job_update(process))
     t2i_runner.on_event(lambda channel, event, data: t2i_process.poke())
     i2v_runner.on_event(lambda channel, event, data: i2v_process.poke())
+    upscale_runner.on_event(lambda channel, event, data: upscale_process.poke())
 
     from backend.services import hindsight_briefs as _briefs_mod
 
@@ -854,7 +919,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         get_data_dir=scan._data_dir,
         import_process=lambda: import_process,
     )
+    originals_process = OriginalsMoveProcess(
+        background_registry, get_db(), get_data_dir(), upscale._save_original_root
+    )
+    upscale_service.originals_moving = originals_process.active
+    upscale.install(upscale_runner, upscale_service, originals_process)
     bg_processes: List[Any] = [
+        originals_process,
         taste_process,
         training_process,
         import_process,
@@ -865,6 +936,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     set_taste_process(taste_process)
     set_training_process(training_process)
     set_import_process(import_process)
+    originals_process.resume_at_startup()
 
     # The tag queue outlives the process: Tagging resumes what remains once
     # everything it waits on is wired (a persisted owner pause keeps it paused).
@@ -926,7 +998,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Auto index scheduler shutdown raised")
         # The embedding queue is the rescore trigger: stop it (and unhook)
         # before closing the taste service that consumes it.
-        for process in (t2i_process, i2v_process, storyboard_process):
+        for process in (t2i_process, i2v_process, upscale_process, storyboard_process):
             set_generation_process(process.id, None)
             await process.aclose()
         await tagging.aclose()  # cancels any VLM drain
@@ -980,6 +1052,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Storyboard runner shutdown raised")
         try:
             await i2v_runner.aclose()
+            await upscale_runner.aclose()
+            upscale.install(None, None, None)
+            set_upscale_store(None)
         except Exception:
             logger.exception("i2v runner close failed")
         try:
@@ -1066,6 +1141,7 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(prompt_api.router)
     app.include_router(chat_api.router)
     app.include_router(comfy_api.router)
+    app.include_router(upscale.router)
     app.include_router(storyboard_api.router)
     app.include_router(i2v.router)
     app.include_router(t2i.router)

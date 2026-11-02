@@ -232,6 +232,10 @@ class UpscaleStore:
             raise
         return journal_id
 
+    def abandon(self, journal_id: int) -> None:
+        """A prepared swap the caller will not commit."""
+        self._roll_back(self._journal(journal_id))
+
     # ---- the critical section ---------------------------------------------
     def commit(self, journal_id: int) -> str:
         """Under ``move_gate``: put the file in place and write the row, then

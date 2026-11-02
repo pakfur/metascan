@@ -623,6 +623,7 @@ CONSUMERS: List[Tuple[str, str]] = [
     ("POST", "/api/models/inference/start"),
     ("POST", "/api/models/rebuild-index"),
     ("POST", "/api/comfy/submit"),
+    ("POST", "/api/upscale/runs"),
 ]
 # Routes that must keep working while training (browsing and rating).
 NOT_LOCKED = [
@@ -646,6 +647,7 @@ def _consumer_modules() -> List[Any]:
         similarity,
         storyboard,
         t2i,
+        upscale,
         vlm,
         writers,
     )
@@ -660,6 +662,7 @@ def _consumer_modules() -> List[Any]:
         similarity,
         models,
         comfy,
+        upscale,
         media,
         judgments,
         writers,
@@ -744,7 +747,7 @@ async def test_the_lock_blocks_every_consumer_and_releases_after(db, tmp_path, d
             r = await client.request(method, path, json={})
             assert r.status_code == 422, (path, r.status_code)
             checked += 1
-        assert checked >= 14
+        assert checked >= 15
 
 
 async def test_clients_refuse_to_load_models_under_the_lock():
@@ -1056,10 +1059,10 @@ async def test_the_second_busy_check_refuses_and_releases(db, tmp_path, dataset)
     assert db.list_writer_adapters() == [] and db.list_training_runs() == []
 
 
-async def test_lifespan_busy_reasons_cover_storyboard_and_index(
+async def test_lifespan_busy_reasons_cover_storyboard_index_and_upscale(
     db, tmp_path, monkeypatch
 ):
-    from backend.api import similarity, storyboard
+    from backend.api import similarity, storyboard, upscale
     from backend.main import _build_training_manager
 
     m = _build_training_manager(
@@ -1078,7 +1081,8 @@ async def test_lifespan_busy_reasons_cover_storyboard_and_index(
 
     monkeypatch.setattr(storyboard, "_background_tasks", {_Pending()})
     monkeypatch.setattr(similarity, "is_indexing", lambda: True)
-    assert m._gpu_busy() == ["storyboard", "index_build"]
+    monkeypatch.setattr(upscale, "upscale_active", lambda: True)
+    assert m._gpu_busy() == ["storyboard", "index_build", "upscale_active"]
 
 
 class _FakeBriefs:

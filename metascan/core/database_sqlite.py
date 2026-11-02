@@ -2479,7 +2479,7 @@ class DatabaseManager:
                     file_size   INTEGER,
                     render_s    REAL,
                     audio_lost  INTEGER NOT NULL DEFAULT 0,
-                    job_id      INTEGER UNIQUE,
+                    job_id      INTEGER,
                     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
@@ -3726,8 +3726,8 @@ class DatabaseManager:
             conn.commit()
 
     def add_upscale_candidate(self, **fields: Any) -> int:
-        """One finished candidate; the job's id is UNIQUE, so recording the
-        same job twice (a restart's sweep) keeps the first row."""
+        """One finished candidate; ``file_path`` is UNIQUE, so recording the
+        same file twice (a restart's sweep) keeps the first row."""
         columns = list(fields)
         marks = ", ".join("?" * len(columns))
         with self.lock, self._get_connection() as conn:
