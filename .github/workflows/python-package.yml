@@ -51,7 +51,7 @@ jobs:
         mypy --check-untyped-defs metascan/
 
     - name: Test with pytest
-      run: pytest
+      run: pytest -n auto
 
   frontend:
     runs-on: ubuntu-latest

@@ -77,6 +77,14 @@ async def _until(predicate, timeout: float = 20.0, interval: float = 0.01) -> bo
 
 
 @pytest.fixture
+def fast_reconnect(monkeypatch):
+    """The real 1 / 3 / 10 s backoff is most of a reconnect test's run time."""
+    monkeypatch.setattr(
+        comfy_client_module, "_RECONNECT_BACKOFF_SECONDS", (0.05, 0.1, 0.2)
+    )
+
+
+@pytest.fixture
 async def client(fake_comfy, workspace):  # noqa: F811
     db = DatabaseManager(workspace / "db")
     c = ComfyClient(
@@ -232,7 +240,7 @@ async def test_fetch_history_returns_the_entry_for_a_prompt(
 
 
 @pytest.fixture
-async def started_client(fake_comfy, workspace):  # noqa: F811
+async def started_client(fake_comfy, workspace, fast_reconnect):  # noqa: F811
     db = DatabaseManager(workspace / "db")
     c = ComfyClient(
         base_url=fake_comfy.base_url,
@@ -424,7 +432,7 @@ async def test_submit_raises_for_an_unbindable_parameter_without_enqueuing(clien
 async def test_submit_enqueues_and_returns_immediately(
     started_client, fake_comfy
 ):  # noqa: F811
-    fake_comfy.execution_delay = 0.3
+    fake_comfy.execution_delay = 1.0
     pid = await started_client.register_preset("sdxl", "t2i", t2i_workflow())
 
     job_ids = [await started_client.submit(pid, params()) for _ in range(5)]
@@ -660,7 +668,7 @@ async def test_cancel_landing_mid_post_still_interrupts_comfyui(
 
 
 @pytest.fixture
-async def ingesting_client(fake_comfy, workspace):  # noqa: F811
+async def ingesting_client(fake_comfy, workspace, fast_reconnect):  # noqa: F811
     db = DatabaseManager(workspace / "db")
     c = ComfyClient(
         base_url=fake_comfy.base_url,

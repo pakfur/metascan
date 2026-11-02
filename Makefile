@@ -86,8 +86,8 @@ dev:  ## Run backend + frontend dev servers (use two terminals)
 
 # Testing targets
 .PHONY: test
-test: check-venv  ## Run all Python tests
-	$(PYTEST)
+test: check-venv  ## Run all Python tests, in parallel
+	$(PYTEST) -n auto
 
 .PHONY: test-prompt-tokenizer
 test-prompt-tokenizer: check-venv  ## Run prompt tokenizer tests

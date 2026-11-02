@@ -1040,6 +1040,15 @@ class TestBatchRun(I2vRunnerBase):
         # generate() hops threads (db reads), so give the loop real time.
         await asyncio.sleep(0.15)
 
+    async def _await_submits(self, n):
+        """Wait out a loaded machine for ``n`` submits, then long enough to see
+        one too many."""
+        for _ in range(1000):
+            if len(self.comfy.submits) >= n:
+                break
+            await asyncio.sleep(0.01)
+        await self._settle()
+
     async def _run_to_end(self, req, finish="done"):
         """Start, finish every job as it appears, wait for the terminal frame."""
         started = await self.runner.start_batch(req)
@@ -1122,13 +1131,13 @@ class TestBatchRun(I2vRunnerBase):
     def test_window_caps_unfinished_jobs(self):
         async def go():
             await self.runner.start_batch(self._req(count_per_batch=4, window=2))
-            await self._settle()
+            await self._await_submits(2)
             self.assertEqual(len(self.comfy.submits), 2)
             self._finish(101)
-            await self._settle()
+            await self._await_submits(3)
             self.assertEqual(len(self.comfy.submits), 3)
             self._finish(102, "failed")
-            await self._settle()
+            await self._await_submits(4)
             self.assertEqual(len(self.comfy.submits), 4)
             self._finish(103)
             self._finish(104)
@@ -1143,7 +1152,7 @@ class TestBatchRun(I2vRunnerBase):
             started = await self.runner.start_batch(
                 self._req(count_per_batch=2, batch_size=2, window=2)
             )
-            await self._settle()
+            await self._await_submits(2)
             self.assertEqual(len(self.comfy.submits), 2)
             self.assertTrue(await self.runner.cancel_batch(started.batch_id))
             self.assertFalse(await self.runner.cancel_batch(started.batch_id))

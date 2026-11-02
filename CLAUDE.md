@@ -17,6 +17,9 @@ cd frontend && npm run dev                          # Frontend: http://localhost
 # Quality checks (must pass before committing)
 make quality test     # flake8 + black --check + mypy + pytest
 
+# On Windows, tests without make (about 2 minutes; a plain `pytest` is serial, about 12)
+venv\Scripts\python -m pytest -n auto
+
 # Frontend only
 cd frontend && npm run build    # Type-check + production build
 ```
@@ -124,7 +127,7 @@ and loads when you work with a matching file, so read it before changing that ar
 - **Formatter:** `black` (v25.11.0 — must match in both requirements.txt and requirements-dev.txt)
 - **Linter:** `flake8` on `metascan/ backend/ tests/` — fatal errors (E9, F63, F7, F82) must be zero; style warnings are non-fatal (`--exit-zero`)
 - **Type checker:** `mypy` with `python_version = 3.11`, strict on `metascan/core/*`
-- **Tests:** `pytest` — all must pass. `tests/test_inference_client.py` spawns a fake NDJSON worker (no CLIP required) to exercise the live-inference subprocess wiring. `tests/test_folders_{db,api}.py` cover DB CRUD + REST handlers against an isolated temp DB using `fastapi.testclient.TestClient`. `tests/test_hardware.py` (42 tests) covers probes + tier classification + feature gates + the `detect_hardware`/`report_to_dict`/`select_torch_device` aggregator. `tests/test_models_hardware_api.py` patches `detect_hardware` against fake reports to exercise `/api/models/hardware` + the `gates` payload of `/api/models/status` via `TestClient`. `tests/test_embedding_device.py` stubs `_torch` and patches `detect_hardware` to verify `_resolve_device` honours preference + auto-picks CUDA/MPS/CPU correctly.
+- **Tests:** `pytest -n auto` — all must pass. Tests run side by side (`pytest-xdist`, capped at 16 workers in `tests/conftest.py`), so a test must not assume how fast anything runs: wait for a condition with a deadline, never a fixed sleep. Test SQLite connections skip fsync (`conftest.py`). A running Metascan server is detected and narrows the real-data guard to `config.json`. **Never construct `DatabaseManager` outside a test:** a fresh database's v2 migration wipes the real thumbnail cache unless `app_paths.get_base_path` is patched. `tests/test_inference_client.py` spawns a fake NDJSON worker (no CLIP required) to exercise the live-inference subprocess wiring. `tests/test_folders_{db,api}.py` cover DB CRUD + REST handlers against an isolated temp DB using `fastapi.testclient.TestClient`. `tests/test_hardware.py` (42 tests) covers probes + tier classification + feature gates + the `detect_hardware`/`report_to_dict`/`select_torch_device` aggregator. `tests/test_models_hardware_api.py` patches `detect_hardware` against fake reports to exercise `/api/models/hardware` + the `gates` payload of `/api/models/status` via `TestClient`. `tests/test_embedding_device.py` stubs `_torch` and patches `detect_hardware` to verify `_resolve_device` honours preference + auto-picks CUDA/MPS/CPU correctly.
 - **Python version:** 3.11.x only — not 3.12, not 3.13+. `setup.py` declares `python_requires=">=3.11,<3.12"`, CI builds 3.11, and `install.sh` refuses anything else. 3.13+ cannot work (pinned Pillow 10.2.0 has no wheel past cp312 and its sdist fails to build); 3.12 resolves but is untested, so it is not supported.
 - **Imports in core/:** Never import any UI/desktop framework (`PyQt6`, `qt_material`, `tkinter`, etc.)
 

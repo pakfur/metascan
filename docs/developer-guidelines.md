@@ -48,7 +48,7 @@ See [`CLAUDE.md`](../CLAUDE.md) at the repo root for the canonical, exhaustive r
 
 ```bash
 # Python tests
-pytest
+pytest -n auto
 pytest --cov=metascan
 pytest tests/test_prompt_tokenizer.py
 
