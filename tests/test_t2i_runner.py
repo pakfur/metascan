@@ -4595,6 +4595,11 @@ class TestWithTheRealComfyClient(RealClientCase):
         # The order the ingest and the accounting are built on.
         await self.start(self.manual(count_per_batch=3))
         await self.until_over()
+        # The batch ends on the last job_outputs: the done comes after it.
+        await self.until(
+            lambda: sum(s == "done" for _, _, s in self.announced) == 3,
+            "every job to be marked done",
+        )
         jobs = {job for _, job, _ in self.announced if job is not None}
         self.assertEqual(len(jobs), 3)
         for job in jobs:
@@ -4701,6 +4706,11 @@ class TestWithTheRealComfyClient(RealClientCase):
         self.assertEqual(row["prompt_used"], "A red kite over a gray sea.")
         self.assertIsNone(row["form_state"])  # nothing remembers the dialog
         self.assertIsNone(row["model"])
+        # The image lands before the job is marked done.
+        await self.until(
+            lambda: self.db.get_generation_job(second)["state"] == "done",
+            "the queued job to be marked done",
+        )
         states = [j["state"] for j in self.db.list_generation_jobs(limit=10)]
         self.assertEqual(states, ["failed", "done"])  # the running one was lost
         # The batch left with the old process: no counters, no terminal frame.
