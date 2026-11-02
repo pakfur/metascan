@@ -127,6 +127,11 @@ def _seed_everything(db, src="/l/a/old.png"):
             (src,),
         )
         conn.execute(
+            "INSERT INTO generation_jobs(preset_id, params, upscale_source_path) "
+            "VALUES (1,'{}',?)",
+            (src,),
+        )
+        conn.execute(
             "INSERT INTO storyboards(name,target_model,architecture,base_seed) "
             "VALUES ('s','m','a',1)"
         )

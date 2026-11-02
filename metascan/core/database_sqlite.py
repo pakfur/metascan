@@ -307,6 +307,7 @@ MOVE_PATH_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("i2v_videos", "file_path"),
     ("i2v_videos", "source_path"),
     ("generation_jobs", "i2v_source_path"),
+    ("generation_jobs", "upscale_source_path"),
     ("indices", "file_path"),
     ("judgment_events", "file_path"),
     ("media_categories", "file_path"),
@@ -1126,7 +1127,9 @@ class DatabaseManager:
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
                     name          TEXT NOT NULL UNIQUE,
                     kind          TEXT NOT NULL
-                                  CHECK(kind IN ('t2i','ref','ref2v')),
+                                  CHECK(kind IN ('t2i','ref','ref2v',
+                                                 'upscale_image',
+                                                 'upscale_video')),
                     workflow_json TEXT NOT NULL,
                     bindings      TEXT NOT NULL,
                     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1137,8 +1140,9 @@ class DatabaseManager:
                 """
             )
             # workflow_presets.kind originally only allowed ('t2i','ref').
-            # V4 (video generation) adds 'ref2v'. A dev DB created before
-            # this change still has the old CHECK baked into its DDL --
+            # V4 (video generation) adds 'ref2v', then upscaling adds its two
+            # kinds. A DB created before either still has the old CHECK baked
+            # into its DDL --
             # SQLite CHECK constraints can't be altered in place, so detect
             # the stale constraint from the live schema and rebuild the
             # table (create/copy/drop/rename), mirroring the
@@ -1147,11 +1151,10 @@ class DatabaseManager:
                 "SELECT sql FROM sqlite_master "
                 "WHERE type='table' AND name='workflow_presets'"
             ).fetchone()
-            if old_presets_ddl and "ref2v" not in (old_presets_ddl["sql"] or ""):
-                logger.info(
-                    "Migrating workflow_presets.kind CHECK to allow 'ref2v' "
-                    "(dev DB predating video generation)…"
-                )
+            if old_presets_ddl and "upscale_video" not in (
+                old_presets_ddl["sql"] or ""
+            ):
+                logger.info("Migrating workflow_presets.kind CHECK to the new kinds…")
                 # PRAGMA foreign_keys is a no-op while a transaction is
                 # open (SQLite requires it be toggled outside one) -- the
                 # summary-column backfill earlier in this method runs an
@@ -1163,26 +1166,49 @@ class DatabaseManager:
                 # workflow_presets.
                 conn.commit()
                 conn.execute("PRAGMA foreign_keys = OFF")
+                # A rebuild killed before its commit leaves this table behind.
+                conn.execute("DROP TABLE IF EXISTS workflow_presets_kind_migration")
                 conn.execute(
                     """
                     CREATE TABLE workflow_presets_kind_migration (
                         id            INTEGER PRIMARY KEY AUTOINCREMENT,
                         name          TEXT NOT NULL UNIQUE,
                         kind          TEXT NOT NULL
-                                      CHECK(kind IN ('t2i','ref','ref2v')),
+                                      CHECK(kind IN ('t2i','ref','ref2v',
+                                                 'upscale_image',
+                                                 'upscale_video')),
                         workflow_json TEXT NOT NULL,
                         bindings      TEXT NOT NULL,
                         created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                        updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                        video_target  TEXT,
+                        video_mode    TEXT
                     )
                     """
                 )
+                # A DB from before the dialect tag has no such columns yet.
+                present = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(workflow_presets)")
+                }
+                copied = ", ".join(
+                    c
+                    for c in (
+                        "id",
+                        "name",
+                        "kind",
+                        "workflow_json",
+                        "bindings",
+                        "created_at",
+                        "updated_at",
+                        "video_target",
+                        "video_mode",
+                    )
+                    if c in present
+                )
                 conn.execute(
-                    "INSERT INTO workflow_presets_kind_migration "
-                    "(id, name, kind, workflow_json, bindings, created_at, "
-                    "updated_at) "
-                    "SELECT id, name, kind, workflow_json, bindings, "
-                    "created_at, updated_at FROM workflow_presets"
+                    f"INSERT INTO workflow_presets_kind_migration ({copied}) "
+                    f"SELECT {copied} FROM workflow_presets"
                 )
                 conn.execute("DROP TABLE workflow_presets")
                 conn.execute(
@@ -2399,6 +2425,14 @@ class DatabaseManager:
                 "t2i_batch_id",
                 "ALTER TABLE generation_jobs ADD COLUMN t2i_batch_id TEXT",
             )
+            # Upscale correlation: the media a job is for. Nullable TEXT, no
+            # REFERENCES -- the panel_id / i2v_source_path precedent.
+            _idempotent_add_column(
+                conn,
+                "generation_jobs",
+                "upscale_source_path",
+                "ALTER TABLE generation_jobs ADD COLUMN upscale_source_path TEXT",
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
                 "ON beat_images(beat_id)"
@@ -3560,13 +3594,14 @@ class DatabaseManager:
         i2v_source_path: Optional[str] = None,
         output_name: Optional[str] = None,
         t2i_batch_id: Optional[str] = None,
+        upscale_source_path: Optional[str] = None,
     ) -> int:
         with self.lock, self._get_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO generation_jobs (preset_id, params, panel_id, "
                 "output_dir, beat_id, output_prefix, i2v_source_path, "
-                "output_name, t2i_batch_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "output_name, t2i_batch_id, upscale_source_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     preset_id,
                     params,
@@ -3577,6 +3612,7 @@ class DatabaseManager:
                     i2v_source_path,
                     output_name,
                     t2i_batch_id,
+                    upscale_source_path,
                 ),
             )
             conn.commit()

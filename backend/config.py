@@ -152,6 +152,7 @@ def get_comfy_config(config: dict) -> dict:
             "unload_vlm_during_generation": True,
             "output_root": "data/storyboards",
             "request_timeout_s": 30.0,
+            "transfer_timeout_s": 600.0,     # one upload or download
         }
     """
     raw = config.get("comfy", {}) or {}
@@ -163,6 +164,7 @@ def get_comfy_config(config: dict) -> dict:
         ),
         "output_root": str(raw.get("output_root") or "data/storyboards"),
         "request_timeout_s": float(raw.get("request_timeout_s") or 30.0),
+        "transfer_timeout_s": float(raw.get("transfer_timeout_s") or 600.0),
     }
 
 

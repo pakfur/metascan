@@ -41,7 +41,10 @@ VIDEO_MODES: Tuple[str, ...] = ("t2va", "i2va", "fl2va", "ref2va")
 # Every title the MS_* contract knows, whether or not it carries required
 # widgets (MS_SEED / MS_SAVE / MS_LORA_STACK have none).
 KNOWN_TITLES: Tuple[str, ...] = tuple(
-    sorted(set(_REQUIRED_WIDGETS) | {"MS_SEED", "MS_SAVE", "MS_LORA_STACK"})
+    sorted(
+        set(_REQUIRED_WIDGETS)
+        | {"MS_SEED", "MS_SAVE", "MS_LORA_STACK", "MS_SOURCE_VIDEO"}
+    )
 )
 
 
@@ -209,6 +212,19 @@ def _generic_findings(
                     f"Node {found['MS_SEED']} titled MS_SEED exposes neither a "
                     "'seed' nor a 'noise_seed' widget.",
                     node_id=found["MS_SEED"],
+                )
+            )
+
+    if "MS_SOURCE_VIDEO" in found:
+        inputs = _inputs(workflow, found["MS_SOURCE_VIDEO"])
+        if "video" not in inputs and "file" not in inputs:
+            findings.append(
+                Finding(
+                    "error",
+                    "missing_widget",
+                    f"Node {found['MS_SOURCE_VIDEO']} titled MS_SOURCE_VIDEO exposes "
+                    "neither a 'video' nor a 'file' widget.",
+                    node_id=found["MS_SOURCE_VIDEO"],
                 )
             )
 
@@ -435,8 +451,46 @@ def _validate_t2i(workflow: Dict[str, Any], found: Dict[str, str]) -> List[Findi
     return findings
 
 
+def _audio_reaches(workflow: Dict[str, Any], node_id: str) -> bool:
+    """True when ``node_id`` or anything upstream has a linked ``audio`` input."""
+    seen = set()
+    todo = [node_id]
+    while todo:
+        current = todo.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for name, value in _inputs(workflow, current).items():
+            # In an API-format graph a link is [node_id, output_index].
+            if isinstance(value, list) and value and str(value[0]) in workflow:
+                if name == "audio":
+                    return True
+                todo.append(str(value[0]))
+    return False
+
+
+def _validate_upscale_video(
+    workflow: Dict[str, Any], found: Dict[str, str]
+) -> List[Finding]:
+    """Keeping the soundtrack is the workflow's job: a graph that never wires
+    audio into its output silently drops it from the library file."""
+    if "MS_SAVE" not in found or _audio_reaches(workflow, found["MS_SAVE"]):
+        return []
+    return [
+        Finding(
+            "warning",
+            "no_audio_output",
+            "Nothing wires audio into MS_SAVE: an upscaled video will have no "
+            "soundtrack. Connect the video loader's audio output to the save "
+            "node to keep it.",
+            node_id=found["MS_SAVE"],
+        )
+    ]
+
+
 _KIND_VALIDATORS: Dict[str, Validator] = {
     "t2i": _validate_t2i,
+    "upscale_video": _validate_upscale_video,
 }
 
 

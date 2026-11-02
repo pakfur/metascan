@@ -573,6 +573,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scanner=Scanner(get_db(), thumbnail_cache=get_thumbnail_cache()),
         in_flight=comfy_cfg["in_flight"],
         request_timeout_s=comfy_cfg["request_timeout_s"],
+        transfer_timeout_s=comfy_cfg["transfer_timeout_s"],
     )
     comfy_client.on_job_event(
         lambda event, payload: ws_manager.broadcast_sync("comfy", event, payload)

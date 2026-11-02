@@ -38,7 +38,10 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
     # Sampler step count. Only the i2v flow's High quality preset is ever
     # written; a step-distilled (turbo) workflow must NOT carry this title.
     "MS_STEPS": ("steps",),
+    "MS_SOURCE_IMAGE": ("image",),
+    "MS_SCALE": ("value",),
     # MS_SEED is special-cased: either "seed" or "noise_seed".
+    # MS_SOURCE_VIDEO likewise: "video" (VHS_LoadVideo) or "file" (LoadVideo).
     # MS_SAVE is an output node; metascan only needs its id.
 }
 
@@ -46,6 +49,9 @@ _REQUIRED_TITLES: Dict[str, Tuple[str, ...]] = {
     "t2i": ("MS_POSITIVE", "MS_SEED", "MS_LATENT", "MS_SAVE"),
     "ref": ("MS_POSITIVE", "MS_SEED", "MS_LATENT", "MS_SAVE", "MS_REF_IMAGE"),
     "ref2v": ("MS_POSITIVE", "MS_SEED", "MS_SAVE"),
+    # An upscale needs no prompt or seed: most upscale graphs have neither.
+    "upscale_image": ("MS_SOURCE_IMAGE", "MS_SAVE"),
+    "upscale_video": ("MS_SOURCE_VIDEO", "MS_SAVE"),
 }
 
 KINDS: Tuple[str, ...] = tuple(_REQUIRED_TITLES)
@@ -61,11 +67,14 @@ class BindingError(ValueError):
 
 @dataclass(frozen=True)
 class Bindings:
-    """Resolved node ids (and the seed widget name) for one preset."""
+    """Resolved node ids (and the seed widget name) for one preset.
 
-    positive: str
-    seed: str
-    seed_widget: str
+    ``positive`` and ``seed`` are None only for the upscale kinds.
+    """
+
+    positive: Optional[str]
+    seed: Optional[str]
+    seed_widget: Optional[str]
     latent: Optional[str]
     save: str
     negative: Optional[str] = None
@@ -81,6 +90,10 @@ class Bindings:
     duration: Optional[str] = None
     resolution: Optional[str] = None
     steps: Optional[str] = None
+    source_image: Optional[str] = None
+    source_video: Optional[str] = None
+    source_video_widget: Optional[str] = None
+    scale: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -143,6 +156,17 @@ def _seed_widget(workflow: Dict[str, Any], node_id: str) -> str:
     )
 
 
+def _source_video_widget(workflow: Dict[str, Any], node_id: str) -> str:
+    inputs = _inputs(workflow, node_id)
+    for candidate in ("video", "file"):
+        if candidate in inputs:
+            return candidate
+    raise BindingError(
+        f"Node {node_id} titled MS_SOURCE_VIDEO exposes neither a 'video' nor a "
+        "'file' widget."
+    )
+
+
 def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
     """Resolve MS_* titles in ``workflow`` into a Bindings record.
 
@@ -168,10 +192,12 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
     for title, node_id in found.items():
         _check_widgets(workflow, title, node_id)
 
+    seed = found.get("MS_SEED")
+    source_video = found.get("MS_SOURCE_VIDEO")
     return Bindings(
-        positive=found["MS_POSITIVE"],
-        seed=found["MS_SEED"],
-        seed_widget=_seed_widget(workflow, found["MS_SEED"]),
+        positive=found.get("MS_POSITIVE"),
+        seed=seed,
+        seed_widget=_seed_widget(workflow, seed) if seed else None,
         latent=found.get("MS_LATENT"),
         save=found["MS_SAVE"],
         negative=found.get("MS_NEGATIVE"),
@@ -187,6 +213,12 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
         duration=found.get("MS_DURATION"),
         resolution=found.get("MS_RESOLUTION"),
         steps=found.get("MS_STEPS"),
+        source_image=found.get("MS_SOURCE_IMAGE"),
+        source_video=source_video,
+        source_video_widget=(
+            _source_video_widget(workflow, source_video) if source_video else None
+        ),
+        scale=found.get("MS_SCALE"),
     )
 
 
@@ -196,10 +228,13 @@ class GenerationParams:
 
     ``ref_image`` is a ComfyUI-side filename as returned by
     ``POST /upload/image`` — not a local path.
+
+    ``positive`` / ``seed`` None and ``width`` / ``height`` 0 keep what the
+    graph has baked in (an upscale drives only what the user chose).
     """
 
-    positive: str
-    seed: int
+    positive: Optional[str]
+    seed: Optional[int]
     width: int
     height: int
     batch_size: int
@@ -214,6 +249,9 @@ class GenerationParams:
     audio_refs: List[str] = field(default_factory=list)
     duration_s: Optional[float] = None
     steps: Optional[int] = None
+    source_image: Optional[str] = None
+    source_video: Optional[str] = None
+    scale: Optional[float] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -254,9 +292,20 @@ def apply_overrides(
     def write(node_id: str, widget: str, value: Any) -> None:
         graph[node_id]["inputs"][widget] = value
 
-    write(bindings.positive, "text", params.positive)
-    write(bindings.seed, bindings.seed_widget, params.seed)
-    if bindings.latent is not None:
+    if params.positive is not None:
+        if bindings.positive is None:
+            raise BindingError(
+                "A prompt was supplied but this workflow has no MS_POSITIVE node."
+            )
+        write(bindings.positive, "text", params.positive)
+    if params.seed is not None:
+        if bindings.seed is None or bindings.seed_widget is None:
+            raise BindingError(
+                "A seed was supplied but this workflow has no MS_SEED node."
+            )
+        write(bindings.seed, bindings.seed_widget, params.seed)
+    sized = params.width > 0 and params.height > 0
+    if bindings.latent is not None and sized:
         write(bindings.latent, "width", params.width)
         write(bindings.latent, "height", params.height)
         write(bindings.latent, "batch_size", params.batch_size)
@@ -264,7 +313,7 @@ def apply_overrides(
     # video-side dimension carrier. A workflow with neither keeps its
     # baked-in resolution rather than raising -- the MS_DURATION
     # precedent, so existing presets need no retrofit.
-    if bindings.resolution is not None:
+    if bindings.resolution is not None and sized:
         write(bindings.resolution, "width", params.width)
         write(bindings.resolution, "height", params.height)
 
@@ -371,6 +420,29 @@ def apply_overrides(
                 "A step count was supplied but this workflow has no MS_STEPS node."
             )
         write(bindings.steps, "steps", int(params.steps))
+
+    if params.source_image is not None:
+        if bindings.source_image is None:
+            raise BindingError(
+                "A source image was supplied but this workflow has no "
+                "MS_SOURCE_IMAGE node."
+            )
+        write(bindings.source_image, "image", params.source_image)
+
+    if params.source_video is not None:
+        if bindings.source_video is None or bindings.source_video_widget is None:
+            raise BindingError(
+                "A source video was supplied but this workflow has no "
+                "MS_SOURCE_VIDEO node."
+            )
+        write(bindings.source_video, bindings.source_video_widget, params.source_video)
+
+    if params.scale is not None:
+        if bindings.scale is None:
+            raise BindingError(
+                "A scale was supplied but this workflow has no MS_SCALE node."
+            )
+        write(bindings.scale, "value", float(params.scale))
 
     return graph
 

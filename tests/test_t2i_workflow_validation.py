@@ -154,8 +154,8 @@ def test_the_ref_kind_gets_no_t2i_warnings():
     assert report.findings == []
 
 
-def test_only_t2i_has_a_kind_validator():
-    assert set(_KIND_VALIDATORS) == {"t2i"}
+def test_the_kinds_with_a_validator():
+    assert set(_KIND_VALIDATORS) == {"t2i", "upscale_video"}
 
 
 def test_a_registered_kind_validator_sees_the_workflow_and_the_title_map():
