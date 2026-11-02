@@ -267,10 +267,12 @@ export const DEFAULT_SHOT_CAP = 15
 // optional on the wire. `workflow_json` is deliberately omitted from the
 // list query (graphs are large); it's only present on the single-preset
 // row shape, which no current endpoint exposes.
+export type PresetKind = 't2i' | 'ref' | 'ref2v' | 'upscale_image' | 'upscale_video'
+
 export interface WorkflowPreset {
   id: number
   name: string
-  kind: 't2i' | 'ref' | 'ref2v'
+  kind: PresetKind
   bindings: string
   // Optional dialect association (metascan/core/workflow_validation.py):
   // drives target-specific validation at registration and the mismatch
@@ -304,4 +306,5 @@ export interface GenerationJob {
   output_dir: string | null
   i2v_source_path: string | null
   t2i_batch_id: string | null
+  upscale_source_path?: string | null
 }

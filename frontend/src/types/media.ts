@@ -51,6 +51,9 @@ export interface Media {
   // comes from media_judgments, not a media column, so it is read apart from
   // the covering-index summary query (database_sqlite._SUMMARY_GRADES_SQL).
   grade?: Grade | null
+  // Replaced by an upscale, with the original kept for compare and revert.
+  // Read apart from the covering-index summary query, like `grade`.
+  upscaled?: boolean
 
   // --- Photo summary fields (also returned by GET /api/media) ---
   camera_make?: string | null

@@ -1,3 +1,5 @@
+import { shallowReactive } from 'vue'
+
 const API_BASE = '/api'
 
 export class ApiError extends Error {
@@ -109,10 +111,24 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   return name
 }
 
+// An upscale or revert puts new bytes behind the same URL. The server's ETag
+// keeps a reload right, but an element already on screen never asks again, so
+// the URL itself changes for the rest of this session.
+const fileVersions = shallowReactive(new Map<string, number>())
+
+export function bumpFileVersion(filePath: string): void {
+  fileVersions.set(filePath, (fileVersions.get(filePath) ?? 0) + 1)
+}
+
+function versioned(url: string, filePath: string): string {
+  const version = fileVersions.get(filePath)
+  return version ? `${url}?v=${version}` : url
+}
+
 export function thumbnailUrl(filePath: string): string {
-  return `${API_BASE}/thumbnails/${encodeURIComponent(filePath)}`
+  return versioned(`${API_BASE}/thumbnails/${encodeURIComponent(filePath)}`, filePath)
 }
 
 export function streamUrl(filePath: string): string {
-  return `${API_BASE}/stream/${encodeURIComponent(filePath)}`
+  return versioned(`${API_BASE}/stream/${encodeURIComponent(filePath)}`, filePath)
 }

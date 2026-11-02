@@ -15,6 +15,7 @@ import { tagOne } from '../../api/vlm'
 
 const emit = defineEmits<{
   open: [media: Media]
+  upscale: [media: Media]
   playground: [media: Media]
   imageToVideo: [media: Media]
 }>()
@@ -262,6 +263,13 @@ function ctxFindSimilar() {
   }
 }
 
+function ctxUpscale() {
+  if (contextMenu.value) {
+    emit('upscale', contextMenu.value.media)
+    contextMenu.value = null
+  }
+}
+
 async function ctxRetagWithVlm() {
   if (!contextMenu.value) return
   const target = contextMenu.value.media
@@ -451,6 +459,7 @@ function onThumbDragEnd() {
           Open
         </button>
         <button @click="ctxFindSimilar">Find Similar</button>
+        <button @click="ctxUpscale">Upscale</button>
         <button
           v-if="modelsStore.isVlmReady"
           @click="ctxRetagWithVlm"

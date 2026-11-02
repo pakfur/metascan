@@ -1,5 +1,5 @@
 import { get, post, put, del } from './client'
-import type { GenerationJob, JobState, WorkflowPreset } from '../types/storyboard'
+import type { GenerationJob, JobState, PresetKind, WorkflowPreset } from '../types/storyboard'
 
 export function listPresets(): Promise<WorkflowPreset[]> {
   return get<WorkflowPreset[]>('/comfy/presets')
@@ -7,7 +7,7 @@ export function listPresets(): Promise<WorkflowPreset[]> {
 
 export function createPreset(body: {
   name: string
-  kind: 't2i' | 'ref' | 'ref2v'
+  kind: PresetKind
   workflow: Record<string, unknown>
   video_target?: string | null
   video_mode?: string | null
@@ -48,7 +48,7 @@ export interface ValidationResult {
 }
 
 export function validatePreset(body: {
-  kind: 't2i' | 'ref' | 'ref2v'
+  kind: PresetKind
   workflow: Record<string, unknown>
   video_target?: string | null
   video_mode?: string | null

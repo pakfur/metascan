@@ -11,6 +11,7 @@ import { useTrainingStore } from '../stores/training'
 import { useKeyboard } from '../composables/useKeyboard'
 import { useDebounceFn } from '@vueuse/core'
 import { useWebSocket } from '../composables/useWebSocket'
+import { bumpFileVersion } from '../api/client'
 import ThreePanel from '../components/layout/ThreePanel.vue'
 import ContentSearchBar from '../components/layout/ContentSearchBar.vue'
 import ViewMenubar from '../components/layout/ViewMenubar.vue'
@@ -20,6 +21,7 @@ import MetadataPanel from '../components/metadata/MetadataPanel.vue'
 import MediaViewer from '../components/viewer/MediaViewer.vue'
 import SlideshowViewer from '../components/viewer/SlideshowViewer.vue'
 import ScanDialog from '../components/dialogs/ScanDialog.vue'
+import UpscaleDialog from '../components/dialogs/UpscaleDialog.vue'
 import DuplicateFinder from '../components/dialogs/DuplicateFinder.vue'
 import PromptPlayground from '../components/dialogs/PromptPlayground.vue'
 import I2VDialog from '../components/dialogs/I2VDialog.vue'
@@ -130,6 +132,27 @@ function closeScan() {
   scanStore.resetEmbedding()
 }
 
+const upscaleMedia = ref<Media | null>(null)
+
+function openUpscale(m: Media) {
+  upscaleMedia.value = m
+}
+
+function handleUpscaleFromSelected() {
+  if (isMobile.value) return
+  if (mediaStore.selectedMedia) openUpscale(mediaStore.selectedMedia)
+}
+
+// Any tab's swap: the row's size and path changed, and elements on screen
+// must load the new bytes from a URL that has not changed.
+useWebSocket('upscale', (event, data) => {
+  if (event !== 'media_swapped') return
+  const paths = [String(data.path), String(data.new_path)]
+  new Set(paths).forEach(bumpFileVersion)
+  mediaStore.loadAllMedia()
+  if (paths[0] !== paths[1]) void foldersStore.loadFolders()
+})
+
 function openPlayground(m: Media) {
   playgroundMedia.value = m
 }
@@ -155,6 +178,7 @@ useKeyboard([
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
   { key: 'd', ctrl: true, shift: true, handler: () => { if (!isMobile.value) dupFinderOpen.value = true } },
+  { key: 'u', ctrl: true, handler: handleUpscaleFromSelected },
 ])
 
 // When the viewport crosses the mobile/desktop breakpoint, the viewer and
@@ -187,6 +211,7 @@ watch(isMobile, () => {
             <ThumbnailGrid
               ref="thumbnailGridRef"
               @open="openViewer"
+              @upscale="openUpscale"
               @playground="openPlayground"
               @image-to-video="openImageToVideo"
             />
@@ -245,6 +270,13 @@ watch(isMobile, () => {
     <DuplicateFinder
       v-if="dupFinderOpen"
       @close="dupFinderOpen = false"
+    />
+
+    <!-- Upscale dialog -->
+    <UpscaleDialog
+      v-if="upscaleMedia"
+      :media="upscaleMedia"
+      @close="upscaleMedia = null"
     />
 
     <!-- Prompt Playground dialog -->

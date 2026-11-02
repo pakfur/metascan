@@ -604,7 +604,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     set_comfy_client(comfy_client)
     # An owner pause from the last run holds its queued jobs from the first
     # pump pass; the process re-applies it through pause() once registered.
-    for _source in ("t2i", "i2v", "storyboard"):
+    for _source in ("t2i", "i2v", "upscale", "storyboard"):
         if background_registry.persisted_intent(_source) == "paused":
             comfy_client.set_source_paused(_source, True)
     # start() never blocks on an unreachable ComfyUI — the reader loop

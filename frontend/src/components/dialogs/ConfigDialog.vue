@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { fetchConfig, updateConfig } from '../../api/config'
+import { fetchUpscaleConfig, setOriginalFolder } from '../../api/upscale'
 import ConfigModelsTab from './ConfigModelsTab.vue'
 import ConfigSimilarityTab from './ConfigSimilarityTab.vue'
 import ConfigTrainingTab from './ConfigTrainingTab.vue'
 import ConfigI2VTab from './ConfigI2VTab.vue'
 import ConfigT2ITab from './ConfigT2ITab.vue'
+import ConfigUpscaleTab from './ConfigUpscaleTab.vue'
+import DirectoryPicker from './DirectoryPicker.vue'
 import ConfigTransferTab from './ConfigTransferTab.vue'
 import { useScanStore } from '../../stores/scan'
+import { useToast } from '../../composables/useToast'
 import { useViewport } from '../../composables/useViewport'
 
 const emit = defineEmits<{
@@ -26,6 +30,7 @@ type TabKey =
   | 'training'
   | 'i2v'
   | 't2i'
+  | 'upscale'
   | 'transfer'
   | 'maintenance'
 
@@ -51,6 +56,14 @@ const loading = ref(true)
 const comfyRaw = ref<Record<string, unknown>>({})
 const comfyUrl = ref('')
 
+// Empty means the default under the data folder, shown as the placeholder.
+const originalRoot = ref('')
+const savedOriginalRoot = ref('')
+const defaultOriginalRoot = ref('')
+const showOriginalPicker = ref(false)
+const saveError = ref<string | null>(null)
+const toast = useToast()
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -58,6 +71,10 @@ onMounted(async () => {
     directories.value = (config.directories as DirEntry[]) || []
     comfyRaw.value = (config.comfy as Record<string, unknown>) || {}
     comfyUrl.value = String(comfyRaw.value.base_url ?? 'http://127.0.0.1:8188')
+    const upscale = await fetchUpscaleConfig()
+    originalRoot.value = upscale.original_root
+    savedOriginalRoot.value = upscale.original_root
+    defaultOriginalRoot.value = upscale.resolved_original_root
   } finally {
     loading.value = false
   }
@@ -81,7 +98,20 @@ function toggleSubfolders(idx: number) {
 
 async function saveDirectories() {
   const comfy = { ...comfyRaw.value, base_url: comfyUrl.value.trim().replace(/\/+$/, '') }
-  await updateConfig({ directories: directories.value, comfy })
+  saveError.value = null
+  try {
+    await updateConfig({ directories: directories.value, comfy })
+    const root = originalRoot.value.trim()
+    if (root !== savedOriginalRoot.value) {
+      const { status } = await setOriginalFolder(root)
+      if (status === 'moving') {
+        toast.show('Moving the originals: follow it in the background panel.', 'info', 5000)
+      }
+    }
+  } catch (e) {
+    saveError.value = e instanceof Error ? e.message : String(e)
+    return
+  }
   emit('close')
 }
 </script>
@@ -133,6 +163,13 @@ async function saveDirectories() {
           @click="activeTab = 't2i'"
         >
           Text to Image
+        </button>
+        <button
+          class="tab"
+          :class="{ active: activeTab === 'upscale' }"
+          @click="activeTab = 'upscale'"
+        >
+          Upscale
         </button>
         <button
           v-if="!isMobile"
@@ -193,6 +230,23 @@ async function saveDirectories() {
 
           <p class="hint">Check the box to include subfolders when scanning.</p>
 
+          <h4>Original Folder</h4>
+          <div class="add-row">
+            <input
+              v-model="originalRoot"
+              type="text"
+              :placeholder="defaultOriginalRoot"
+              class="add-input"
+              spellcheck="false"
+            />
+            <button class="add-btn" @click="showOriginalPicker = true">Browse…</button>
+          </div>
+          <p class="hint">
+            Where the originals of upscaled files are kept, for compare and revert
+            only. It must not be inside a library folder. Leave it empty for the
+            default. Changing it moves the files already there.
+          </p>
+
           <h4>ComfyUI Server</h4>
           <div class="add-row">
             <input
@@ -207,6 +261,7 @@ async function saveDirectories() {
             after a backend restart.
           </p>
 
+          <p v-if="saveError" class="save-error">{{ saveError }}</p>
           <div class="dialog-actions">
             <button class="btn-primary" @click="saveDirectories">Save</button>
             <button class="btn-secondary" @click="emit('close')">Cancel</button>
@@ -246,6 +301,13 @@ async function saveDirectories() {
         </div>
       </div>
 
+      <div v-else-if="activeTab === 'upscale'" class="tab-panel">
+        <ConfigUpscaleTab />
+        <div class="dialog-actions">
+          <button class="btn-secondary" @click="emit('close')">Close</button>
+        </div>
+      </div>
+
       <div v-else-if="activeTab === 'transfer'" class="tab-panel">
         <ConfigTransferTab />
         <div class="dialog-actions">
@@ -268,10 +330,19 @@ async function saveDirectories() {
         </div>
       </div>
     </div>
+
+    <DirectoryPicker
+      v-if="showOriginalPicker"
+      title="Original folder"
+      :initial-path="originalRoot || defaultOriginalRoot"
+      @select="(path: string) => { originalRoot = path; showOriginalPicker = false }"
+      @close="showOriginalPicker = false"
+    />
   </div>
 </template>
 
 <style scoped>
+.save-error { margin: 0 0 10px; font-size: 13px; color: #c33; }
 .dialog-overlay {
   position: fixed;
   inset: 0;
