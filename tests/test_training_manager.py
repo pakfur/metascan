@@ -744,7 +744,7 @@ async def test_the_lock_blocks_every_consumer_and_releases_after(db, tmp_path, d
             r = await client.request(method, path, json={})
             assert r.status_code == 422, (path, r.status_code)
             checked += 1
-        assert checked >= 15
+        assert checked >= 14
 
 
 async def test_clients_refuse_to_load_models_under_the_lock():

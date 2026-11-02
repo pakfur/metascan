@@ -1,7 +1,8 @@
 """The library hygiene checks (spec 10) and the mass-removal guard.
 
-Five checks, run in this order by ``HygieneProcess``: ``MissingFiles``,
-``NewFiles``, ``ChangedFiles``, ``MissingDerived``, ``Finish``. The first
+Six checks, run in this order by ``HygieneProcess``: ``MissingFiles``,
+``NewFiles``, ``ChangedFiles``, ``MissingDerived``, ``UpscaleOrphans``,
+``Finish``. The first
 deletes rows automatically, so it is the careful one:
 
 * it reuses the scan route's ``_stale_paths_to_clean`` (a folder whose files
@@ -204,6 +205,8 @@ class MissingFiles:
                 return CheckResult()
             ctx.report("Checking for missing files", done * STAT_CHUNK, len(native))
             gone.extend(await asyncio.to_thread(self._gone, chunk))
+        busy = await asyncio.to_thread(db.upscale_busy_paths)
+        gone = [p for p in gone if to_posix_path(p) not in busy]
         if not gone or ctx.stopped():
             return CheckResult()
 
@@ -624,6 +627,8 @@ class ChangedFiles:
         """Thread. Re-read the file (the path is the same, so ratings stay)
         and make Embedding do it again."""
         try:
+            if path in ctx.db.upscale_busy_paths():
+                return False  # a swap is mid-way: file and row disagree for now
             media = _scanner(ctx).ingest_file(Path(to_native_path(path)))
         except Exception as exc:
             logger.warning(
@@ -828,5 +833,68 @@ class Finish:
             gate.release()
 
 
+class UpscaleOrphans:
+    """The upscale leftovers no delete cleaned up: a swap still open (its
+    commit or tidy-up failed), a record whose item left the library by a path
+    that does not know about upscaling (a storyboard purge, a scorecard, a
+    file removed by hand), and candidate folders with no rows."""
+
+    name = "upscale leftovers"
+
+    async def run(self, ctx: HygieneContext) -> CheckResult:
+        from backend.dependencies import get_upscale_store
+
+        store = get_upscale_store()
+        if store is None or ctx.stopped():
+            return CheckResult()
+        changed = await asyncio.to_thread(self._sweep, ctx, store)
+        return CheckResult(changed=changed)
+
+    def _sweep(self, ctx: HygieneContext, store: Any) -> int:
+        """Thread. Under the move gate: a swap's own critical section, and a
+        scan that is starting, wait for this (and this for them)."""
+        scan = _scan()
+        if not scan.move_gate.acquire(blocking=False):
+            return 0
+        try:
+            if _unfinished(scan, ctx.data_dir):
+                return 0
+            changed: int = store.recover()
+            for record in ctx.db.upscale_records_without_media():
+                if ctx.stopped():
+                    break
+                # Nothing is decided about a file that cannot be seen.
+                path = to_native_path(record["file_path"])
+                if scan._generated_file_state(path) != "gone":
+                    continue
+                if not _under_lost_folder(ctx, scan, path):
+                    store.release([record["file_path"]])
+                    changed += 1
+            return changed
+        finally:
+            scan.move_gate.release()
+
+
+def _under_lost_folder(ctx: HygieneContext, scan: Any, path: str) -> bool:
+    """``path`` lies under a scan folder or output root that cannot be seen."""
+    from backend.config import get_directories
+
+    folders = [d.filepath for d in get_directories(ctx.config)]
+    folders += scan._generated_output_roots(ctx.config)
+    key = scan._absolute_key(path)
+    return any(
+        key.startswith(scan._absolute_key(folder))
+        and scan._probe_folder(folder) in (scan.MISSING, scan.UNREADABLE)
+        for folder in folders
+    )
+
+
 def default_checks() -> List[HygieneCheck]:
-    return [MissingFiles(), NewFiles(), ChangedFiles(), MissingDerived(), Finish()]
+    return [
+        MissingFiles(),
+        NewFiles(),
+        ChangedFiles(),
+        MissingDerived(),
+        UpscaleOrphans(),
+        Finish(),
+    ]

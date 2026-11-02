@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Callable, Tuple, Any
+from typing import Dict, List, Optional, Callable, Tuple, Any
 from queue import Queue
 from threading import Thread
 import logging
@@ -13,6 +13,7 @@ from metascan.core.media import Media, LoRA, PhotoExposure as MediaPhotoExposure
 from metascan.core.database_sqlite import DatabaseManager
 from metascan.extractors import MetadataExtractorManager
 from metascan.core.phash_utils import compute_phash_for_file
+from metascan.core.upscale_store import original_for
 from metascan.cache.thumbnail import ThumbnailCache
 from metascan.utils.heic import register_heif_opener
 from metascan.core.photo_exif import (
@@ -225,6 +226,13 @@ class Scanner:
             if not width or not height:
                 return None
 
+            # An upscaled file's graph is the upscale workflow's: what it is
+            # a picture of, and how it was made, comes from the original.
+            original = self._kept_original(file_path, stat.st_size)
+            metadata_source = original or file_path
+            if original is not None and not self._is_video_path(file_path):
+                _, photo_exif, _ = self._read_image_info_and_exif(original)
+
             # Create media object
             media = Media(
                 file_path=file_path,
@@ -252,7 +260,7 @@ class Scanner:
                 else None
             )
 
-            metadata = self.extractor_manager.extract_metadata(file_path)
+            metadata = self.extractor_manager.extract_metadata(metadata_source)
             if metadata:
                 # Update media object with extracted metadata
                 media.metadata_source = metadata.get("source")
@@ -293,6 +301,13 @@ class Scanner:
                             )
                             media.loras.append(lora)
 
+            if original is not None and self._is_video_path(file_path):
+                # A workflow may change the frame rate: timing is this file's.
+                timing = self._video_timing(file_path)
+                media.frame_rate = timing["frame_rate"] or media.frame_rate
+                media.duration = timing["duration"] or media.duration
+                media.video_length = timing["video_length"] or media.video_length
+
             # Populate tag set from the prompt so it shows up in the Tags
             # filter. Previously PromptTokenizer ran only during index
             # generation and wrote to indices(index_type='prompt', ...),
@@ -311,6 +326,79 @@ class Scanner:
         except Exception as e:
             logger.error(f"Failed to process media file {file_path}: {e}")
             return None
+
+    @staticmethod
+    def _is_video_path(file_path: Path) -> bool:
+        return file_path.suffix.lower() in {".mp4", ".webm", ".mov"}
+
+    def _kept_original(self, file_path: Path, size: int) -> Optional[Path]:
+        """The original of an upscaled file (``upscale_store.original_for``).
+        A failure here must not cost the file: it reads as not upscaled."""
+        try:
+            return original_for(self.db_manager, file_path, size)
+        except Exception as exc:
+            logger.warning("upscale record lookup failed: %s", type(exc).__name__)
+            return None
+
+    @staticmethod
+    def _video_timing(file_path: Path) -> Dict[str, Any]:
+        """``frame_rate``, ``duration`` and ``video_length`` as ffprobe sees
+        them, each None when it cannot say."""
+        from metascan.utils.ffmpeg_utils import probe_with_timeout
+
+        out: Dict[str, Any] = {
+            "frame_rate": None,
+            "duration": None,
+            "video_length": None,
+        }
+        probe = probe_with_timeout(str(file_path))
+        if not probe:
+            return out
+        stream: Dict[str, Any] = next(
+            (s for s in probe.get("streams", []) if s.get("codec_type") == "video"),
+            {},
+        )
+        try:
+            top, _, bottom = str(stream.get("avg_frame_rate") or "").partition("/")
+            if top and bottom and float(bottom):
+                out["frame_rate"] = float(top) / float(bottom) or None
+        except ValueError:
+            pass
+        try:
+            raw = (probe.get("format") or {}).get("duration") or stream.get("duration")
+            out["duration"] = float(raw) if raw else None
+        except (TypeError, ValueError):
+            pass
+        try:
+            raw = stream.get("nb_frames")
+            out["video_length"] = int(raw) if raw else None
+        except (TypeError, ValueError):
+            pass
+        return out
+
+    def read_technical(self, file_path: Path) -> Dict[str, Any]:
+        """The facts of one file a media row holds, for a swap: size, time,
+        dimensions, format and (a video) timing. Raises ValueError when the
+        file cannot be read as media."""
+        stat = file_path.stat()
+        if self._is_video_path(file_path):
+            width, height, format_name = self._get_video_info(file_path)
+            timing = self._video_timing(file_path)
+        else:
+            (width, height, format_name), _, _ = self._read_image_info_and_exif(
+                file_path
+            )
+            timing = {"frame_rate": None, "duration": None, "video_length": None}
+        if not width or not height:
+            raise ValueError("not a readable image or video")
+        return {
+            "width": width,
+            "height": height,
+            "file_size": stat.st_size,
+            "format": format_name or "UNKNOWN",
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            **timing,
+        }
 
     def _get_media_info(
         self, file_path: Path

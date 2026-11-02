@@ -308,6 +308,8 @@ MOVE_PATH_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("i2v_videos", "source_path"),
     ("generation_jobs", "i2v_source_path"),
     ("generation_jobs", "upscale_source_path"),
+    ("upscale_records", "file_path"),
+    ("upscale_candidates", "source_path"),
     ("indices", "file_path"),
     ("judgment_events", "file_path"),
     ("media_categories", "file_path"),
@@ -342,6 +344,17 @@ MOVE_EXCLUDED_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("media", "file_size"),
     ("faiss_pending_renames", "old_path"),
     ("faiss_pending_renames", "new_path"),
+    # Upscale: a kept original and a candidate are not library files, and an
+    # open journal row is finished by its own paths (swaps and moves share
+    # ``move_gate``).
+    ("upscale_records", "original_path"),
+    ("upscale_candidates", "file_path"),
+    ("upscale_candidates", "file_size"),
+    ("upscale_journal", "media_path"),
+    ("upscale_journal", "target_path"),
+    ("upscale_journal", "original_path"),
+    ("upscale_journal", "tmp_path"),
+    ("upscale_journal", "aside_path"),
 )
 _MOVE_IN_CHUNK = 500
 
@@ -2433,6 +2446,66 @@ class DatabaseManager:
                 "upscale_source_path",
                 "ALTER TABLE generation_jobs ADD COLUMN upscale_source_path TEXT",
             )
+            # Upscaling. No FK to media: truncate_all_data must leave these
+            # alone, so an upscaled file still knows its original after a Full
+            # clean. See metascan/core/upscale_store.py.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS upscale_records (
+                    file_path     TEXT PRIMARY KEY,
+                    original_path TEXT NOT NULL,
+                    original_name TEXT NOT NULL,
+                    upscaled_size INTEGER NOT NULL,
+                    preset_id     INTEGER,
+                    upscaled_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS upscale_candidates (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_path TEXT NOT NULL,
+                    file_path   TEXT NOT NULL UNIQUE,
+                    kind        TEXT NOT NULL,
+                    preset_id   INTEGER,
+                    preset_name TEXT,
+                    seed        INTEGER,
+                    prompt      TEXT,
+                    scale       REAL,
+                    width       INTEGER,
+                    height      INTEGER,
+                    duration_s  REAL,
+                    file_size   INTEGER,
+                    render_s    REAL,
+                    audio_lost  INTEGER NOT NULL DEFAULT 0,
+                    job_id      INTEGER UNIQUE,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_upscale_candidates_source "
+                "ON upscale_candidates(source_path)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS upscale_journal (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    op            TEXT NOT NULL CHECK(op IN ('accept','revert')),
+                    media_path    TEXT NOT NULL,
+                    target_path   TEXT NOT NULL,
+                    original_path TEXT NOT NULL,
+                    candidate_id  INTEGER,
+                    tmp_path      TEXT NOT NULL,
+                    aside_path    TEXT NOT NULL,
+                    payload       TEXT NOT NULL,
+                    phase         TEXT NOT NULL
+                                  CHECK(phase IN ('prepared','placing','committed')),
+                    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_beat_images_beat "
                 "ON beat_images(beat_id)"
@@ -2977,15 +3050,15 @@ class DatabaseManager:
     def _lineage_paths(
         self, conn: sqlite3.Connection, paths: Sequence[str]
     ) -> Set[str]:
-        """Paths that already hold a T2I / I2V lineage row (both tables key
-        ``file_path`` UNIQUE with no FK, so a dangling row can sit on a path
-        that has no media row)."""
+        """Paths that already hold a T2I / I2V lineage row or an upscale record
+        (each keys ``file_path`` UNIQUE with no FK, so a dangling row can sit
+        on a path that has no media row)."""
         found: Set[str] = set()
         uniq = list(dict.fromkeys(paths))
         for i in range(0, len(uniq), _MOVE_IN_CHUNK):
             chunk = uniq[i : i + _MOVE_IN_CHUNK]
             marks = ",".join("?" * len(chunk))
-            for table in ("t2i_images", "i2v_videos"):
+            for table in ("t2i_images", "i2v_videos", "upscale_records"):
                 found.update(
                     r[0]
                     for r in conn.execute(
@@ -3027,50 +3100,60 @@ class DatabaseManager:
             # commit's foreign-key check and rolling the whole batch back.
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                occupied = self._existing_media_paths(
-                    conn, [p for pair in cleaned for p in pair]
-                )
-                lineage = self._lineage_paths(conn, [new for _, new in cleaned])
-                todo = [
-                    (o, n) for o, n in cleaned if o in occupied and n not in lineage
-                ]
-                plan: List[Tuple[str, str]] = []
-                progressed = True
-                while todo and progressed:
-                    progressed = False
-                    rest = []
-                    for o, n in todo:
-                        if n in occupied:
-                            rest.append((o, n))
-                            continue
-                        occupied.discard(o)
-                        occupied.add(n)
-                        plan.append((o, n))
-                        progressed = True
-                    todo = rest
+                plan = self._move_rows(conn, cleaned)
                 if not plan:
                     conn.rollback()
                     return []
-                conn.execute("PRAGMA defer_foreign_keys = ON")
-                conn.executemany(
-                    "UPDATE media SET file_path = ?, data = CASE WHEN "
-                    "json_valid(data) AND json_type(data, '$.file_path') "
-                    "IS NOT NULL THEN json_set(data, '$.file_path', ?) "
-                    "ELSE data END WHERE file_path = ?",
-                    [(n, n, o) for o, n in plan],
-                )
-                for table, column in MOVE_PATH_COLUMNS[1:]:
-                    conn.executemany(
-                        f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
-                        [(n, o) for o, n in plan],
-                    )
-                self._queue_faiss_renames(conn, plan)
                 conn.commit()
             except Exception as e:
                 conn.rollback()
                 logger.error(f"Move of {len(cleaned)} media rows failed: {e}")
                 raise
             return plan
+
+    def _move_rows(
+        self, conn: sqlite3.Connection, cleaned: Sequence[Tuple[str, str]]
+    ) -> List[Tuple[str, str]]:
+        """Inside a write transaction the caller holds: plan ``cleaned`` (see
+        ``move_media_batch_applied`` for what is skipped), apply it to every
+        table in ``MOVE_PATH_COLUMNS`` and queue the FAISS renames. Returns
+        the pairs applied."""
+        occupied = self._existing_media_paths(
+            conn, [p for pair in cleaned for p in pair]
+        )
+        lineage = self._lineage_paths(conn, [new for _, new in cleaned])
+        todo = [(o, n) for o, n in cleaned if o in occupied and n not in lineage]
+        plan: List[Tuple[str, str]] = []
+        progressed = True
+        while todo and progressed:
+            progressed = False
+            rest = []
+            for o, n in todo:
+                if n in occupied:
+                    rest.append((o, n))
+                    continue
+                occupied.discard(o)
+                occupied.add(n)
+                plan.append((o, n))
+                progressed = True
+            todo = rest
+        if not plan:
+            return []
+        conn.execute("PRAGMA defer_foreign_keys = ON")
+        conn.executemany(
+            "UPDATE media SET file_path = ?, data = CASE WHEN "
+            "json_valid(data) AND json_type(data, '$.file_path') "
+            "IS NOT NULL THEN json_set(data, '$.file_path', ?) "
+            "ELSE data END WHERE file_path = ?",
+            [(n, n, o) for o, n in plan],
+        )
+        for table, column in MOVE_PATH_COLUMNS[1:]:
+            conn.executemany(
+                f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                [(n, o) for o, n in plan],
+            )
+        self._queue_faiss_renames(conn, plan)
+        return plan
 
     @staticmethod
     def _queue_faiss_renames(
@@ -3580,6 +3663,282 @@ class DatabaseManager:
                 (preset_id,),
             ).fetchone()
             return int(row["n"]) if row else 0
+
+    # ---- Upscaling ------------------------------------------------------
+    #
+    # Paths are stored POSIX. The file work and its ordering live in
+    # metascan/core/upscale_store.py.
+
+    _UPSCALE_STAT_COLUMNS: ClassVar[Tuple[str, ...]] = (
+        "width",
+        "height",
+        "file_size",
+        "frame_rate",
+        "duration",
+        "modified_at",
+    )
+    _UPSCALE_STAT_BLOB_KEYS: ClassVar[Tuple[str, ...]] = (
+        "width",
+        "height",
+        "file_size",
+        "format",
+        "modified_at",
+        "frame_rate",
+        "duration",
+        "video_length",
+    )
+
+    def upscale_record(self, file_path: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM upscale_records WHERE file_path = ?", (file_path,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_upscale_records(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM upscale_records").fetchall()
+        return [dict(r) for r in rows]
+
+    def repoint_upscale_original(self, file_path: str, original_path: str) -> None:
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "UPDATE upscale_records SET original_path = ? WHERE file_path = ?",
+                (original_path, file_path),
+            )
+            conn.commit()
+
+    def upscale_records_without_media(self) -> List[Dict[str, Any]]:
+        """Records whose media row is gone (a storyboard purge, a delete that
+        does not pass ``release_upscale``, a file removed by hand)."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT r.* FROM upscale_records r LEFT JOIN media m "
+                "ON m.file_path = r.file_path WHERE m.file_path IS NULL"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_upscale_record(self, file_path: str) -> None:
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM upscale_records WHERE file_path = ?", (file_path,)
+            )
+            conn.commit()
+
+    def add_upscale_candidate(self, **fields: Any) -> int:
+        """One finished candidate; the job's id is UNIQUE, so recording the
+        same job twice (a restart's sweep) keeps the first row."""
+        columns = list(fields)
+        marks = ", ".join("?" * len(columns))
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO upscale_candidates ({', '.join(columns)}) "
+                f"VALUES ({marks})",
+                [fields[c] for c in columns],
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def get_upscale_candidate(self, candidate_id: int) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM upscale_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_upscale_candidates(self, source_path: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM upscale_candidates WHERE source_path = ? "
+                "ORDER BY id DESC",
+                (source_path,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_all_upscale_candidate_files(self) -> List[str]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT file_path FROM upscale_candidates").fetchall()
+        return [str(r[0]) for r in rows]
+
+    def delete_upscale_candidate(self, candidate_id: int) -> None:
+        with self.lock, self._get_connection() as conn:
+            conn.execute("DELETE FROM upscale_candidates WHERE id = ?", (candidate_id,))
+            conn.commit()
+
+    def upscale_jobs_without_candidate(self) -> List[Dict[str, Any]]:
+        """Finished upscale jobs no candidate came from: their outputs landed
+        while no runner was listening (a restart)."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT j.* FROM generation_jobs j "
+                "LEFT JOIN upscale_candidates c ON c.job_id = j.id "
+                "WHERE j.upscale_source_path IS NOT NULL AND j.state = 'done' "
+                "AND c.id IS NULL"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def open_upscale_journal(
+        self,
+        op: str,
+        media_path: str,
+        target_path: str,
+        original_path: str,
+        candidate_id: Optional[int],
+        tmp_path: str,
+        aside_path: str,
+        payload: str,
+    ) -> int:
+        with self.lock, self._get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO upscale_journal (op, media_path, target_path, "
+                "original_path, candidate_id, tmp_path, aside_path, payload, phase) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'prepared')",
+                (
+                    op,
+                    media_path,
+                    target_path,
+                    original_path,
+                    candidate_id,
+                    tmp_path,
+                    aside_path,
+                    payload,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def get_upscale_journal(self, journal_id: int) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM upscale_journal WHERE id = ?", (journal_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_upscale_journal(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM upscale_journal ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def set_upscale_journal(self, journal_id: int, **fields: Any) -> None:
+        """Update ``phase`` and / or ``payload`` of an open journal row."""
+        unknown = set(fields) - {"phase", "payload"}
+        if unknown:
+            raise ValueError(f"Not updatable: {', '.join(sorted(unknown))}")
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        with self.lock, self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE upscale_journal SET {assignments} WHERE id = ?",
+                [*fields.values(), journal_id],
+            )
+            conn.commit()
+
+    def close_upscale_journal(self, journal_id: int) -> None:
+        with self.lock, self._get_connection() as conn:
+            conn.execute("DELETE FROM upscale_journal WHERE id = ?", (journal_id,))
+            conn.commit()
+
+    def upscale_busy_paths(self) -> Set[str]:
+        """Stored paths a swap is in the middle of changing: the file there
+        and the media row do not agree yet, so neither Import nor hygiene may
+        read it. ``move_gate`` does not cover them (ingest does not take it)."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT media_path, target_path FROM upscale_journal "
+                "WHERE phase = 'placing'"
+            ).fetchall()
+        return {p for row in rows for p in (row[0], row[1])}
+
+    def upscale_paths_in_use(self, paths: Sequence[str]) -> Set[str]:
+        """Those of ``paths`` a media row, lineage row or record already holds."""
+        with self._get_connection() as conn:
+            return self._existing_media_paths(conn, paths) | self._lineage_paths(
+                conn, paths
+            )
+
+    def apply_upscale_swap(
+        self,
+        journal_id: int,
+        old_path: str,
+        new_path: str,
+        stats: Dict[str, Any],
+        record: Optional[Dict[str, Any]],
+    ) -> None:
+        """The swap's one transaction: re-key the row when the path changed,
+        write the file's new facts, forget its pHash and CLIP vector, write or
+        (``record`` None, a revert) remove the upscale record and mark the
+        journal row ``committed``. Nothing else about the item changes: its
+        generation metadata, ★, grade, categories and folders stay.
+
+        Raises when the row is gone or the move was refused. The caller's
+        journal row is left as it was, so the swap can be finished later."""
+        columns = [c for c in self._UPSCALE_STAT_COLUMNS if c in stats]
+        keys = [k for k in self._UPSCALE_STAT_BLOB_KEYS if k in stats]
+        blob_paths = ", ".join("?, ?" for _ in keys)
+        blob_values = [v for k in keys for v in (f"$.{k}", stats[k])]
+        assignments = ", ".join(f"{c} = ?" for c in columns)
+        with self.lock, self._get_connection() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                if old_path != new_path:
+                    if self._move_rows(conn, [(old_path, new_path)]) != [
+                        (old_path, new_path)
+                    ]:
+                        raise ValueError("the media row could not be moved")
+                    conn.execute(
+                        "UPDATE indices SET index_key = ? "
+                        "WHERE file_path = ? AND index_type = 'ext'",
+                        (Path(new_path).suffix.lower(), new_path),
+                    )
+                    conn.execute(
+                        "UPDATE indices SET index_key = ? "
+                        "WHERE file_path = ? AND index_type = 'path'",
+                        (new_path.lower(), new_path),
+                    )
+                cur = conn.execute(
+                    f"UPDATE media SET {assignments}, data = CASE WHEN "
+                    f"json_valid(data) THEN json_set(data, {blob_paths}) "
+                    "ELSE data END WHERE file_path = ?",
+                    [*(stats[c] for c in columns), *blob_values, new_path],
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("the media row is gone")
+                conn.execute(
+                    "UPDATE media_hashes SET phash = NULL, has_embedding = 0, "
+                    "clip_model = NULL, embedding_updated_at = NULL "
+                    "WHERE file_path = ?",
+                    (new_path,),
+                )
+                if record is None:
+                    conn.execute(
+                        "DELETE FROM upscale_records WHERE file_path = ?",
+                        (new_path,),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO upscale_records (file_path, original_path, "
+                        "original_name, upscaled_size, preset_id) "
+                        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(file_path) DO UPDATE SET "
+                        "original_path = excluded.original_path, "
+                        "original_name = excluded.original_name, "
+                        "upscaled_size = excluded.upscaled_size, "
+                        "preset_id = excluded.preset_id, "
+                        "upscaled_at = datetime('now')",
+                        (
+                            new_path,
+                            record["original_path"],
+                            record["original_name"],
+                            record["upscaled_size"],
+                            record.get("preset_id"),
+                        ),
+                    )
+                conn.execute(
+                    "UPDATE upscale_journal SET phase = 'committed' WHERE id = ?",
+                    (journal_id,),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     # ---- ComfyUI generation jobs ----------------------------------------
 
@@ -6577,6 +6936,9 @@ class DatabaseManager:
                     r["file_path"]: r["grade"]
                     for r in conn.execute(self._SUMMARY_GRADES_SQL)
                 }
+                upscaled = {
+                    r[0] for r in conn.execute("SELECT file_path FROM upscale_records")
+                }
                 rows = conn.execute(sql).fetchall()
                 conn.commit()
                 for row in rows:
@@ -6606,6 +6968,7 @@ class DatabaseManager:
                             "orientation": row["orientation"],
                             "hidden": bool(row["hidden"]),
                             "grade": grades.get(row["file_path"]),
+                            "upscaled": row["file_path"] in upscaled,
                         }
                     )
         except Exception as e:
@@ -9582,96 +9945,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error updating media dimensions for {file_path}: {e}")
             return False
-
-    def update_media_technical_metadata(
-        self,
-        file_path: Path,
-        width: int,
-        height: int,
-        file_size: int,
-        modified_at: datetime,
-        created_at: Optional[datetime] = None,
-        frame_rate: Optional[float] = None,
-        duration: Optional[float] = None,
-    ) -> bool:
-        """
-        Update only the technical metadata (dimensions, file size, timestamps, video properties)
-        of a media file. Preserves all AI generation metadata (prompts, models, seeds, etc.).
-
-        This is used after upscaling to update the file's physical properties while keeping
-        the original AI generation parameters intact.
-
-        Args:
-            file_path: Path to the media file
-            width: New width in pixels
-            height: New height in pixels
-            file_size: New file size in bytes
-            modified_at: New modification timestamp
-            created_at: New creation timestamp (optional, preserves original if not provided)
-            frame_rate: New frame rate for videos (optional)
-            duration: New duration for videos (optional)
-
-        Returns:
-            True if updated successfully, False otherwise
-        """
-        try:
-            with self.lock:
-                with self._get_connection() as conn:
-                    # Get the current media record (with all AI metadata)
-                    media = self.get_media(file_path)
-                    if not media:
-                        logger.warning(f"Media not found in database: {file_path}")
-                        return False
-
-                    # Update technical fields, preserve all AI metadata
-                    media.width = width
-                    media.height = height
-                    media.file_size = file_size
-                    media.modified_at = modified_at
-
-                    # Update created_at only if provided
-                    if created_at is not None:
-                        media.created_at = created_at
-
-                    # Update video-specific properties if provided
-                    if frame_rate is not None:
-                        media.frame_rate = frame_rate
-                    if duration is not None:
-                        media.duration = duration
-
-                    # All AI metadata fields remain unchanged:
-                    # - prompt, negative_prompt, model, sampler, scheduler
-                    # - steps, cfg_scale, seed
-                    # - loras, tags, generation_data
-                    # - metadata_source
-
-                    # Update the database record (use POSIX format for query)
-                    posix_path = to_posix_path(file_path)
-                    conn.execute(
-                        """UPDATE media SET data = ?, updated_at = CURRENT_TIMESTAMP WHERE file_path = ?""",
-                        (media.to_json(), posix_path),  # type: ignore[attr-defined]
-                    )
-
-                    conn.commit()
-
-                    # Build log message
-                    log_parts = [f"{width}x{height}", f"{file_size} bytes"]
-                    if frame_rate is not None:
-                        log_parts.append(f"{frame_rate:.2f} fps")
-                    if duration is not None:
-                        log_parts.append(f"{duration:.2f}s")
-
-                    logger.info(
-                        f"Updated technical metadata for {file_path.name}: "
-                        f"{', '.join(log_parts)}"
-                    )
-                    return True
-
-        except Exception as e:
-            logger.error(f"Error updating technical metadata for {file_path}: {e}")
-            return False
-
-    # ── Similarity / embedding methods ──────────────────────────────
 
     def save_media_hash(
         self, file_path: Path, phash: Optional[str], clip_model: Optional[str] = None

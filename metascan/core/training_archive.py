@@ -56,6 +56,7 @@ from typing import (
 
 from PIL import Image, ImageOps
 
+from metascan.core.upscale_store import release_upscale
 from metascan.utils.heic import register_heif_opener
 from metascan.utils.path_utils import to_native_path
 
@@ -211,9 +212,12 @@ def delete_keeping_signal(
         discard_archives(Path(db.db_path), thumbs.values())
         raise
     try:
-        return delete_rows(thumbs)
+        result = delete_rows(thumbs)
     finally:
         _drop_unused(db, thumbs)
+    # Kept only for compare and revert: the item is gone, so the original goes.
+    release_upscale(db, files)
+    return result
 
 
 def purge_keeping_signal(
