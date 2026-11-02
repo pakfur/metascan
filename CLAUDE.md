@@ -17,8 +17,10 @@ cd frontend && npm run dev                          # Frontend: http://localhost
 # Quality checks (must pass before committing)
 make quality test     # flake8 + black --check + mypy + pytest
 
-# On Windows, tests without make (about 2 minutes; a plain `pytest` is serial, about 12)
-venv\Scripts\python -m pytest -n auto
+# Any OS, with just (https://github.com/casey/just; `just` lists the recipes)
+just run           # On Windows, this is .\run.bat
+just test          # Parallel, about 2 minutes; a plain `pytest` is serial, about 12
+just check         # Everything CI runs
 
 # Frontend only
 cd frontend && npm run build    # Type-check + production build

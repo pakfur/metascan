@@ -6,6 +6,8 @@
 
 ```bash
 # Backend
+# Windows has no make: use just (https://github.com/casey/just), which works on
+# every OS. `just` lists its recipes; `just check` runs everything CI runs.
 make serve            # Run the FastAPI backend server
 python run_server.py  # Same, without make
 
