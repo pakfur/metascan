@@ -21,11 +21,9 @@ import MediaViewer from '../components/viewer/MediaViewer.vue'
 import SlideshowViewer from '../components/viewer/SlideshowViewer.vue'
 import ScanDialog from '../components/dialogs/ScanDialog.vue'
 import DuplicateFinder from '../components/dialogs/DuplicateFinder.vue'
-import UpscaleDialog from '../components/dialogs/UpscaleDialog.vue'
 import PromptPlayground from '../components/dialogs/PromptPlayground.vue'
 import I2VDialog from '../components/dialogs/I2VDialog.vue'
 import T2IDialog from '../components/dialogs/T2IDialog.vue'
-import UpscaleQueue from '../components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from '../components/dialogs/ConfigDialog.vue'
 import WriterTrainingDialog from '../components/dialogs/WriterTrainingDialog.vue'
 import ScopeBreadcrumb from '../components/layout/ScopeBreadcrumb.vue'
@@ -58,9 +56,6 @@ const viewerOpen = ref(false)
 const viewerIndex = ref(0)
 const slideshowOpen = ref(false)
 const dupFinderOpen = ref(false)
-const upscaleDialogOpen = ref(false)
-const upscaleQueueOpen = ref(false)
-const upscaleTargets = ref<Media[]>([])
 const playgroundMedia = ref<Media | null>(null)
 const i2vMedia = ref<Media | null>(null)
 const configOpen = ref(false)
@@ -135,11 +130,6 @@ function closeScan() {
   scanStore.resetEmbedding()
 }
 
-function openUpscale(items: Media[]) {
-  upscaleTargets.value = items
-  upscaleDialogOpen.value = true
-}
-
 function openPlayground(m: Media) {
   playgroundMedia.value = m
 }
@@ -149,13 +139,6 @@ function closePlayground() {
 
 function openImageToVideo(m: Media) {
   i2vMedia.value = m
-}
-
-function handleUpscaleFromSelected() {
-  if (isMobile.value) return
-  if (mediaStore.selectedMedia) {
-    openUpscale([mediaStore.selectedMedia])
-  }
 }
 
 useKeyboard([
@@ -172,7 +155,6 @@ useKeyboard([
   },
   { key: 's', ctrl: true, shift: true, handler: openSlideshow },
   { key: 'd', ctrl: true, shift: true, handler: () => { if (!isMobile.value) dupFinderOpen.value = true } },
-  { key: 'u', ctrl: true, handler: handleUpscaleFromSelected },
 ])
 
 // When the viewport crosses the mobile/desktop breakpoint, the viewer and
@@ -205,7 +187,6 @@ watch(isMobile, () => {
             <ThumbnailGrid
               ref="thumbnailGridRef"
               @open="openViewer"
-              @upscale="openUpscale"
               @playground="openPlayground"
               @image-to-video="openImageToVideo"
             />
@@ -264,20 +245,6 @@ watch(isMobile, () => {
     <DuplicateFinder
       v-if="dupFinderOpen"
       @close="dupFinderOpen = false"
-    />
-
-    <!-- Upscale dialog -->
-    <UpscaleDialog
-      v-if="upscaleDialogOpen"
-      :media-items="upscaleTargets"
-      @close="upscaleDialogOpen = false"
-      @submitted="upscaleQueueOpen = true"
-    />
-
-    <!-- Upscale Queue -->
-    <UpscaleQueue
-      v-if="upscaleQueueOpen"
-      @close="upscaleQueueOpen = false"
     />
 
     <!-- Prompt Playground dialog -->

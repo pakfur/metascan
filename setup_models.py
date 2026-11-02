@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup script to download required NLTK data and AI upscaling models
+Setup script to download required NLTK data and optional VLM weights
 """
 import argparse
 import json
@@ -19,7 +19,6 @@ from typing import Optional
 # Add project to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from metascan.core.media_upscaler import MediaUpscaler
 from metascan.utils.app_paths import get_data_dir
 
 # Handle SSL certificate issues
@@ -290,56 +289,9 @@ def download_nltk_data():
             print(f"✓ {package} downloaded successfully")
 
 
-def download_upscaling_models():
-    """Download required AI upscaling models"""
-    print("\n" + "=" * 60)
-    print("Setting up AI upscaling models...")
-    print("=" * 60)
-
-    models_dir = get_data_dir() / "models"
-    print(f"Models directory: {models_dir}")
-
-    # Initialize upscaler
-    upscaler = MediaUpscaler(
-        models_dir=models_dir, device="auto", tile_size=512, debug=False
-    )
-
-    if upscaler.models_available:
-        print("✓ All required models are already available")
-        return True
-
-    print("Downloading required AI models...")
-    print("This may take several minutes depending on your internet connection.")
-    print("\nModels to download:")
-    print("• RealESRGAN x2 model (~64 MB)")
-    print("• RealESRGAN x4 model (~64 MB)")
-    print("• RealESRGAN x4 anime model (~17 MB)")
-    print("• GFPGAN face enhancement model (~333 MB)")
-    print("• RIFE frame interpolation binary (~437 MB)")
-    print("Total download size: ~915 MB\n")
-
-    def progress_callback(message: str, progress: float):
-        # Simple progress display
-        bar_length = 40
-        filled_length = int(bar_length * progress / 100)
-        bar = "█" * filled_length + "░" * (bar_length - filled_length)
-        print(f"\r[{bar}] {progress:6.1f}% - {message}", end="", flush=True)
-
-    success = upscaler.setup_models(progress_callback)
-    print()  # New line after progress bar
-
-    if success:
-        print("✓ All AI models downloaded successfully!")
-        return True
-    else:
-        print("✗ Failed to download AI models")
-        print("Please check your internet connection and try again.")
-        return False
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Metascan setup — downloads NLTK data, AI upscaling models, "
+        description="Metascan setup — downloads NLTK data "
         "and (optionally) Qwen3-VL tagging weights."
     )
     parser.add_argument(
@@ -359,11 +311,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip the NLTK data download.",
     )
-    parser.add_argument(
-        "--skip-upscaling",
-        action="store_true",
-        help="Skip the upscaling-model download.",
-    )
     args = parser.parse_args()
 
     print("Metascan Setup - Downloading required data and models")
@@ -375,19 +322,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"✗ NLTK setup failed: {e}")
             sys.exit(1)
-
-    if not args.skip_upscaling:
-        try:
-            models_success = download_upscaling_models()
-            if not models_success:
-                print(
-                    "\nWarning: AI model setup failed. Upscaling features will not work."
-                )
-                print("You can try running this script again later or download models")
-                print("automatically when you first attempt to upscale media.")
-        except Exception as e:
-            print(f"✗ AI model setup failed: {e}")
-            print("Upscaling features will not work until models are downloaded.")
 
     if args.qwen3vl:
         try:

@@ -623,8 +623,6 @@ CONSUMERS: List[Tuple[str, str]] = [
     ("POST", "/api/models/inference/start"),
     ("POST", "/api/models/rebuild-index"),
     ("POST", "/api/comfy/submit"),
-    ("POST", "/api/upscale"),
-    ("POST", "/api/upscale/resume-all"),
 ]
 # Routes that must keep working while training (browsing and rating).
 NOT_LOCKED = [
@@ -648,7 +646,6 @@ def _consumer_modules() -> List[Any]:
         similarity,
         storyboard,
         t2i,
-        upscale,
         vlm,
         writers,
     )
@@ -663,7 +660,6 @@ def _consumer_modules() -> List[Any]:
         similarity,
         models,
         comfy,
-        upscale,
         media,
         judgments,
         writers,
@@ -1043,25 +1039,6 @@ def test_gpu_reserved_fails_closed():
     assert gpu_guard.gpu_reserved() is False
 
 
-def test_upscale_queue_holds_pending_tasks_while_locked(tmp_path, monkeypatch):
-    from metascan.core.upscale_queue_process import ProcessUpscaleQueue
-
-    q = ProcessUpscaleQueue(tmp_path / "queue")
-    started: List[str] = []
-    monkeypatch.setattr(q, "_start_task_process", lambda t: started.append(t.id))
-    assert not q.has_active_tasks()
-    task_id = q.add_task(str(tmp_path / "a.png"), "image")
-    assert q.has_active_tasks()  # pending counts
-
-    gpu_guard.set_gpu_reservation(lambda: True)
-    q.start_processing()
-    assert started == [] and q.get_task(task_id).status.value == "pending"
-
-    gpu_guard.set_gpu_reservation(None)
-    q.start_processing()
-    assert started == [task_id]
-
-
 # ---- fix round 1 ------------------------------------------------------------------
 
 
@@ -1079,10 +1056,10 @@ async def test_the_second_busy_check_refuses_and_releases(db, tmp_path, dataset)
     assert db.list_writer_adapters() == [] and db.list_training_runs() == []
 
 
-async def test_lifespan_busy_reasons_cover_storyboard_index_and_upscale(
+async def test_lifespan_busy_reasons_cover_storyboard_and_index(
     db, tmp_path, monkeypatch
 ):
-    from backend.api import similarity, storyboard, upscale
+    from backend.api import similarity, storyboard
     from backend.main import _build_training_manager
 
     m = _build_training_manager(
@@ -1101,8 +1078,7 @@ async def test_lifespan_busy_reasons_cover_storyboard_index_and_upscale(
 
     monkeypatch.setattr(storyboard, "_background_tasks", {_Pending()})
     monkeypatch.setattr(similarity, "is_indexing", lambda: True)
-    monkeypatch.setattr(upscale, "upscale_active", lambda: True)
-    assert m._gpu_busy() == ["storyboard", "index_build", "upscale_active"]
+    assert m._gpu_busy() == ["storyboard", "index_build"]
 
 
 class _FakeBriefs:

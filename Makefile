@@ -60,14 +60,9 @@ deps: check-venv  ## Install Python dependencies
 	@echo "Dependencies installed"
 
 .PHONY: nltk-setup
-nltk-setup: check-venv  ## Set up NLTK data and AI models
+nltk-setup: check-venv  ## Set up NLTK data
 	$(PYTHON) setup_models.py
-	@echo "NLTK data and AI models setup complete"
-
-.PHONY: models
-models: check-venv  ## Download AI upscaling models only
-	$(PYTHON) setup_models.py
-	@echo "AI models setup complete"
+	@echo "NLTK data setup complete"
 
 .PHONY: frontend-deps
 frontend-deps:  ## Install frontend dependencies

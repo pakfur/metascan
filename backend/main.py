@@ -31,7 +31,6 @@ from backend.api import (
     scan,
     similarity,
     duplicates,
-    upscale,
     config,
     embeddings,
     models,
@@ -55,7 +54,6 @@ from backend.dependencies import (
     set_import_process,
     set_taste_process,
     set_training_process,
-    set_upscale_process,
     get_training_process,
     set_registry,
     set_embedding_process,
@@ -74,7 +72,6 @@ from backend.services.background.registry import ProcessRegistry
 from backend.services.background.tagging import TaggingProcess
 from backend.services.background.taste import TasteProcess
 from backend.services.background.training import WriterTrainingProcess
-from backend.services.background.upscale import UpscaleProcess
 from backend.services.judgments_service import faiss_embedding_lookup
 from backend.services.library_transfer_service import clean_leftovers
 from backend.services.auto_index import AutoIndexScheduler, generation_busy
@@ -366,8 +363,6 @@ def _build_training_manager(
             reasons.append("storyboard")
         if similarity.is_indexing():
             reasons.append("index_build")
-        if upscale.upscale_active():
-            reasons.append("upscale_active")
         if scorecard_mod.scorecard_busy():
             reasons.append("scorecard")
         return reasons
@@ -748,11 +743,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         asyncio.create_task(_preload_vlm())
 
-    # An owner pause from the last run gates the queue before its poller
-    # claims anything; the process re-applies it through pause() once registered.
-    if background_registry.persisted_intent("upscale") == "paused":
-        upscale._get_queue().gated = True
-    upscale.init_upscale_queue()
     similarity.init_embedding_queue()
 
     # Taste scorer: the runner reads the same FAISS index the embedding
@@ -843,12 +833,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     from backend.services import hindsight_briefs as _briefs_mod
 
-    upscale_process = UpscaleProcess(
-        background_registry,
-        upscale._get_queue,
-        upscale.pause_upscale_queue,
-        upscale.resume_upscale_queue,
-    )
     taste_process = TasteProcess(background_registry, taste_service)
     training_process = WriterTrainingProcess(
         background_registry,
@@ -870,7 +854,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         import_process=lambda: import_process,
     )
     bg_processes: List[Any] = [
-        upscale_process,
         taste_process,
         training_process,
         import_process,
@@ -878,7 +861,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ]
     for proc in bg_processes:
         background_registry.register(proc)
-    set_upscale_process(upscale_process)
     set_taste_process(taste_process)
     set_training_process(training_process)
     set_import_process(import_process)
@@ -925,7 +907,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.exception("Scorecard service shutdown raised")
         set_scorecard_service(None)
         for set_proc in (
-            set_upscale_process,
             set_taste_process,
             set_training_process,
             set_import_process,
@@ -937,7 +918,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             *(q for q in bg_processes if q is not hygiene_process),
         ):
             await proc.aclose()
-        await upscale.shutdown_upscale_queue()
         # The auto build starts embedding runs: stop it before the queue.
         try:
             await auto_index.aclose()
@@ -1078,7 +1058,6 @@ def create_app() -> FastAPI:  # noqa: C901
     app.include_router(scan.router)
     app.include_router(similarity.router)
     app.include_router(duplicates.router)
-    app.include_router(upscale.router)
     app.include_router(config.router)
     app.include_router(embeddings.router)
     app.include_router(models.router)

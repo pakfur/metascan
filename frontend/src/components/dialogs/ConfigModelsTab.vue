@@ -25,7 +25,7 @@ onMounted(async () => {
 })
 
 // The writer-training assets live on the Training tab.
-const groups: ModelGroup[] = ['Embedding', 'Upscaling', 'NLP', 'Tagging (VLM)']
+const groups: ModelGroup[] = ['Embedding', 'NLP', 'Tagging (VLM)']
 
 const tierLabel = computed(() => TIER_LABEL[models.tier])
 const tierColor = computed(() => TIER_COLOR[models.tier])
@@ -33,7 +33,6 @@ const tierColor = computed(() => TIER_COLOR[models.tier])
 const grouped = computed<Record<string, ModelRow[]>>(() => {
   const out: Record<string, ModelRow[]> = {
     Embedding: [],
-    Upscaling: [],
     NLP: [],
     'Tagging (VLM)': [],
   }

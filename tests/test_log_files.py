@@ -172,7 +172,7 @@ def test_clear_logs_removes_rollovers_and_logging_continues(tmp_path, monkeypatc
 
 def test_no_log_file_bypasses_the_shared_policy():
     """Every rotating handler must come from log_files.py, so the 10 MB /
-    3-file policy cannot drift per call site (upscale_worker kept 5)."""
+    3-file policy cannot drift per call site."""
     offenders = []
     for root in ("metascan", "backend"):
         for path in (REPO_ROOT / root).rglob("*.py"):

@@ -260,15 +260,14 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
     """Return per-model availability + recommendation gates.
 
     Keys are the model ids surfaced by ``GET /api/models/status``:
-    ``clip-{small,medium,large}``, ``resr-{x2,x4,x4-anime}``, ``gfpgan-v1.4``,
-    ``rife``, ``nltk-punkt``, ``nltk-punkt-tab``, ``nltk-stopwords``,
+    ``clip-{small,medium,large}``, ``nltk-punkt``, ``nltk-punkt-tab``,
+    ``nltk-stopwords``,
     ``qwen3vl-{2b,4b,8b,30b-a3b}``, ``qwen38-27b``, ``llama-server``.
     """
     tier = classify_tier(report)
     gates: dict[str, Gate] = {}
 
     # ---- CLIP ----
-    has_gpu = report.cuda is not None or (report.mps and report.os == "Darwin")
     cuda_vram = report.cuda.vram_gb if report.cuda else 0.0
 
     for key in ("clip-small", "clip-medium", "clip-large"):
@@ -310,62 +309,6 @@ def feature_gates(report: HardwareReport) -> "dict[str, Gate]":
             recommended = key == "clip-small"
 
         gates[key] = Gate(available=available, recommended=recommended, reason=reason)
-
-    # ---- Real-ESRGAN ----
-    # x2 / x4-anime are light; x4 needs 4 GB CUDA for interactive 1080p
-    gates["resr-x2"] = Gate(
-        available=True,
-        recommended=has_gpu,
-        reason=("" if has_gpu else "Will run on CPU at 30-60 s per 1080p image."),
-    )
-    gates["resr-x4-anime"] = Gate(
-        available=True,
-        recommended=has_gpu,
-        reason="" if has_gpu else "Will run on CPU at 25-45 s per 1080p image.",
-    )
-    if report.cuda is not None:
-        x4_avail = cuda_vram >= 4.0
-        x4_reason = (
-            ""
-            if x4_avail
-            else f"Requires 4 GB VRAM for 1080p; detected {cuda_vram} GB."
-        )
-    else:
-        x4_avail = True  # CPU works, just very slow
-        x4_reason = "Will run on CPU at 90-180 s per 1080p image."
-    gates["resr-x4"] = Gate(
-        available=x4_avail,
-        recommended=tier in (Tier.CUDA_MAINSTREAM, Tier.CUDA_WORKSTATION),
-        reason=x4_reason,
-    )
-
-    # ---- GFPGAN ----
-    if report.cuda is not None:
-        gfp_avail = cuda_vram >= 3.0
-        gfp_reason = (
-            "" if gfp_avail else f"Requires 3 GB VRAM; detected {cuda_vram} GB."
-        )
-    else:
-        gfp_avail = True
-        gfp_reason = "Will run on CPU at 6-12 s per face."
-    gates["gfpgan-v1.4"] = Gate(
-        available=gfp_avail,
-        recommended=tier in (Tier.CUDA_MAINSTREAM, Tier.CUDA_WORKSTATION),
-        reason=gfp_reason,
-    )
-
-    # ---- RIFE (Vulkan-required) ----
-    vk = report.vulkan
-    if vk is None or not vk.has_real_device:
-        rife_reason = (
-            "vulkaninfo not detected; install Vulkan drivers."
-            if vk is None or not vk.available
-            else "Only llvmpipe (software) Vulkan device detected. "
-            "Install GPU Vulkan drivers."
-        )
-        gates["rife"] = Gate(available=False, recommended=False, reason=rife_reason)
-    else:
-        gates["rife"] = Gate(available=True, recommended=True, reason="")
 
     # ---- NLTK punkt vs punkt_tab (CVE-2024-39705 / NLTK 3.8.2 break) ----
     nltk_v = report.nltk_version or ""
@@ -752,21 +695,6 @@ def detect_hardware() -> HardwareReport:
         nltk_version=_nltk_version(),
         torch_version=_torch_version(),
     )
-    # Auto-warnings — surface gotchas the UI should show
-    if report.is_wsl and (report.vulkan is None or not report.vulkan.has_real_device):
-        report.warnings.append(
-            "WSL2 detected without GPU Vulkan; RIFE will not work. "
-            "Install GPU drivers in Windows host."
-        )
-    if report.os == "Linux" and report.glibc:
-        try:
-            major, minor = (int(x) for x in report.glibc.split(".")[:2])
-            if (major, minor) < (2, 29):
-                report.warnings.append(
-                    f"glibc {report.glibc} below 2.29; rife-ncnn-vulkan will fail to load."
-                )
-        except ValueError:
-            pass
     return report
 
 
@@ -779,7 +707,7 @@ def select_torch_device(preference: str = "auto") -> str:
     """Pick a torch device string given a preference.
 
     Generalizes ``embedding_manager._resolve_device`` so other PyTorch
-    paths (Real-ESRGAN, GFPGAN if/when wired) can share the logic.
+    paths can share the logic.
     """
     if preference != "auto":
         return preference

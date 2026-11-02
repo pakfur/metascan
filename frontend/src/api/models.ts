@@ -7,7 +7,7 @@ export type HardwareInfo = HardwarePayload
 export type { Gate, Tier }
 
 export type ModelStatus = 'available' | 'missing' | 'downloading' | 'error'
-export type ModelGroup = 'Embedding' | 'Upscaling' | 'NLP' | 'Tagging (VLM)' | 'Writer training'
+export type ModelGroup = 'Embedding' | 'NLP' | 'Tagging (VLM)' | 'Writer training'
 
 export interface ModelRow {
   id: string

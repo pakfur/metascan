@@ -3,7 +3,7 @@
 Every route that would load or use a model on the GPU (T2I / I2V generate
 and Generate Prompt, storyboard synthesis, VLM tagging / retag, chat, the
 prompt playground, similarity search / encode, embedding builds, ComfyUI
-submits, upscaling) declares ``dependencies=GPU_FREE``: while the training
+submits) declares ``dependencies=GPU_FREE``: while the training
 manager holds the GPU it answers 409 ``{"code": "gpu_busy_training"}``
 ("GPU busy: training") before the handler runs. Browsing and rating never
 take it. The reservation itself lives in ``metascan.core.gpu_guard`` (the
