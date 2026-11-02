@@ -55,6 +55,31 @@ Metascan finds nodes by title, so give these titles to the nodes in ComfyUI:
 
 **Keep the soundtrack.** A video workflow must wire the audio through to its save node, or the upscaled video is silent. Metascan warns when you register a workflow that doesn't, and marks any result that lost its audio. The frame rate is also up to the workflow.
 
+## Ready-made workflows
+
+`data/workflows/` holds workflows you can register as they are. Two use [SeedVR2](https://github.com/ByteDance-Seed/SeedVR), the strongest open upscaler in ComfyUI at the time of writing: it restores detail rather than sharpening what is there, and it works on video frames in groups, so it doesn't flicker.
+
+| File | For | Needs |
+|---|---|---|
+| `upscale_image_seedvr2_7b_api.json` | Images, best quality | SeedVR2 pack and 7B model |
+| `upscale_image_fast_api.json` | Images, a result in seconds | `4x_foolhardy_Remacri.safetensors` in `models/upscale_models` |
+| `upscale_video_seedvr2_7b_api.json` | Videos, best quality | SeedVR2 pack and 7B model |
+
+**Setup.** Install [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) with the ComfyUI Manager. Its models go in `ComfyUI/models/SEEDVR2/` (`seedvr2_ema_7b_fp16.safetensors`, `ema_vae_fp16.safetensors`) and download on first use if they are missing. They were tested on a 32 GB card. On a smaller card, change the model and lower the size limits.
+
+**Size limits.** Every workflow offers the Scale menu, but SeedVR2 results stop growing at 16 megapixels for images (about 4000 × 4000) and 3.7 megapixels for video (about 2560 × 1440). A large source at a high scale comes out smaller than the scale says.
+
+These limits matter. Past what fits in VRAM, a run slows from seconds to many minutes, and it can't be stopped: the SeedVR2 node only checks for Stop or ComfyUI's interrupt between batches. A 6144 × 6144 image was still in its only batch after 18 minutes. If you raise a limit and this happens, restarting ComfyUI is the only way out.
+
+**What to expect on a 32 GB card:**
+
+- A 1024 × 1024 image at 4× takes about 35 seconds.
+- A 5-second 720p video at 2× takes about 7 minutes. VRAM use reached 31.4 GB at the size limit, so close other GPU apps first.
+- The video workflow keeps the source's sound and frame rate.
+- Images are saved as PNG, and the SeedVR2 workflow drops transparency.
+- Very noisy sources keep some of their colour noise.
+- Video length is limited by the system memory holding the decoded frames, not by VRAM.
+
 ## The Original folder
 
 By default originals are kept in `data/_original`. Choose another folder in **Config → Directories**. It must not overlap a scan folder or a generated-output folder, or the originals would be imported as library files.

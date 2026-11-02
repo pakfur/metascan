@@ -1,0 +1,131 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "MS_SOURCE_IMAGE"
+    }
+  },
+  "2": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 2.0
+    },
+    "_meta": {
+      "title": "MS_SCALE"
+    }
+  },
+  "3": {
+    "class_type": "GetImageSize",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "GetImageSize"
+    }
+  },
+  "4": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "floor(min(min(b, c) * a, sqrt(16000000 * min(b, c) / max(b, c))) / 2) * 2",
+      "values.a": [
+        "2",
+        0
+      ],
+      "values.b": [
+        "3",
+        0
+      ],
+      "values.c": [
+        "3",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Target short edge in pixels, at most 16 MP"
+    }
+  },
+  "20": {
+    "class_type": "SeedVR2LoadDiTModel",
+    "inputs": {
+      "model": "seedvr2_ema_7b_fp16.safetensors",
+      "device": "cuda:0",
+      "offload_device": "cpu",
+      "cache_model": false
+    },
+    "_meta": {
+      "title": "SeedVR2 model"
+    }
+  },
+  "21": {
+    "class_type": "SeedVR2LoadVAEModel",
+    "inputs": {
+      "model": "ema_vae_fp16.safetensors",
+      "device": "cuda:0",
+      "offload_device": "cpu",
+      "cache_model": false,
+      "encode_tiled": true,
+      "encode_tile_size": 1024,
+      "encode_tile_overlap": 128,
+      "decode_tiled": true,
+      "decode_tile_size": 1024,
+      "decode_tile_overlap": 128
+    },
+    "_meta": {
+      "title": "SeedVR2 VAE (tiled: no effect on quality)"
+    }
+  },
+  "22": {
+    "class_type": "SeedVR2VideoUpscaler",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "dit": [
+        "20",
+        0
+      ],
+      "vae": [
+        "21",
+        0
+      ],
+      "seed": 42,
+      "resolution": [
+        "4",
+        1
+      ],
+      "max_resolution": 0,
+      "batch_size": 1,
+      "uniform_batch_size": false,
+      "color_correction": "wavelet",
+      "temporal_overlap": 0,
+      "prepend_frames": 0,
+      "input_noise_scale": 0.0,
+      "latent_noise_scale": 0.0,
+      "offload_device": "cpu",
+      "enable_debug": false
+    },
+    "_meta": {
+      "title": "MS_SEED"
+    }
+  },
+  "23": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "22",
+        0
+      ],
+      "filename_prefix": "upscale/seedvr2"
+    },
+    "_meta": {
+      "title": "MS_SAVE"
+    }
+  }
+}
