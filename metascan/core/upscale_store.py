@@ -183,18 +183,23 @@ class UpscaleStore:
             if record is None:
                 _copy_verified(current, _native(original))
             _copy_verified(incoming, _native(tmp))
-            self._complete_payload(journal_id, _native(tmp))
+            self._complete_payload(journal_id, incoming)
         except Exception:
             self._roll_back(self._journal(journal_id))
             raise
         return journal_id
 
-    def _complete_payload(self, journal_id: int, placed: Path) -> None:
+    def _complete_payload(self, journal_id: int, incoming: Path) -> None:
         """The facts of the file about to go in: read now, so neither the
-        gate nor a recovery waits on a probe."""
+        gate nor a recovery waits on a probe. Read from ``incoming``, not its
+        ``.tmp`` copy, which has the same size and time: readers go by the
+        extension."""
         row = self._journal(journal_id)
         payload = json.loads(row["payload"])
-        payload["stats"] = self.technical(placed)
+        try:
+            payload["stats"] = self.technical(incoming)
+        except ValueError as exc:
+            raise UpscaleError(CODE_WRONG_TYPE, "That file cannot be read.") from exc
         self.db.set_upscale_journal(journal_id, payload=json.dumps(payload))
 
     def _journal(self, journal_id: int) -> Dict[str, Any]:
@@ -226,7 +231,7 @@ class UpscaleStore:
         )
         try:
             _copy_verified(original, _native(tmp))
-            self._complete_payload(journal_id, _native(tmp))
+            self._complete_payload(journal_id, original)
         except Exception:
             self._roll_back(self._journal(journal_id))
             raise

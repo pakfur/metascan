@@ -146,12 +146,19 @@ function handleUpscaleFromSelected() {
 // Any tab's swap: the row's size and path changed, and elements on screen
 // must load the new bytes from a URL that has not changed.
 useWebSocket('upscale', (event, data) => {
-  if (event !== 'media_swapped') return
-  const paths = [String(data.path), String(data.new_path)]
-  new Set(paths).forEach(bumpFileVersion)
-  mediaStore.loadAllMedia()
-  if (paths[0] !== paths[1]) void foldersStore.loadFolders()
+  if (event === 'media_swapped') void onMediaSwapped(String(data.path), String(data.new_path))
 })
+
+async function onMediaSwapped(path: string, newPath: string) {
+  bumpFileVersion(newPath)
+  await mediaStore.loadAllMedia({ silent: true })
+  if (path !== newPath) void foldersStore.loadFolders()
+  // The selection is a copy of the old row: its size, and maybe its path.
+  if (mediaStore.selectedMedia?.file_path === path) {
+    const row = mediaStore.allMedia.find((m) => m.file_path === newPath)
+    void mediaStore.selectMedia(row ?? null)
+  }
+}
 
 function openPlayground(m: Media) {
   playgroundMedia.value = m

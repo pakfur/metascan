@@ -766,3 +766,43 @@ def test_a_changed_extension_never_renames_the_old_vector(env):
     apply_pending_renames(env.db, index)
     assert index.renamed == []
     assert env.db.list_faiss_pending_renames() == []
+
+
+def test_facts_are_never_read_from_the_tmp_name(env, monkeypatch):
+    """A reader goes by the extension: a video called .tmp reads as an image."""
+    seen: List[str] = []
+    read = env.store.technical
+
+    def technical(path: Path) -> Dict[str, Any]:
+        seen.append(path.suffix)
+        return read(path)
+
+    monkeypatch.setattr(env.store, "technical", technical)
+    path = env.media()
+    env.accept(env.candidate(path, ".webp"))
+    assert seen == [".webp"]
+    env.revert(path.with_suffix(".webp"))
+    assert seen == [".webp", ".png"]
+
+
+def test_a_recorded_mtime_matches_the_placed_file(env):
+    """ChangedFiles compares them: the copy must keep the time it was read at."""
+    from metascan.core.move_detector import mtimes_equal
+
+    path = env.media()
+    env.accept(env.candidate(path))
+    (_, _, mtime) = env.db.media_stat_page("", 1)[0]
+    assert mtimes_equal(path.stat().st_mtime, mtime)
+
+
+def test_an_unreadable_file_is_refused_with_a_code(env):
+    path = env.media()
+    candidate = env.candidate(path)
+    row = env.db.get_upscale_candidate(candidate)
+    Path(to_native_path(row["file_path"])).write_bytes(b"not an image")
+    with pytest.raises(UpscaleError) as e:
+        env.store.prepare_accept(candidate)
+    assert e.value.code == store_mod.CODE_WRONG_TYPE
+    assert env.db.list_upscale_journal() == []
+    assert list(env.originals.glob("*")) == []
+    assert env.library_files() == ["a.png"]
