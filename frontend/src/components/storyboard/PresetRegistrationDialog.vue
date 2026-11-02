@@ -11,20 +11,27 @@ import {
 } from '../../api/comfy'
 import { ApiError } from '../../api/client'
 import { VIDEO_MODES, presetTag } from '../../types/storyboard'
-import type { WorkflowPreset } from '../../types/storyboard'
+import type { PresetKind, WorkflowPreset } from '../../types/storyboard'
 import TextEditPopup from './TextEditPopup.vue'
 
 // `kind` is the preset kind this dialog registers: 'ref2v' (video workflows —
-// the storyboard and i2v callers, and the default) or 't2i' (the T2I config
-// tab). A t2i preset is never tagged with a video dialect.
+// the storyboard and i2v callers, and the default), 't2i' (the T2I config tab)
+// or an upscale kind (the Upscale config tab). Only 'ref2v' is tagged with a
+// video dialect.
 const props = withDefaults(
-  defineProps<{ initialMode?: string; kind?: 'ref2v' | 't2i' }>(),
+  defineProps<{ initialMode?: string; kind?: PresetKind }>(),
   {
     initialMode: 'ref2va',
     kind: 'ref2v',
   },
 )
-const isT2i = computed(() => props.kind === 't2i')
+const showVideoTag = computed(() => props.kind === 'ref2v')
+const namePlaceholder = computed(() => {
+  if (props.kind === 't2i') return 'e.g. Krea2 T2I API'
+  if (props.kind === 'upscale_image') return 'e.g. 4x-UltraSharp'
+  if (props.kind === 'upscale_video') return 'e.g. SeedVR2 video'
+  return 'e.g. H3 ref2v'
+})
 
 const emit = defineEmits<{
   close: []
@@ -36,8 +43,8 @@ const workflowText = ref('')
 // Dialect association (workflow_presets.video_target/video_mode) — drives
 // target-specific validation and the generate_video mismatch guard.
 // "" = untagged (legacy behavior, generic validation only).
-const defaultTarget = computed(() => (isT2i.value ? '' : 'minimax'))
-const defaultMode = computed(() => (isT2i.value ? '' : props.initialMode))
+const defaultTarget = computed(() => (showVideoTag.value ? 'minimax' : ''))
+const defaultMode = computed(() => (showVideoTag.value ? props.initialMode : ''))
 const videoTarget = ref(defaultTarget.value)
 const videoMode = ref(defaultMode.value)
 
@@ -114,10 +121,10 @@ async function onApplyFixes(): Promise<void> {
 }
 
 const presets = ref<WorkflowPreset[]>([])
-// The t2i dialog lists only t2i presets; the video callers keep seeing every
-// kind, exactly as before.
+// The t2i and upscale dialogs list only their own kind; the video callers
+// keep seeing every kind, exactly as before.
 const listedPresets = computed(() =>
-  isT2i.value ? presets.value.filter((p) => p.kind === 't2i') : presets.value,
+  showVideoTag.value ? presets.value : presets.value.filter((p) => p.kind === props.kind),
 )
 const presetsLoading = ref(true)
 const deleteError = ref<string | null>(null)
@@ -285,13 +292,13 @@ function close() {
           <InputText
             id="preset-name"
             v-model="name"
-            :placeholder="isT2i ? 'e.g. Krea2 T2I API' : 'e.g. H3 ref2v'"
+            :placeholder="namePlaceholder"
           />
         </TextEditPopup>
       </div>
 
-      <!-- Video dialect tag: not applicable to a t2i preset. -->
-      <div v-if="!isT2i" class="field-row">
+      <!-- Video dialect tag: only a ref2v preset has one. -->
+      <div v-if="showVideoTag" class="field-row">
         <div class="field">
           <label for="preset-target">Video model</label>
           <select id="preset-target" v-model="videoTarget" :disabled="isUpdating">

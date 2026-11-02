@@ -3,7 +3,7 @@ Process-Based Embedding Queue
 
 Manages a background subprocess that computes pHash and CLIP embeddings
 for media files. Communicates via JSON files following the same pattern
-as the upscale queue.
+as the other workers.
 """
 
 import json

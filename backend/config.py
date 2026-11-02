@@ -152,6 +152,7 @@ def get_comfy_config(config: dict) -> dict:
             "unload_vlm_during_generation": True,
             "output_root": "data/storyboards",
             "request_timeout_s": 30.0,
+            "transfer_timeout_s": 600.0,     # one upload or download
         }
     """
     raw = config.get("comfy", {}) or {}
@@ -163,6 +164,54 @@ def get_comfy_config(config: dict) -> dict:
         ),
         "output_root": str(raw.get("output_root") or "data/storyboards"),
         "request_timeout_s": float(raw.get("request_timeout_s") or 30.0),
+        "transfer_timeout_s": float(raw.get("transfer_timeout_s") or 600.0),
+    }
+
+
+def get_upscale_config(config: dict) -> dict:
+    """Return the ``upscale`` section with defaults filled in.
+
+    Shape:
+        {
+            "original_root": "",             # "" = <data dir>/_original
+            "default_image_preset_id": None,
+            "default_video_preset_id": None,
+            "max_count": 8,                  # results one run may make
+            "window": 2,                     # unfinished jobs of one run
+            "scales": [2, 4],                # offered when a workflow has MS_SCALE
+            "default_scale": 2,
+        }
+    """
+    raw = config.get("upscale", {}) or {}
+
+    def preset_id(key: str) -> Optional[int]:
+        value = raw.get(key)
+        return value if isinstance(value, int) and value > 0 else None
+
+    def limit(key: str, default: int) -> int:
+        try:
+            return max(1, int(raw.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    scales = raw.get("scales")
+    if not isinstance(scales, list):
+        scales = [2, 4]
+    scales = [float(s) for s in scales if isinstance(s, (int, float)) and s > 0]
+    scales = scales or [2.0, 4.0]
+    default_scale = raw.get("default_scale")
+    if not isinstance(default_scale, (int, float)) or default_scale <= 0:
+        default_scale = scales[0]
+    original_root = raw.get("original_root")
+    original_root = original_root.strip() if isinstance(original_root, str) else ""
+    return {
+        "original_root": original_root,
+        "default_image_preset_id": preset_id("default_image_preset_id"),
+        "default_video_preset_id": preset_id("default_video_preset_id"),
+        "max_count": limit("max_count", 8),
+        "window": limit("window", 2),
+        "scales": scales,
+        "default_scale": float(default_scale),
     }
 
 

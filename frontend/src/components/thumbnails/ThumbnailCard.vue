@@ -93,18 +93,37 @@ function onImgError(e: Event) {
     </div>
 
     <div
-      v-if="media.grade || media.similarity_score != null"
+      v-if="media.grade || media.upscaled || media.similarity_score != null"
       class="corner-badges"
     >
       <div v-if="media.similarity_score != null" class="similarity-badge">
         {{ (media.similarity_score * 100).toFixed(0) }}%
       </div>
+      <span
+        v-if="media.upscaled"
+        class="upscaled-badge"
+        role="img"
+        aria-label="Upscaled"
+        title="Upscaled"
+      ><i class="pi pi-arrow-up-right" /></span>
       <GradeBadge v-if="media.grade" :grade="media.grade" />
     </div>
   </div>
 </template>
 
 <style scoped>
+.upscaled-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+}
+
 .thumbnail-card {
   position: relative;
   border-radius: 6px;

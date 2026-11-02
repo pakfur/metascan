@@ -11,6 +11,7 @@ import { useTrainingStore } from '../stores/training'
 import { useKeyboard } from '../composables/useKeyboard'
 import { useDebounceFn } from '@vueuse/core'
 import { useWebSocket } from '../composables/useWebSocket'
+import { bumpFileVersion } from '../api/client'
 import ThreePanel from '../components/layout/ThreePanel.vue'
 import ContentSearchBar from '../components/layout/ContentSearchBar.vue'
 import ViewMenubar from '../components/layout/ViewMenubar.vue'
@@ -20,12 +21,11 @@ import MetadataPanel from '../components/metadata/MetadataPanel.vue'
 import MediaViewer from '../components/viewer/MediaViewer.vue'
 import SlideshowViewer from '../components/viewer/SlideshowViewer.vue'
 import ScanDialog from '../components/dialogs/ScanDialog.vue'
-import DuplicateFinder from '../components/dialogs/DuplicateFinder.vue'
 import UpscaleDialog from '../components/dialogs/UpscaleDialog.vue'
+import DuplicateFinder from '../components/dialogs/DuplicateFinder.vue'
 import PromptPlayground from '../components/dialogs/PromptPlayground.vue'
 import I2VDialog from '../components/dialogs/I2VDialog.vue'
 import T2IDialog from '../components/dialogs/T2IDialog.vue'
-import UpscaleQueue from '../components/dialogs/UpscaleQueue.vue'
 import ConfigDialog from '../components/dialogs/ConfigDialog.vue'
 import WriterTrainingDialog from '../components/dialogs/WriterTrainingDialog.vue'
 import ScopeBreadcrumb from '../components/layout/ScopeBreadcrumb.vue'
@@ -58,9 +58,6 @@ const viewerOpen = ref(false)
 const viewerIndex = ref(0)
 const slideshowOpen = ref(false)
 const dupFinderOpen = ref(false)
-const upscaleDialogOpen = ref(false)
-const upscaleQueueOpen = ref(false)
-const upscaleTargets = ref<Media[]>([])
 const playgroundMedia = ref<Media | null>(null)
 const i2vMedia = ref<Media | null>(null)
 const configOpen = ref(false)
@@ -135,9 +132,32 @@ function closeScan() {
   scanStore.resetEmbedding()
 }
 
-function openUpscale(items: Media[]) {
-  upscaleTargets.value = items
-  upscaleDialogOpen.value = true
+const upscaleMedia = ref<Media | null>(null)
+
+function openUpscale(m: Media) {
+  upscaleMedia.value = m
+}
+
+function handleUpscaleFromSelected() {
+  if (isMobile.value) return
+  if (mediaStore.selectedMedia) openUpscale(mediaStore.selectedMedia)
+}
+
+// Any tab's swap: the row's size and path changed, and elements on screen
+// must load the new bytes from a URL that has not changed.
+useWebSocket('upscale', (event, data) => {
+  if (event === 'media_swapped') void onMediaSwapped(String(data.path), String(data.new_path))
+})
+
+async function onMediaSwapped(path: string, newPath: string) {
+  bumpFileVersion(newPath)
+  await mediaStore.loadAllMedia({ silent: true })
+  if (path !== newPath) void foldersStore.loadFolders()
+  // The selection is a copy of the old row: its size, and maybe its path.
+  if (mediaStore.selectedMedia?.file_path === path) {
+    const row = mediaStore.allMedia.find((m) => m.file_path === newPath)
+    void mediaStore.selectMedia(row ?? null)
+  }
 }
 
 function openPlayground(m: Media) {
@@ -149,13 +169,6 @@ function closePlayground() {
 
 function openImageToVideo(m: Media) {
   i2vMedia.value = m
-}
-
-function handleUpscaleFromSelected() {
-  if (isMobile.value) return
-  if (mediaStore.selectedMedia) {
-    openUpscale([mediaStore.selectedMedia])
-  }
 }
 
 useKeyboard([
@@ -268,16 +281,9 @@ watch(isMobile, () => {
 
     <!-- Upscale dialog -->
     <UpscaleDialog
-      v-if="upscaleDialogOpen"
-      :media-items="upscaleTargets"
-      @close="upscaleDialogOpen = false"
-      @submitted="upscaleQueueOpen = true"
-    />
-
-    <!-- Upscale Queue -->
-    <UpscaleQueue
-      v-if="upscaleQueueOpen"
-      @close="upscaleQueueOpen = false"
+      v-if="upscaleMedia"
+      :media="upscaleMedia"
+      @close="upscaleMedia = null"
     />
 
     <!-- Prompt Playground dialog -->

@@ -250,47 +250,6 @@ def test_gates_cpu_only_blocks_large_clip() -> None:
     assert "CPU" in gates["clip-large"].reason
 
 
-def test_gates_cpu_only_blocks_real_esrgan_x4() -> None:
-    rpt = _make_report()
-    gates = feature_gates(rpt)
-    assert gates["resr-x2"].available is True
-    assert gates["resr-x4"].available is True
-    assert gates["resr-x4"].recommended is False  # 90-180s/1080p on CPU
-    assert gates["resr-x4-anime"].available is True
-
-
-def test_gates_cpu_only_blocks_rife_when_no_vulkan() -> None:
-    rpt = _make_report()  # no vulkan info
-    gates = feature_gates(rpt)
-    assert gates["rife"].available is False
-    assert "Vulkan" in gates["rife"].reason
-
-
-def test_gates_rife_available_when_vulkan_real() -> None:
-    rpt = _make_report(
-        vulkan=VulkanInfo(
-            available=True,
-            devices=["NVIDIA GeForce RTX 3060"],
-            has_real_device=True,
-        ),
-    )
-    gates = feature_gates(rpt)
-    assert gates["rife"].available is True
-
-
-def test_gates_rife_blocked_when_only_llvmpipe() -> None:
-    rpt = _make_report(
-        vulkan=VulkanInfo(
-            available=True,
-            devices=["llvmpipe (LLVM 15.0.7, 256 bits)"],
-            has_real_device=False,
-        ),
-    )
-    gates = feature_gates(rpt)
-    assert gates["rife"].available is False
-    assert "llvmpipe" in gates["rife"].reason
-
-
 def test_gates_cuda_entry_recommends_clip_medium_not_large() -> None:
     rpt = _make_report(cuda=CudaInfo(name="GTX 1660", vram_gb=4.0, capability="7.5"))
     gates = feature_gates(rpt)

@@ -34,7 +34,6 @@ logs/
 # frontend/src/components/thumbnails/.
 /thumbnails/
 models/
-gfpgan/
 assets/media/
 data/vocabulary/*.npz
 

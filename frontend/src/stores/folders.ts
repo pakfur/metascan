@@ -147,6 +147,10 @@ export function evaluateCondition(m: Media, c: SmartCondition): boolean {
       const grade = m.grade ?? 'none'
       return op === 'is' ? grade === value : grade !== value
     }
+    case 'upscaled': {
+      const v = Boolean(value)
+      return op === 'is' ? Boolean(m.upscaled) === v : Boolean(m.upscaled) !== v
+    }
     case 'type': {
       const kind = m.is_video ? 'video' : 'image'
       return op === 'is' ? kind === value : kind !== value
@@ -895,6 +899,12 @@ export const FIELD_DEFS: Record<RuleField, FieldDef> = {
     ops: ['within_days', 'older_than_days'],
     value: 'days',
     defaultValue: () => 30,
+  },
+  upscaled: {
+    label: 'Upscaled',
+    ops: ['is', 'is_not'],
+    value: 'bool',
+    defaultValue: () => true,
   },
   i2v: {
     label: 'Has I2V video',

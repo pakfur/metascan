@@ -1,7 +1,7 @@
 """Model management endpoints.
 
-Exposes the full catalogue of AI assets the app depends on (CLIP, Real-ESRGAN,
-GFPGAN, RIFE, NLTK) with per-model status, plus HuggingFace-token and preload
+Exposes the full catalogue of AI assets the app depends on (CLIP, NLTK, VLMs,
+writer training) with per-model status, plus HuggingFace-token and preload
 configuration. Live-inference state comes from the ``InferenceClient`` that the
 ``similarity`` router also uses.
 
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -41,58 +40,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/models", tags=["models"])
 
 
-# ----------------------------------------------------------------------
-# Upscaling model catalogue
-# ----------------------------------------------------------------------
-
-# Kept here rather than importing MediaUpscaler to avoid pulling the heavy
-# torchvision/realesrgan dependency graph into the API process. The filenames
-# and URLs are the authoritative list mirrored from ``media_upscaler.py``.
-_UPSCALE_MODELS: List[Dict[str, Any]] = [
-    {
-        "id": "resr-x2",
-        "filename": "RealESRGAN_x2plus.pth",
-        "name": "Real-ESRGAN x2",
-        "group": "Upscaling",
-        "size_mb_estimate": 64,
-        "description": "General-purpose 2x upscaler.",
-    },
-    {
-        "id": "resr-x4",
-        "filename": "RealESRGAN_x4plus.pth",
-        "name": "Real-ESRGAN x4",
-        "group": "Upscaling",
-        "size_mb_estimate": 64,
-        "description": "General-purpose 4x upscaler.",
-    },
-    {
-        "id": "resr-x4-anime",
-        "filename": "RealESRGAN_x4plus_anime_6B.pth",
-        "name": "Real-ESRGAN x4 (anime)",
-        "group": "Upscaling",
-        "size_mb_estimate": 17,
-        "description": "4x upscaler tuned for illustration / anime content.",
-    },
-    {
-        "id": "gfpgan-v1.4",
-        "filename": "GFPGANv1.4.pth",
-        "name": "GFPGAN v1.4",
-        "group": "Upscaling",
-        "size_mb_estimate": 333,
-        "description": "Face restoration used after upscaling.",
-    },
-    {
-        "id": "rife",
-        "filename": "rife",  # directory, not a single file
-        "name": "RIFE (frame interpolation)",
-        "group": "Upscaling",
-        "size_mb_estimate": 437,
-        "description": (
-            "Frame interpolation binary used for smoother video upscaling."
-        ),
-    },
-]
-
 _NLTK_MODELS: List[Dict[str, Any]] = [
     {
         "id": "nltk-punkt",
@@ -107,10 +54,6 @@ _NLTK_MODELS: List[Dict[str, Any]] = [
         "description": "Stopword list used for prompt keyword extraction.",
     },
 ]
-
-
-def _models_dir() -> Path:
-    return get_data_dir() / "models"
 
 
 def _nltk_data_dir() -> Path:
@@ -160,36 +103,6 @@ def _clip_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
                 "required_vram_mb": cfg["vram_mb"],
                 "embedding_dim": cfg["embedding_dim"],
                 "preload_at_startup": model_id in preload,
-            }
-        )
-    return rows
-
-
-def _upscale_status_rows(preload: List[str]) -> List[Dict[str, Any]]:
-    md = _models_dir()
-    rows: List[Dict[str, Any]] = []
-    for m in _UPSCALE_MODELS:
-        if m["id"] == "rife":
-            rife_root = md / "rife"
-            present = rife_root.exists() and any(rife_root.rglob("rife-ncnn-vulkan*"))
-            size = _dir_size_bytes(rife_root) if present else 0
-            cache = str(rife_root) if present else None
-        else:
-            path = md / m["filename"]
-            present = path.exists()
-            size = path.stat().st_size if present else 0
-            cache = str(path) if present else None
-        rows.append(
-            {
-                "id": m["id"],
-                "group": m["group"],
-                "name": m["name"],
-                "description": m["description"],
-                "status": "available" if present else "missing",
-                "size_bytes": size or None,
-                "cache_path": cache,
-                "required_vram_mb": None,
-                "preload_at_startup": m["id"] in preload,
             }
         )
     return rows
@@ -377,9 +290,8 @@ def _build_status_payload() -> Dict[str, Any]:
 
     Runs on a thread because the helpers below do non-trivial sync work:
     ``_clip_status_rows`` imports ``open_clip`` (which transitively loads
-    torch on first call — tens of seconds cold on WSL /mnt/c), and both
-    ``_upscale_status_rows`` / ``_nltk_status_rows`` do ``Path.rglob``
-    over cache dirs that live on slow 9P-backed storage.
+    torch on first call — tens of seconds cold on WSL /mnt/c), and
+    ``_nltk_status_rows`` does ``Path.rglob`` over cache dirs that live on slow 9P-backed storage.
 
     Previously this was inlined into the async handler below, which
     pinned the asyncio event loop for ~30 s on first request and
@@ -397,7 +309,6 @@ def _build_status_payload() -> Dict[str, Any]:
     training_paths = wta.asset_paths(config)
     rows = (
         _clip_status_rows(preload)
-        + _upscale_status_rows(preload)
         + _nltk_status_rows(preload)
         + _vlm_status_rows(preload)
         + wta.status_rows(training_paths)
@@ -526,7 +437,7 @@ async def download_model(body: ModelIdBody) -> Dict[str, Any]:
     on a worker thread — the same code path the inference worker uses — so
     cache layout and auth stay consistent.
 
-    Upscaling / NLTK downloads call their existing installers.
+    NLTK downloads call their existing installer.
     """
     mid = body.id
     if mid.startswith("clip-"):
@@ -535,10 +446,6 @@ async def download_model(body: ModelIdBody) -> Dict[str, Any]:
             raise HTTPException(status_code=404, detail=f"unknown CLIP model: {mid}")
 
         asyncio.create_task(_download_clip(mid, key))
-        return {"status": "started", "id": mid}
-
-    if mid in {m["id"] for m in _UPSCALE_MODELS}:
-        asyncio.create_task(_download_upscaler(mid))
         return {"status": "started", "id": mid}
 
     if mid in {m["id"] for m in _NLTK_MODELS}:
@@ -613,17 +520,6 @@ async def delete_model(model_id: str) -> Dict[str, Any]:
                 "Use the `huggingface-cli delete-cache` tool to remove them."
             ),
         )
-    for m in _UPSCALE_MODELS:
-        if m["id"] == model_id:
-            if m["id"] == "rife":
-                target = _models_dir() / "rife"
-                if target.exists():
-                    await asyncio.to_thread(shutil.rmtree, target, True)
-                return {"ok": True}
-            path = _models_dir() / m["filename"]
-            if path.exists():
-                await asyncio.to_thread(path.unlink)
-            return {"ok": True}
     from metascan.core.vlm_models import REGISTRY as _VLM_REGISTRY
     from metascan.utils.app_paths import get_data_dir
 
@@ -666,34 +562,6 @@ async def _download_clip(mid: str, key: str) -> None:
         await asyncio.to_thread(_load)
     except Exception as e:
         logger.exception("CLIP download for %s failed", mid)
-        _broadcast_download(mid, "download_error", error=str(e))
-        return
-    _broadcast_download(mid, "download_complete")
-
-
-async def _download_upscaler(mid: str) -> None:
-    _broadcast_download(mid, "download_progress", stage="starting", percent=0.0)
-
-    def _setup() -> None:
-        from metascan.core.media_upscaler import MediaUpscaler
-
-        upscaler = MediaUpscaler(
-            models_dir=_models_dir(), device="auto", tile_size=512, debug=False
-        )
-
-        def cb(message: str, pct: float) -> None:
-            ws_manager.broadcast_sync(
-                "models",
-                "download_progress",
-                {"id": mid, "stage": message, "percent": pct / 100.0},
-            )
-
-        upscaler.setup_models(cb)
-
-    try:
-        await asyncio.to_thread(_setup)
-    except Exception as e:
-        logger.exception("Upscaler download for %s failed", mid)
         _broadcast_download(mid, "download_error", error=str(e))
         return
     _broadcast_download(mid, "download_complete")

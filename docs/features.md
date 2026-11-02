@@ -86,8 +86,8 @@ Search lives in the **SEARCH section** at the top of the left filter panel and b
 ## Hardware Detection & Feature Gating
 - Auto-detects CPU / RAM / CUDA / MPS / Vulkan / glibc / NLTK at startup
 - Classifies the host into one of five tiers (CPU only, Apple Silicon, CUDA entry/mainstream/workstation)
-- Per-model availability + recommendation chips in the Models config tab — green "recommended" picks the right CLIP/upscaler for your tier; red "unsupported" explains *why* on hover (insufficient VRAM, no real Vulkan device, glibc too old, etc.)
-- Surfaces actionable warnings: WSL2 without GPU Vulkan blocks RIFE, Linux glibc < 2.29 breaks `rife-ncnn-vulkan`, NLTK ≥ 3.8.2 needs `punkt_tab` instead of legacy `punkt`
+- Per-model availability + recommendation chips in the Models config tab — green "recommended" picks the right CLIP model for your tier; red "unsupported" explains *why* on hover (insufficient VRAM, etc.)
+- Surfaces actionable warnings: NLTK ≥ 3.8.2 needs `punkt_tab` instead of legacy `punkt`
 - Shared device picker (CUDA → MPS → CPU) so Apple Silicon Macs now use MPS for CLIP inference automatically
 
 See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate reference.
@@ -99,12 +99,11 @@ See [Hardware Detection](hardware-detection.md) for the full probe / tier / gate
 - Files moved to trash (recoverable)
 
 ## Media Upscaling
-- Real-ESRGAN upscaling (2x/4x) with General and Anime models
-- GFPGAN face enhancement
-- RIFE video frame interpolation (2x/4x/8x FPS multiplier)
-- 1-4 concurrent workers
-- Queue management with pause/resume, clear completed
-- Real-time progress tracking via WebSocket
+- Upscale images and videos with your own ComfyUI workflows ([guide](upscaling.md))
+- Several results per run, compared with the original under a mouse-driven wipe
+- Accept one and it replaces the file in the library; ratings, prompt and folders stay
+- The original is kept outside the library, for compare, revert and upscaling again
+- Runs in the background with Pause, Resume and Stop
 
 ## Scanning & Indexing
 - Full clean & rescan (the scan dialog) with multi-phase, real-time progress (file-by-file WebSocket updates)

@@ -1,0 +1,89 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "MS_SOURCE_IMAGE"
+    }
+  },
+  "2": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 2.0
+    },
+    "_meta": {
+      "title": "MS_SCALE"
+    }
+  },
+  "3": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "4x_foolhardy_Remacri.safetensors"
+    },
+    "_meta": {
+      "title": "UpscaleModelLoader"
+    }
+  },
+  "4": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+      "upscale_model": [
+        "3",
+        0
+      ],
+      "image": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "ImageUpscaleWithModel"
+    }
+  },
+  "5": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "a / 4",
+      "values.a": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Scale, as a share of the model's 4x"
+    }
+  },
+  "6": {
+    "class_type": "ResizeImageMaskNode",
+    "inputs": {
+      "input": [
+        "4",
+        0
+      ],
+      "resize_type": "scale by multiplier",
+      "resize_type.multiplier": [
+        "5",
+        0
+      ],
+      "scale_method": "lanczos"
+    },
+    "_meta": {
+      "title": "ResizeImageMaskNode"
+    }
+  },
+  "7": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "6",
+        0
+      ],
+      "filename_prefix": "upscale/fast"
+    },
+    "_meta": {
+      "title": "MS_SAVE"
+    }
+  }
+}

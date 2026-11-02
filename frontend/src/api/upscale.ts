@@ -1,44 +1,45 @@
-import { get, post, patch, del } from './client'
+import { del, get, post } from './client'
+import type {
+  UpscaleConfig,
+  UpscaleRun,
+  UpscaleRunBody,
+  UpscaleState,
+} from '../types/upscale'
 
-export interface UpscaleTask {
-  file_path: string
-  scale_factor: number
-  model_type: string
-  face_enhance: boolean
-  interpolate_frames: boolean
-  fps_multiplier: number
-  custom_fps: number | null
+export function fetchUpscaleConfig(): Promise<UpscaleConfig> {
+  return get<UpscaleConfig>('/upscale/config')
 }
 
-export interface UpscaleSubmit {
-  tasks: UpscaleTask[]
-  concurrent_workers: number
+export function fetchUpscaleState(path: string): Promise<UpscaleState> {
+  return get<UpscaleState>(`/upscale/state?path=${encodeURIComponent(path)}`)
 }
 
-export function submitUpscale(body: UpscaleSubmit): Promise<{ task_ids: string[]; status: string }> {
-  return post('/upscale', body)
+export function startUpscaleRun(
+  body: UpscaleRunBody,
+): Promise<{ batch_id: string; total: number; next_seed: number | null }> {
+  return post('/upscale/runs', body)
 }
 
-export function fetchUpscaleQueue(): Promise<{ tasks: Record<string, unknown>[] }> {
-  return get('/upscale/queue')
+export function listUpscaleRuns(): Promise<UpscaleRun[]> {
+  return get<UpscaleRun[]>('/upscale/runs')
 }
 
-export function removeUpscaleTask(taskId: string): Promise<{ status: string }> {
-  return del(`/upscale/${taskId}`)
+export function cancelUpscaleRun(batchId: string): Promise<{ cancelled: boolean }> {
+  return post(`/upscale/runs/${batchId}/cancel`)
 }
 
-export function cancelUpscaleTask(taskId: string): Promise<{ status: string }> {
-  return patch(`/upscale/${taskId}`, { action: 'cancel' })
+export function acceptCandidate(id: number): Promise<{ file_path: string }> {
+  return post(`/upscale/candidates/${id}/accept`)
 }
 
-export function pauseAllUpscale(): Promise<{ status: string }> {
-  return post('/upscale/pause-all')
+export function discardCandidate(id: number): Promise<{ status: string }> {
+  return del(`/upscale/candidates/${id}`)
 }
 
-export function resumeAllUpscale(): Promise<{ status: string }> {
-  return post('/upscale/resume-all')
+export function revertUpscale(filePath: string): Promise<{ file_path: string }> {
+  return post('/upscale/revert', { file_path: filePath })
 }
 
-export function clearCompletedUpscale(): Promise<{ status: string }> {
-  return post('/upscale/clear-completed')
+export function setOriginalFolder(path: string): Promise<{ status: 'saved' | 'moving' }> {
+  return post('/upscale/original-folder', { path })
 }

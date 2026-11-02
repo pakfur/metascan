@@ -47,7 +47,7 @@ Metascan now features a modern Vue.js web frontend with a FastAPI backend server
 - **Multi-phase Full clean & rescan dialog** (Config → Maintenance) with real-time WebSocket progress (file-by-file updates)
 - **CLIP-powered content search** (text-to-image) and FAISS similarity search with threshold slider
 - **Duplicate finder** with pHash grouping, thumbnail previews, and batch deletion
-- **Upscale queue** with Real-ESRGAN options, GFPGAN face enhancement, RIFE frame interpolation, pause/resume
+- **ComfyUI upscaling** of images and videos with your own workflows: compare results, accept one, upscale again from the original, or revert
 - **Similarity settings** tab in Configuration with CLIP model/device selection, embedding index build with live progress
 - **Configuration dialog** for directory management
 - **Always-on import**: files added to the scan folders appear in the grid on their own
@@ -83,7 +83,7 @@ Metascan now features a modern Vue.js web frontend with a FastAPI backend server
 
 Metascan is an open-source browser for AI-generated images and videos that doubles as a general-purpose photo viewer. It automatically extracts metadata from generators like ComfyUI, SwarmUI, and Fooocus — prompts, models, samplers, LoRAs — alongside the camera EXIF and GPS coordinates that come with regular photos, so a single library can mix synthetic and real media without losing context. The built-in viewer handles full-screen images with zoom and pan, plays video with speed and frame-step controls, and runs an ordered or shuffled slideshow with fade transitions.
 
-A FastAPI backend handles scanning, the SQLite database, CLIP/FAISS similarity search, duplicate detection, and Real-ESRGAN/GFPGAN/RIFE upscaling, while a Vue 3 SPA provides the UI. The two halves talk over REST and a multiplexed WebSocket, which means the heavy GPU work can stay on a desktop tower while you browse from any laptop, tablet, or phone on the network. The stack is cross-platform — Linux, macOS (Apple Silicon and Intel), and Windows are first-class, and a hardware probe at startup auto-tunes which CLIP model and upscaler are recommended for your machine.
+A FastAPI backend handles scanning, the SQLite database, CLIP/FAISS similarity search, duplicate detection, and driving ComfyUI for generation and upscaling, while a Vue 3 SPA provides the UI. The two halves talk over REST and a multiplexed WebSocket, which means the heavy GPU work can stay on a desktop tower while you browse from any laptop, tablet, or phone on the network. The stack is cross-platform — Linux, macOS (Apple Silicon and Intel), and Windows are first-class, and a hardware probe at startup auto-tunes which CLIP model is recommended for your machine.
 
 The library organizes itself two ways. Static folders are manually curated collections you fill by right-clicking items; smart folders are saved rule sets — over tags, model, source, dates, favorite status, ✓ / ✗ grade — that re-resolve as content changes, so a folder like "high-step photoreal generations from last month" stays current without maintenance. Folder mutations broadcast over the WebSocket so multiple browser tabs stay in sync.
 
@@ -155,10 +155,11 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[First-Time Setup](docs/first_time_setup.md)** — step-by-step, per-platform install of Python, Node, FFmpeg, virtualenv, and all dependencies
 - **[Installation](docs/installation.md)** — prerequisites, end-user setup, contributor setup, environment variables
 - **[Moving a Library](docs/library-transfer.md)** — export your favorites, grades, T2I / I2V settings and training data, and import them on another PC
-- **[Configuration](docs/configuration.md)** — `config.json` reference, including the `similarity`, `ui`, `models`, `comfy`, `i2v`, and `t2i` sections
+- **[Configuration](docs/configuration.md)** — `config.json` reference, including the `similarity`, `ui`, `models`, `comfy`, `i2v`, `t2i`, and `upscale` sections
 - **[Image-to-Video Workflow Setup](docs/i2v-workflow-setup.md)** — step-by-step ComfyUI build and registration for the MiniMax H3 turbo and high-quality presets
 - **[Image-to-Video cadence templates](docs/i2v-templates.md)** — the JSON découpage-template format that fixes an i2v clip's shot structure
 - **[Background activity](docs/background-activity.md)** — the activity pill and grid: what runs in the background, held vs paused vs stopped, and what pause and stop do for each process
+- **[Upscaling](docs/upscaling.md)** — upscale images and videos with ComfyUI workflows: registering a workflow, comparing results, accept and revert, and the Original folder
 - **[Text to Image](docs/t2i.md)** — the Text to Image dialog: caption sources, character and wildcard files, prompt styles per model, server-side batches, and workflow requirements
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
 - **[Architecture](docs/architecture.md)** — client–server layout, database schema, backend/frontend layouts, key design decisions
@@ -177,7 +178,6 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 ## Acknowledgments
 
 - Thanks to the creators of ComfyUI, SwarmUI, and Fooocus for their amazing AI generation tools
-- Real-ESRGAN team for the upscaling models
 - OpenCLIP for CLIP model implementations
 - Built with Vue 3 and FastAPI for modern web architecture
 - Powered by SQLite for efficient local data storage

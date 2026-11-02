@@ -12,6 +12,7 @@ export type RuleField =
   | 'added'
   | 'i2v'
   | 't2i'
+  | 'upscaled'
 
 export type RuleOp =
   | 'is'

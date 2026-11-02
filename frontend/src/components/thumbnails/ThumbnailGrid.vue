@@ -15,7 +15,7 @@ import { tagOne } from '../../api/vlm'
 
 const emit = defineEmits<{
   open: [media: Media]
-  upscale: [items: Media[]]
+  upscale: [media: Media]
   playground: [media: Media]
   imageToVideo: [media: Media]
 }>()
@@ -265,7 +265,7 @@ function ctxFindSimilar() {
 
 function ctxUpscale() {
   if (contextMenu.value) {
-    emit('upscale', [contextMenu.value.media])
+    emit('upscale', contextMenu.value.media)
     contextMenu.value = null
   }
 }

@@ -623,8 +623,7 @@ CONSUMERS: List[Tuple[str, str]] = [
     ("POST", "/api/models/inference/start"),
     ("POST", "/api/models/rebuild-index"),
     ("POST", "/api/comfy/submit"),
-    ("POST", "/api/upscale"),
-    ("POST", "/api/upscale/resume-all"),
+    ("POST", "/api/upscale/runs"),
 ]
 # Routes that must keep working while training (browsing and rating).
 NOT_LOCKED = [
@@ -1041,25 +1040,6 @@ def test_gpu_reserved_fails_closed():
     assert gpu_guard.gpu_reserved() is True
     gpu_guard.set_gpu_reservation(None)
     assert gpu_guard.gpu_reserved() is False
-
-
-def test_upscale_queue_holds_pending_tasks_while_locked(tmp_path, monkeypatch):
-    from metascan.core.upscale_queue_process import ProcessUpscaleQueue
-
-    q = ProcessUpscaleQueue(tmp_path / "queue")
-    started: List[str] = []
-    monkeypatch.setattr(q, "_start_task_process", lambda t: started.append(t.id))
-    assert not q.has_active_tasks()
-    task_id = q.add_task(str(tmp_path / "a.png"), "image")
-    assert q.has_active_tasks()  # pending counts
-
-    gpu_guard.set_gpu_reservation(lambda: True)
-    q.start_processing()
-    assert started == [] and q.get_task(task_id).status.value == "pending"
-
-    gpu_guard.set_gpu_reservation(None)
-    q.start_processing()
-    assert started == [task_id]
 
 
 # ---- fix round 1 ------------------------------------------------------------------

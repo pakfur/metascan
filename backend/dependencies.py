@@ -148,17 +148,17 @@ def get_generation_process(process_id: str) -> Optional[Any]:
     return _generation_singletons.get(process_id)
 
 
-_upscale_singleton: Optional[Any] = None
+_upscale_store: Optional[Any] = None
 
 
-def set_upscale_process(process: Optional[Any]) -> None:
-    """Install the Upscaling process (FastAPI lifespan)."""
-    global _upscale_singleton
-    _upscale_singleton = process
+def set_upscale_store(store: Optional[Any]) -> None:
+    """Install the UpscaleStore (FastAPI lifespan)."""
+    global _upscale_store
+    _upscale_store = store
 
 
-def get_upscale_process() -> Optional[Any]:
-    return _upscale_singleton
+def get_upscale_store() -> Optional[Any]:
+    return _upscale_store
 
 
 _taste_singleton: Optional[Any] = None

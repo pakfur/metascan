@@ -27,8 +27,8 @@ A process told to pause or stop may need a moment to finish what it is saving. I
 - **Import**: pause and stop both switch the folder watching off (a file already being imported finishes first); play switches it back on and catches up on everything that changed meanwhile. Pause is not offered during a Full clean & rescan, and stopping one is the same as cancelling it (it asks first): your ratings stay safe and pending, and nothing is deleted.
 - **Embedding**: pause saves what is done and exits; the rest stays queued. Resuming reloads the CLIP model, which takes a little while.
 - **Tagging**: pause and stop both take no new images and let the ones in flight finish (the panel says "Stopping after the current images" until they have). Stop keeps the queue on disk, and nothing is tagged until you press play, not even after a restart or a finished index build; new images keep joining the queue. Starting a retag yourself also clears a stop. A retag while paused stays paused.
-- **Text to image, Image to video, Storyboard**: pause lets the job already in ComfyUI finish ("Pausing after the current job") and holds the rest. Stop cancels the batch.
-- **Upscaling**: pause stops the file being worked on, and it starts again from the beginning on resume.
+- **Text to image, Image to video, Upscaling, Storyboard**: pause lets the job already in ComfyUI finish ("Pausing after the current job") and holds the rest. Stop cancels the batch.
+- **Moving originals**: pause and stop land between files. Stop leaves the Original folder setting as it was, and every original stays usable.
 - **Taste training**: pause lets the run in progress finish, then stops automatic retraining. Training from the Config window still works.
 - **Writer training**: pause saves a checkpoint at the next step. Stop cancels the run and deletes its checkpoints, so it asks first.
 - **Library hygiene**: pause and stop both end the check at the next step. Play runs a check as soon as nothing else is running (see below).

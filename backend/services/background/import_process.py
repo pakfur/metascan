@@ -903,6 +903,8 @@ class ImportProcess:
         if not os.path.exists(path):
             return SKIPPED  # gone again: the poller reports it vanished
         try:
+            if to_posix_path(path) in self._db().upscale_busy_paths():
+                return SKIPPED  # a swap is mid-way: its row is about to say so
             if self._db().candidate_for(to_posix_path(path)) is not None:
                 return SKIPPED
             ok = self._scanner.ingest_file(Path(path)) is not None

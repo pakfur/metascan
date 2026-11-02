@@ -162,7 +162,7 @@ the root CLAUDE.md still applies. LoRA serving is in `vlm-llama.md`; user guide 
   through `_drop_lock()`, which restarts an interrupted briefs job (not while closing).
   Every GPU consumer route has `Depends(require_gpu_free)` (`GPU_FREE`), and the core
   client entry points (`VlmClient.start`, `InferenceClient.start`, `ComfyClient.submit`
-  / `submit_now` and its pump, `_start_index_build`, `ProcessUpscaleQueue.start_processing`)
+  / `submit_now` and its pump, `_start_index_build`)
   re-check under the lock. A submit that lands exactly as the lock is taken fails with
   `GpuBusyError` (-> 409) rather than being held. `tests/test_training_manager.py`
   enumerates the consumer routes; add a new GPU route to its list. Not locked: browsing,

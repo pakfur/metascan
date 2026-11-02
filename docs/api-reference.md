@@ -38,8 +38,15 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | POST | `/api/similarity/search` | Find similar media (image → image); light unbounded results |
 | POST | `/api/similarity/content-search` | CLIP text-to-image search; light unbounded results |
 | POST | `/api/duplicates/find` | Find duplicate groups |
-| POST | `/api/upscale` | Submit upscale tasks |
-| GET | `/api/upscale/queue` | List queue tasks |
+| GET | `/api/upscale/config` | Upscale settings and the workflows on offer, with what each can take |
+| GET | `/api/upscale/state?path=` | A media item's upscale record and its candidates |
+| POST | `/api/upscale/runs` | Start a run (`source_path`, `preset_id`, `count`, `seed`, `seed_policy`, `prompt`, `scale`). 409 `gpu_busy_training`, or `staging_folder_in_library` when results would land in the library |
+| GET | `/api/upscale/runs` | Runs in progress |
+| POST | `/api/upscale/runs/{id}/cancel` | Cancel a run; results already made stay |
+| POST | `/api/upscale/candidates/{id}/accept` | Put a candidate in the library. Answers `{file_path}`, which an extension change moves. 409 `file_in_use`, `library_busy` or `originals_moving` |
+| DELETE | `/api/upscale/candidates/{id}` | Discard a candidate |
+| POST | `/api/upscale/revert` | Put the original back (`file_path`) |
+| POST | `/api/upscale/original-folder` | Change the Original folder (`path`, "" = default). 202 `{status: "saved" \| "moving"}`; 400 `original_folder_in_library` |
 | GET | `/api/models/status` | Per-model availability rows + tier + gates |
 | GET | `/api/models/hardware` | Full hardware probe report |
 | GET | `/api/comfy/status` | ComfyUI driver connection snapshot |
@@ -81,7 +88,7 @@ Without the env var the API is unauthenticated — fine for localhost, but set a
 | GET | `/api/i2v/output-preview` | Resolve where a clip would be saved for a root + prefix (config tab live preview) |
 | GET | `/api/i2v/config` | Get the `i2v` config section (fast/quality presets, durations, megapixel ladder) |
 | GET | `/api/config/browse` | List one level of the server's directories (directory picker; directories only) |
-| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `models`, `folders`, `comfy`, `storyboard`, `i2v` |
+| WS | `/ws` | Multiplexed WebSocket — channels: `scan`, `upscale`, `embedding`, `models`, `folders`, `comfy`, `storyboard`, `i2v`, `t2i`, `categories`, `taste`, `training`, `background`, `library` |
 
 ## Similarity Search Endpoints
 

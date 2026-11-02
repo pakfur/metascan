@@ -110,6 +110,16 @@ def _seed_everything(db, src="/l/a/old.png"):
             "INSERT INTO t2i_images(file_path, batch_id) VALUES (?, 'b')", (src,)
         )
         conn.execute(
+            "INSERT INTO upscale_records(file_path, original_path, original_name, "
+            "upscaled_size) VALUES (?, '/o/x.png', 'old.png', 1)",
+            (src,),
+        )
+        conn.execute(
+            "INSERT INTO upscale_candidates(source_path, file_path, kind) "
+            "VALUES (?, '/c/1.png', 'upscale_image')",
+            (src,),
+        )
+        conn.execute(
             "INSERT INTO i2v_videos(source_path, file_path) VALUES (?, '/l/vid.mp4')",
             (src,),
         )
@@ -123,6 +133,11 @@ def _seed_everything(db, src="/l/a/old.png"):
         )
         conn.execute(
             "INSERT INTO generation_jobs(preset_id, params, i2v_source_path) "
+            "VALUES (1,'{}',?)",
+            (src,),
+        )
+        conn.execute(
+            "INSERT INTO generation_jobs(preset_id, params, upscale_source_path) "
             "VALUES (1,'{}',?)",
             (src,),
         )

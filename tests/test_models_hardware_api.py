@@ -89,20 +89,4 @@ def test_status_endpoint_includes_gates(client) -> None:
     } <= body.keys()
     g = body["gates"]
     assert g["clip-medium"]["available"] is True
-    assert g["rife"]["available"] is True
     assert "reason" in g["clip-large"]
-
-
-def test_status_endpoint_gates_block_rife_on_llvmpipe(client) -> None:
-    fake = _fake_report(
-        vulkan=VulkanInfo(
-            available=True,
-            devices=["llvmpipe (LLVM 15)"],
-            has_real_device=False,
-        ),
-    )
-    with patch("backend.api.models.detect_hardware", return_value=fake):
-        r = client.get("/api/models/status")
-    body = r.json()
-    assert body["gates"]["rife"]["available"] is False
-    assert "llvmpipe" in body["gates"]["rife"]["reason"]

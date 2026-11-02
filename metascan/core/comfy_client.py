@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import os
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +105,8 @@ _TERMINAL_STATES: FrozenSet[str] = frozenset({"done", "failed", "cancelled"})
 # carries a "filename", regardless of which key it sat under.
 _OUTPUT_KEYS: Tuple[str, ...] = ("images", "gifs", "videos", "video", "audio")
 
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
 
 class ComfyError(RuntimeError):
     """A ComfyUI request failed, or was made against unusable state."""
@@ -127,7 +130,7 @@ class PresetNotFoundError(ComfyError):
 
 
 # Job sources a submission gate can hold back (Background activity, spec 6.3).
-GATE_SOURCES = ("t2i", "i2v", "storyboard")
+GATE_SOURCES = ("t2i", "i2v", "storyboard", "upscale")
 
 
 def job_source(
@@ -135,8 +138,11 @@ def job_source(
     i2v_source_path: Optional[str] = None,
     panel_id: Optional[int] = None,
     beat_id: Optional[int] = None,
+    upscale_source_path: Optional[str] = None,
 ) -> Optional[str]:
     """Which feature a job belongs to; None for any other job (never gated)."""
+    if upscale_source_path:
+        return "upscale"
     if t2i_batch_id:
         return "t2i"
     if i2v_source_path:
@@ -214,6 +220,7 @@ class ComfyClient:
         in_flight: int = 2,
         request_timeout_s: float = 30.0,
         client_id: Optional[str] = None,
+        transfer_timeout_s: float = 600.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.output_root = Path(output_root)
@@ -226,6 +233,8 @@ class ComfyClient:
         self._client_id_base = client_id
         self.client_id = client_id or str(uuid4())
         self._http = httpx.AsyncClient(timeout=request_timeout_s)
+        # Uploads and output downloads: a whole video, not an API call.
+        self.transfer_timeout_s = float(transfer_timeout_s)
         # ComfyUI's prompt_id -> our generation_jobs.id. Populated at
         # dispatch and rehydrated on reconnect (Task 7). Exists so the
         # event reader never touches SQLite: ComfyUI emits `progress`
@@ -519,6 +528,7 @@ class ComfyClient:
                 f"{self.base_url}/upload/image",
                 files=files,
                 data={"overwrite": "true"},
+                timeout=self.transfer_timeout_s,
             )
             resp.raise_for_status()
         except Exception as exc:
@@ -639,6 +649,7 @@ class ComfyClient:
         i2v_source_path: Optional[str] = None,
         output_name: Optional[str] = None,
         t2i_batch_id: Optional[str] = None,
+        upscale_source_path: Optional[str] = None,
     ) -> int:
         """Enqueue a job. Returns its id immediately; it reaches ComfyUI
         when a slot frees up.
@@ -657,6 +668,10 @@ class ComfyClient:
         belongs to (``generation_jobs.t2i_batch_id``); the T2I runner keys
         ingest and accounting on it. Like ``i2v_source_path`` it is opaque
         to the driver.
+
+        ``upscale_source_path`` tags an upscale job with the media it is for.
+        Its outputs are candidates, not library media: ``collect_outputs``
+        writes them to ``output_dir`` and never ingests them.
 
         The preset is validated up front -- both that it exists
         (PresetNotFoundError) and that `params` binds cleanly against it
@@ -688,10 +703,11 @@ class ComfyClient:
                 i2v_source_path,
                 output_name,
                 t2i_batch_id,
+                upscale_source_path,
             )
         )
         self._job_source[job_id] = job_source(
-            t2i_batch_id, i2v_source_path, panel_id, beat_id
+            t2i_batch_id, i2v_source_path, panel_id, beat_id, upscale_source_path
         )
         # Re-checked with no await before the append: the lock may have been
         # taken while the preset loaded / the row was written.
@@ -1178,6 +1194,7 @@ class ComfyClient:
                 row.get("i2v_source_path"),
                 row.get("panel_id"),
                 row.get("beat_id"),
+                row.get("upscale_source_path"),
             )
             self._queue.append(job_id)
             requeued += 1
@@ -1396,19 +1413,34 @@ class ComfyClient:
         `tests/test_comfy_client.py` monkeypatches it by name;
         `_download_output` below is an alias for new call sites.
         """
-        resp = await self._http.get(
-            f"{self.base_url}/view",
-            params={
-                "filename": entry.get("filename", ""),
-                "subfolder": entry.get("subfolder", ""),
-                "type": entry.get("type", "output"),
-            },
-        )
-        resp.raise_for_status()
         # Multi-MB files (PNGs, but now also video) onto a WSL2 /mnt
         # output root are exactly the stall class this module goes out
-        # of its way to keep off the event loop everywhere else.
-        await asyncio.to_thread(target.write_bytes, resp.content)
+        # of its way to keep off the event loop everywhere else. Streamed
+        # to a ``.part`` file, which Import ignores: an upscaled video does
+        # not fit in memory, and a half-written file must never look done.
+        partial = target.with_name(f"{target.name}.part")
+        try:
+            async with self._http.stream(
+                "GET",
+                f"{self.base_url}/view",
+                params={
+                    "filename": entry.get("filename", ""),
+                    "subfolder": entry.get("subfolder", ""),
+                    "type": entry.get("type", "output"),
+                },
+                timeout=self.transfer_timeout_s,
+            ) as resp:
+                resp.raise_for_status()
+                out = await asyncio.to_thread(partial.open, "wb")
+                try:
+                    async for chunk in resp.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
+                        await asyncio.to_thread(out.write, chunk)
+                finally:
+                    await asyncio.to_thread(out.close)
+            await asyncio.to_thread(os.replace, partial, target)
+        except BaseException:
+            await asyncio.to_thread(partial.unlink, True)
+            raise
 
     _download_output = _download_image
 
@@ -1523,7 +1555,7 @@ class ComfyClient:
                 )
                 continue
             written.append(target)
-            if self.scanner is not None:
+            if self.scanner is not None and not job.get("upscale_source_path"):
                 try:
                     await asyncio.to_thread(self.scanner.ingest_file, target)
                 except Exception as exc:

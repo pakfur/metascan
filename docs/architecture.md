@@ -10,14 +10,14 @@ Browser (Vue 3 SPA)              Backend (FastAPI)
   ├── WebSocket          ←WS───→ ├── WebSocket manager (multiplexed channels)
   └── Components                 ├── Services (async wrappers via asyncio.to_thread)
                                  ├── Core modules (scanner, DB, embeddings, hardware)
-                                 ├── Workers (subprocesses: upscale, embedding, inference)
+                                 ├── Workers (subprocesses: embedding, inference, training)
                                  └── SQLite database
 ```
 
 - **Frontend** is a thin client handling display and user interaction.
-- **Backend** handles all heavy processing: scanning, AI embeddings, upscaling, duplicate detection.
+- **Backend** handles all heavy processing: scanning, AI embeddings, duplicate detection, and driving ComfyUI for generation and upscaling.
 - **WebSocket** provides real-time progress for scans, upscaling, always-on import events, model load/download status, and folder cross-tab sync.
-- **Subprocess workers** isolate long-running AI tasks from the main server process — embedding generation (`embedding_worker.py`), live CLIP inference (`inference_worker.py`), upscaling (`upscale_worker.py`).
+- **Subprocess workers** isolate long-running AI tasks from the main server process — embedding generation (`embedding_worker.py`), live CLIP inference (`inference_worker.py`), writer training (`writer_train_worker.py`).
 - **Two CLIP processes** by design: a one-shot batch worker computes embeddings + tags for unembedded files and exits; a long-running inference worker speaks NDJSON over stdio for live text/image queries. They never share state.
 
 ## Database Structure
@@ -98,7 +98,7 @@ frontend/src/
     metadata/   # MetadataPanel, MetadataField
     viewer/     # MediaViewer, ImageViewer, VideoPlayer, SlideshowViewer
     dialogs/    # ScanDialog, DuplicateFinder,
-                #   UpscaleDialog, UpscaleQueue, ConfigDialog (+ ConfigModelsTab,
+                #   UpscaleDialog, ConfigDialog (+ ConfigModelsTab, ConfigUpscaleTab,
                 #   ConfigTrainingTab and the ModelStatusRow they share,
                 #   ConfigSimilarityTab),
                 #   NewFolderDialog, SmartFolderEditor

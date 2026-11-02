@@ -1,270 +1,251 @@
-"""Upscale queue management endpoints."""
+"""ComfyUI-driven upscaling: runs, their candidates, accept, revert, and moving
+the Original folder. Rules: ``.claude/rules/upscale.md``."""
+
+from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from backend.dependencies import get_upscale_process
-from backend.ws.manager import ws_manager
-from backend.services.gpu_lock import GPU_FREE
+from backend.config import get_upscale_config, load_app_config, save_app_config
+from backend.dependencies import get_db, get_generation_process
+from backend.services import upscale_folders
+from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
+from metascan.core.comfy_bindings import BindingError
+from metascan.core.comfy_client import GpuBusyError, PresetNotFoundError
+from metascan.core.upscale_runner import (
+    UpscaleNotFoundError,
+    UpscaleRequestError,
+    UpscaleRunRequest,
+)
+from metascan.core.upscale_store import UpscaleError
+from metascan.utils.path_utils import to_posix_path
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/upscale", tags=["upscale"])
 
-# Match worker expectations (metascan/workers/upscale_worker.py)
-_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+_runner: Any = None
+_service: Any = None
+_originals: Any = None
 
-# Lazy-loaded queue reference + background poller task
-_upscale_queue = None
-_poll_task: Optional[asyncio.Task] = None
-_POLL_INTERVAL_SECONDS = 1.0
+_STATUS_FOR_CODE = {
+    "not_found": 404,
+    "not_upscaled": 404,
+    "unsupported_output": 400,
+    "file_in_use": 409,
+    "library_busy": 409,
+    "originals_moving": 409,
+    "swap_unfinished": 503,
+}
 
 
-def _get_queue():
-    """Get or create the upscale queue singleton."""
-    global _upscale_queue
-    if _upscale_queue is None:
-        from metascan.core.upscale_queue_process import ProcessUpscaleQueue
-        from metascan.utils.app_paths import get_data_dir
-
-        queue_dir = get_data_dir() / "upscale_queue"
-        _upscale_queue = ProcessUpscaleQueue(queue_dir)
-        _attach_callbacks(_upscale_queue)
-    return _upscale_queue
+def install(runner: Any, service: Any, originals: Any) -> None:
+    """Installed by the lifespan; None clears them (tests)."""
+    global _runner, _service, _originals
+    _runner, _service, _originals = runner, service, originals
 
 
 def upscale_active() -> bool:
-    """True while an upscale task is pending or running (writer training
-    refuses to take the GPU). Never creates the queue."""
-    queue = _upscale_queue
-    return bool(queue is not None and queue.has_active_tasks())
+    """A run is going (writer training refuses the GPU)."""
+    return bool(_runner is not None and _runner.active_batches())
 
 
-def _task_payload(task: Any) -> Dict[str, Any]:
-    """Convert an UpscaleTask to the JSON payload the frontend expects."""
+def _require_runner() -> Any:
+    if _runner is None:
+        raise HTTPException(status_code=503, detail="upscaling is not running")
+    return _runner
+
+
+def _require_service() -> Any:
+    if _service is None:
+        raise HTTPException(status_code=503, detail="upscaling is not running")
+    return _service
+
+
+def _http_error(exc: UpscaleError) -> HTTPException:
+    return HTTPException(
+        status_code=_STATUS_FOR_CODE.get(exc.code, 400),
+        detail={"code": exc.code, "message": str(exc)},
+    )
+
+
+def _workflow(row: Dict[str, Any]) -> Dict[str, Any]:
+    """What the dialog offers for a preset, read from its stored bindings."""
+    bindings = json.loads(row["bindings"])
     return {
-        "task_id": task.id,
-        "file_path": task.file_path,
-        "file_name": Path(task.file_path).name,
-        "output_path": task.output_path,
-        "file_type": task.file_type,
-        "scale": task.scale,
-        "model": task.model,
-        "face_enhance": task.face_enhance,
-        "interpolate_frames": task.interpolate_frames,
-        "interpolation_factor": task.interpolation_factor,
-        "fps_override": task.fps_override,
-        "replace_original": task.replace_original,
-        "status": task.status.value,
-        "progress": task.progress,
-        "error": task.error_message,
-        "created_at": task.created_at,
-        "last_updated": task.last_updated,
+        "id": row["id"],
+        "name": row["name"],
+        "has_seed": bool(bindings.get("seed")),
+        "has_prompt": bool(bindings.get("positive")),
+        "has_scale": bool(bindings.get("scale")),
     }
 
 
-def _attach_callbacks(queue) -> None:
-    """Wire queue callbacks to WebSocket broadcasts on the 'upscale' channel."""
-
-    def on_added(task):
-        ws_manager.broadcast_sync("upscale", "task_added", _task_payload(task))
-
-    def on_updated(task):
-        ws_manager.broadcast_sync("upscale", "task_updated", _task_payload(task))
-
-    def on_removed(task_id: str):
-        ws_manager.broadcast_sync("upscale", "task_removed", {"task_id": task_id})
-
-    queue.on_task_added = on_added
-    queue.on_task_updated = on_updated
-    queue.on_task_removed = on_removed
+def _config_payload() -> Dict[str, Any]:
+    config = load_app_config()
+    presets = get_db().list_workflow_presets()
+    return {
+        **get_upscale_config(config),
+        "resolved_original_root": str(upscale_folders.original_root(config)),
+        "image_workflows": [
+            _workflow(p) for p in presets if p["kind"] == "upscale_image"
+        ],
+        "video_workflows": [
+            _workflow(p) for p in presets if p["kind"] == "upscale_video"
+        ],
+    }
 
 
-def _detect_file_type(file_path: str) -> str:
-    """Return 'video' or 'image' based on extension."""
-    return "video" if Path(file_path).suffix.lower() in _VIDEO_EXTENSIONS else "image"
+@router.get("/config")
+def get_config() -> Dict[str, Any]:
+    return _config_payload()
 
 
-async def _poll_loop() -> None:
-    """Periodically drive the queue: spawn pending workers, gather progress."""
-    queue = _get_queue()
-    logger.info("Upscale poller started")
-    try:
-        while True:
-            try:
-                await asyncio.to_thread(queue.poll_updates)
-            except Exception as e:  # don't let one failure kill the loop
-                logger.exception(f"Upscale poll_updates failed: {e}")
-            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
-    except asyncio.CancelledError:
-        logger.info("Upscale poller cancelled")
-        raise
+@router.get("/state")
+def get_state(path: str = Query(...)) -> Dict[str, Any]:
+    state: Dict[str, Any] = _require_service().state(path)
+    return state
 
 
-def init_upscale_queue() -> None:
-    """Startup hook: initialize queue singleton + start the poll loop."""
-    global _poll_task
-    _get_queue()  # Creates queue and registers callbacks
-    if _poll_task is None or _poll_task.done():
-        _poll_task = asyncio.create_task(_poll_loop())
+class RunRequest(BaseModel):
+    source_path: str
+    preset_id: int
+    count: int = 1
+    seed: Optional[int] = None
+    seed_policy: Literal["fixed", "increment", "decrement", "random"] = "random"
+    prompt: Optional[str] = None
+    scale: Optional[float] = None
 
 
-async def shutdown_upscale_queue() -> None:
-    """Shutdown hook: cancel the poller and terminate any workers."""
-    global _poll_task
-    if _poll_task is not None:
-        _poll_task.cancel()
-        try:
-            await _poll_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        _poll_task = None
-    if _upscale_queue is not None:
-        try:
-            await asyncio.to_thread(_upscale_queue.shutdown)
-        except Exception as e:
-            logger.warning(f"Error shutting down upscale queue: {e}")
-
-
-class UpscaleTaskRequest(BaseModel):
-    file_path: str
-    scale_factor: int = 2
-    model_type: str = "general"
-    face_enhance: bool = False
-    interpolate_frames: bool = False
-    fps_multiplier: int = 2
-    custom_fps: Optional[float] = None
-    replace_original: bool = False
-    preserve_metadata: bool = True
-
-
-class UpscaleSubmitRequest(BaseModel):
-    tasks: List[UpscaleTaskRequest]
-    concurrent_workers: int = 1
-
-
-async def pause_upscale_queue() -> int:
-    """Pause all processing: the running file is killed and restarts from 0.
-    The route and the Upscaling process share this."""
-    count: int = await asyncio.to_thread(_get_queue().pause_queue)
-    return count
-
-
-async def resume_upscale_queue() -> int:
-    """Resume paused tasks (starts the workers)."""
-    count: int = await asyncio.to_thread(_get_queue().resume_queue)
-    return count
-
-
-@router.post("", dependencies=GPU_FREE)
-async def submit_upscale(body: UpscaleSubmitRequest):
-    """Add upscale tasks to the queue and start processing."""
-    queue = _get_queue()
-    process = get_upscale_process()
-    if process is not None:
-        await process.owner_task_adding()  # an owner add clears a stop
-
-    # Update worker concurrency (clamped to [1,4] inside the queue)
-    queue.max_workers = max(1, min(int(body.concurrent_workers), 4))
-
-    task_ids: List[str] = []
-    for task in body.tasks:
-        file_type = _detect_file_type(task.file_path)
-        task_id = await asyncio.to_thread(
-            queue.add_task,
-            task.file_path,
-            file_type,
-            task.scale_factor,
-            task.replace_original,
-            task.face_enhance,
-            task.interpolate_frames,
-            task.fps_multiplier,
-            task.model_type,
-            task.custom_fps,
-            task.preserve_metadata,
+@router.post("/runs", dependencies=GPU_FREE)
+async def start_run(body: RunRequest) -> Dict[str, Any]:
+    runner = _require_runner()
+    config = await asyncio.to_thread(load_app_config)
+    cfg = get_upscale_config(config)
+    if not 1 <= body.count <= cfg["max_count"]:
+        raise HTTPException(
+            status_code=400, detail=f"Count must be 1 to {cfg['max_count']}"
         )
-        task_ids.append(task_id)
-
-    if process is not None and process.gated:
-        # Owner-paused: the new tasks queue paused; nothing starts.
-        await process.task_added()
-        return {"task_ids": task_ids, "status": "queued"}
-    if process is not None:
-        process.poke()
-
-    # Kick off any pending workers immediately; the poller also does this on
-    # its next tick, but this makes the first worker start without delay.
+    conflict = await asyncio.to_thread(upscale_folders.staging_conflict, config)
+    if conflict is not None:
+        raise HTTPException(status_code=409, detail=conflict)
+    request = UpscaleRunRequest(
+        source_path=to_posix_path(body.source_path),
+        preset_id=body.preset_id,
+        count=body.count,
+        seed=body.seed,
+        seed_policy=body.seed_policy,
+        prompt=body.prompt,
+        scale=body.scale,
+    )
     try:
-        await asyncio.to_thread(queue.start_processing)
-    except Exception as e:
-        logger.exception(f"Failed to start upscale processing: {e}")
-
-    return {"task_ids": task_ids, "status": "queued"}
-
-
-@router.get("/queue")
-async def get_queue():
-    """List all upscale tasks with their status."""
-    queue = _get_queue()
-    tasks = await asyncio.to_thread(queue.get_all_tasks)
-    return {"tasks": [_task_payload(t) for t in tasks]}
-
-
-@router.patch("/{task_id}")
-async def update_task(task_id: str, body: dict):
-    """Update a task (cancel/pause/resume)."""
-    queue = _get_queue()
-    action = body.get("action")
-    if action == "cancel":
-        ok = await asyncio.to_thread(queue.cancel_task, task_id)
-        if not ok:
-            raise HTTPException(
-                status_code=404, detail=f"Task {task_id} not found or already finished"
-            )
-        return {"status": "cancelled"}
-    raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
-
-
-@router.delete("/{task_id}")
-async def remove_task(task_id: str):
-    """Remove a task from the queue."""
-    queue = _get_queue()
-    ok = await asyncio.to_thread(queue.remove_task, task_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    return {"status": "removed"}
-
-
-@router.post("/pause-all")
-async def pause_all():
-    """Pause all processing."""
-    process = get_upscale_process()
+        started = await runner.start_run(request, window=cfg["window"])
+    except (UpscaleRequestError, BindingError, PresetNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GpuBusyError as exc:
+        raise gpu_busy_http_error() from exc
+    process = get_generation_process("upscale")
     if process is not None:
-        count = await process.owner_pause()
-    else:
-        count = await pause_upscale_queue()
-    return {"status": "paused", "count": count}
+        # The owner started a run: that clears a stop; the panel updates now.
+        await process.owner_batch_starting()
+        process.poke()
+    return {
+        "batch_id": started.batch_id,
+        "total": started.total,
+        "next_seed": started.next_seed,
+    }
 
 
-@router.post("/resume-all", dependencies=GPU_FREE)
-async def resume_all():
-    """Resume processing."""
-    process = get_upscale_process()
-    if process is not None:
-        count = await process.owner_resume()
-    else:
-        count = await resume_upscale_queue()
-    return {"status": "resumed", "count": count}
+@router.get("/runs")
+def list_runs() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = _require_runner().active_batches()
+    return rows
 
 
-@router.post("/clear-completed")
-async def clear_completed():
-    """Clear all completed tasks from the queue."""
-    queue = _get_queue()
-    await asyncio.to_thread(queue.clear_completed)
-    return {"status": "cleared"}
+@router.post("/runs/{batch_id}/cancel")
+async def cancel_run(batch_id: str) -> Dict[str, Any]:
+    try:
+        cancelled = await _require_runner().cancel_batch(batch_id)
+    except UpscaleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="No such run") from exc
+    return {"cancelled": cancelled}
+
+
+@router.delete("/candidates/{candidate_id}")
+async def discard_candidate(candidate_id: int) -> Dict[str, Any]:
+    try:
+        await _require_service().discard(candidate_id)
+    except UpscaleError as exc:
+        raise _http_error(exc) from exc
+    return {"status": "deleted"}
+
+
+@router.post("/candidates/{candidate_id}/accept")
+async def accept_candidate(candidate_id: int) -> Dict[str, Any]:
+    try:
+        path = await _require_service().accept(candidate_id)
+    except UpscaleError as exc:
+        raise _http_error(exc) from exc
+    return {"file_path": path}
+
+
+class RevertRequest(BaseModel):
+    file_path: str
+
+
+@router.post("/revert")
+async def revert(body: RevertRequest) -> Dict[str, Any]:
+    try:
+        path = await _require_service().revert(body.file_path)
+    except UpscaleError as exc:
+        raise _http_error(exc) from exc
+    return {"file_path": path}
+
+
+class OriginalFolderRequest(BaseModel):
+    path: str  # "" = the default under the data folder
+
+
+def _save_original_root(root: str) -> None:
+    config = load_app_config()
+    config["upscale"] = {**(config.get("upscale") or {}), "original_root": root}
+    save_app_config(config)
+
+
+@router.post("/original-folder", status_code=202)
+async def set_original_folder(body: OriginalFolderRequest) -> Dict[str, Any]:
+    """Change the Original folder. With originals present the files move first
+    (Moving originals panel) and the setting changes when they have arrived."""
+    wanted = body.path.strip()
+    config = await asyncio.to_thread(load_app_config)
+    merged = {
+        **config,
+        "upscale": {**(config.get("upscale") or {}), "original_root": wanted},
+    }
+    conflict = await asyncio.to_thread(upscale_folders.original_folder_conflict, merged)
+    if conflict is not None:
+        raise HTTPException(status_code=400, detail=conflict)
+    records = await asyncio.to_thread(get_db().list_upscale_records)
+    target = upscale_folders.original_root(merged)
+    if not records or target == upscale_folders.original_root(config):
+        await asyncio.to_thread(_save_original_root, wanted)
+        return {"status": "saved"}
+    if _originals is None:
+        raise HTTPException(status_code=503, detail="upscaling is not running")
+    if _originals.active():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "originals_moving",
+                "message": "The Original folder is already being moved.",
+            },
+        )
+    await asyncio.to_thread(Path(target).mkdir, parents=True, exist_ok=True)
+    await _originals.begin(str(target))
+    return {"status": "moving"}

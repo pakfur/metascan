@@ -817,6 +817,7 @@ async def test_a_new_check_is_one_class(db, tmp_path):
         "new files",
         "changed files",
         "missing derived data",
+        "upscale leftovers",
         "finish",
     ]
     ran = []

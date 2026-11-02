@@ -9,7 +9,7 @@
 #   --recreate-venv   Delete and rebuild venv/ even if it looks usable
 #   --no-dev          Skip requirements-dev.txt, flake8 and the editable install
 #   --skip-frontend   Skip `npm install` in frontend/
-#   --skip-models     Skip setup_models.py (NLTK data + AI upscaling models)
+#   --skip-models     Skip setup_models.py (NLTK data)
 #   -h, --help        Show this help
 
 set -Eeuo pipefail
@@ -147,8 +147,7 @@ PIP="$VENV_PY -m pip"
 # ---------------------------------------------------------------------------
 echo
 echo "Upgrading pip, setuptools and wheel..."
-# setuptools/wheel matter: several pinned deps (basicsr, realesrgan) still ship
-# sdists that need a working legacy build backend.
+# setuptools/wheel matter for any pinned dep that still ships an sdist.
 $PIP install --upgrade pip setuptools wheel
 
 echo
@@ -179,9 +178,9 @@ mkdir -p data/thumbnails
 # ---------------------------------------------------------------------------
 if [ "$DO_MODELS" -eq 1 ]; then
     echo
-    echo "Setting up NLTK data and AI upscaling models..."
+    echo "Setting up NLTK data..."
     if ! "$VENV_PY" setup_models.py; then
-        warn "setup_models.py failed — NLTK data and/or AI models are missing. Re-run '$VENV_PY setup_models.py' once network access is available."
+        warn "setup_models.py failed — NLTK data is missing. Re-run '$VENV_PY setup_models.py' once network access is available."
     fi
 else
     echo
