@@ -31,53 +31,32 @@ Content search moved from a separate results view into the left filter panel, wh
 - **Relevance sort** — auto-selected when a search runs, restoring your previous sort when cleared
 - **Find Similar** (right-click a thumbnail) uses the same filter model, with its own 0–1 threshold scale
 
-# Latest Release v0.3.0
+# Latest Release v0.14
 
-### Web UI Migration
+## Changes since v0.3.0
 
-Metascan now features a modern Vue.js web frontend with a FastAPI backend server, enabling remote access from any platform via a browser while keeping heavy AI/GPU processing on a powerful PC.
+**New features**
+- **Generation through ComfyUI:** connect to ComfyUI to create text-to-image and image-to-video batches, with reusable workflow presets.
+- **Storyboards:** plan shots and beats, then generate them in a dedicated workspace.
+- **Upscaling through ComfyUI:** ready-made SeedVR2 and Remacri workflows, with originals kept so you can compare or revert.
+- **Taste learning:** ✓ pass / ✗ fail grades, categories and a personal score that learns what you like.
+- **Prompt-writer training:** train LoRA adapters from your grades and edits, then compare them with blind scorecards.
+- **AI tagging and chat:** Qwen vision-model tagging, plus a chat window that replaces the Prompt Playground.
 
-- **Vue 3 + TypeScript frontend** served by the FastAPI backend
-- **FastAPI backend** with REST API (35+ endpoints) and WebSocket for real-time updates
-- **Remote access** from Mac, Windows, Linux, or any device with a browser
-- **Three-panel responsive layout** with resizable splitter (filters, thumbnails, metadata)
-- **Virtual-scrolling thumbnail grid** for smooth browsing of large collections (12,000+ items)
-- **Full-screen media viewer** with image zoom/pan, video player (speed control, frame stepping, volume)
-- **Slideshow** with ordered/random modes, fade transitions, configurable timing
-- **Multi-phase Full clean & rescan dialog** (Config → Maintenance) with real-time WebSocket progress (file-by-file updates)
-- **CLIP-powered content search** (text-to-image) and FAISS similarity search with threshold slider
-- **Duplicate finder** with pHash grouping, thumbnail previews, and batch deletion
-- **ComfyUI upscaling** of images and videos with your own workflows: compare results, accept one, upscale again from the original, or revert
-- **Similarity settings** tab in Configuration with CLIP model/device selection, embedding index build with live progress
-- **Configuration dialog** for directory management
-- **Always-on import**: files added to the scan folders appear in the grid on their own
-- **Right-click context menu** on thumbnails (Open, Find Similar, Upscale, Delete)
-- **Keyboard shortcuts** for fast navigation (Esc, F5, Ctrl+D, arrows, Space, etc.)
-- **Dark/light mode** via system `prefers-color-scheme`
-- **API key authentication** for secure remote access
+**Library and everyday use**
+- **Always-on import:** new files appear on their own, moved files keep their ratings, and Windows gets real-time file detection.
+- **Background activity panel:** see, pause and stop background work in one place. Library hygiene now runs when the app is idle.
+- **Library transfer:** export ratings, categories, folders and saved prompts, and import them on another machine.
+- **Mobile and viewing:** a responsive mobile layout and a slideshow.
 
-### Previous Releases
+**Windows**
+- **Native support:** Metascan now runs natively on Windows, with a guide for moving from WSL2.
+- **Setup wizard:** a new installer handles prerequisites, GPU setup, a tray launcher, updates and uninstall.
 
-<details>
-<summary>v0.2.5 - Slideshow, Volume Control, Frame Stepping</summary>
-
-- Slideshow feature with ordered/random modes and transition effects
-- Volume slider with real-time adjustment (0-100%)
-- Playback speed presets (0.25x-2x) with per-file persistence
-- Frame-by-frame navigation (comma/period keys)
-- Keyboard shortcuts help overlay (H or ?)
-</details>
-
-<details>
-<summary>v0.2.0 - Upscale Queue, Multi-worker, Frame Interpolation</summary>
-
-- Queue pause/resume for batch processing control
-- 1-4 concurrent upscale workers
-- RIFE frame interpolation for video upscaling
-- Process-safe file locking, corruption detection and recovery
-- Metadata preservation after upscaling
-- Fixed race conditions, FFmpeg deprecation warnings
-</details>
+**Changes when upgrading**
+- **Ratings:** favorites and rejects are migrated automatically to ★ and ✓ / ✗ grades, and the database is backed up first.
+- **Import button:** it's gone, and Full clean & rescan has moved to Config → Maintenance.
+- **Upscaling:** ComfyUI is now required, as Metascan no longer includes its own upscaler.
 
 ## Overview
 
@@ -105,48 +84,6 @@ The library organizes itself two ways. Static folders are manually curated colle
   <img src="/assets/smartfolder-create.jpg" alt="SmartFolder Creation" width="256">
 </div>
 <p align="left"><em>Complete Model Management and Smart Folders</em></p>
-
-## Quick Start
-
-> **On Windows and just want to use it?** Run the [Windows installer](docs/windows-installer.md): no terminal, and it installs what Metascan needs.
->
-> **First time on this machine?** Start with the [First-Time Setup guide](docs/first_time_setup.md) — it walks through Python 3.11, Node.js, FFmpeg, virtualenv creation, and dependency installation per platform. The steps below assume that's already done.
-
-### Running the Application
-
-1. **Start the backend server:**
-   ```bash
-   source venv/bin/activate
-   python run_server.py
-   ```
-   The API server starts at `http://localhost:8700` with auto-generated docs at `/docs`.
-
-2. **Start the frontend dev server:**
-   ```bash
-   cd frontend
-   npm run dev
-   ```
-   Open `http://localhost:5173` in your browser.
-
-3. **Add directories:** Click **Config** in the toolbar to add folders containing your AI-generated media.
-
-4. **Import is automatic:** files in those folders are imported and indexed on their own; watch it in the activity grid.
-
-5. **Browse and filter:** Use the left panel filters, double-click thumbnails to view full-size, right-click for context menu actions.
-
-### Remote Access
-
-To access Metascan from another device on your network:
-
-```bash
-# Start the backend (binds to all interfaces by default)
-python run_server.py
-
-# Optionally set an API key for security
-METASCAN_API_KEY=your-secret-key python run_server.py
-```
-
-Then open `http://<server-ip>:8700` from any browser. For the dev frontend, run `cd frontend && npm run dev -- --host` and access port 5173.
 
 ## Documentation
 
