@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
-import { useDebounceFn, useEventListener } from '@vueuse/core'
+import { onClickOutside, useDebounceFn, useEventListener } from '@vueuse/core'
 import {
   DEFAULT_MAX_BATCH_SIZE,
   DEFAULT_MAX_COUNT_PER_BATCH,
@@ -590,6 +590,29 @@ function switchVariant(delta: number) {
   if (hasNegative.value) form.negative = next.negative
 }
 
+// ---- the token help ----------------------------------------------------------------------------------
+// The "?" beside the Caption title: what each __TOKEN__ becomes (docs/t2i.md,
+// Tokens). The names are the shipped characters.yml defaults.
+const tokenHelpOpen = ref(false)
+const tokenHelpAnchor = ref<HTMLElement | null>(null)
+onClickOutside(tokenHelpAnchor, () => {
+  tokenHelpOpen.value = false
+})
+const TOKEN_HELP: { token: string; meaning: string }[] = [
+  { token: '__ALICE__', meaning: 'Replaced with a random description of the first female subject' },
+  { token: '__BELLA__', meaning: 'The second female subject' },
+  { token: '__CLARA__', meaning: 'The third female subject' },
+  { token: '__DIANNA__', meaning: 'The fourth female subject' },
+  { token: '__EMMA__', meaning: 'The fifth female subject' },
+  { token: '__ADAM__', meaning: 'Replaced with a random description of the first male subject' },
+  { token: '__BOB__', meaning: 'The second male subject' },
+  { token: '__HAIR__', meaning: "The hair of the character it belongs to (her / his, else the nearest name before it)" },
+  { token: '__BREASTS__', meaning: 'The breasts of the female character it belongs to' },
+  { token: '__VAGINA__', meaning: 'The vagina of the female character it belongs to' },
+  { token: '__PENIS__', meaning: 'The penis of the male character it belongs to' },
+  { token: '__ANYTHING__', meaning: 'A random line from anything.txt (one value for the whole caption, picked by the seed); the plain word if there is no such list' },
+]
+
 // ---- the caption filter ----------------------------------------------------------------------------
 const filterOpen = ref(false)
 const filterAnchor = ref<HTMLElement | null>(null)
@@ -1015,7 +1038,43 @@ onBeforeUnmount(() => {
           <fieldset class="t2i-form" :disabled="!ready">
             <section class="sec">
               <div class="sec-head">
-                <label class="sec-title" for="t2i-caption">Caption</label>
+                <span ref="tokenHelpAnchor" class="title-help">
+                  <label class="sec-title" for="t2i-caption">Caption</label>
+                  <button
+                    type="button"
+                    class="help-btn"
+                    title="Which tokens are filled in"
+                    aria-label="Caption tokens help"
+                    :aria-expanded="tokenHelpOpen"
+                    @click="tokenHelpOpen = !tokenHelpOpen"
+                  >?</button>
+                  <div
+                    v-if="tokenHelpOpen"
+                    class="token-help"
+                    role="dialog"
+                    aria-label="Caption tokens"
+                    @keydown.esc.stop="tokenHelpOpen = false"
+                  >
+                    <header class="token-help-head">
+                      <strong>Caption tokens</strong>
+                      <button type="button" class="icon-btn small" title="Close" aria-label="Close tokens help" @click="tokenHelpOpen = false">✕</button>
+                    </header>
+                    <p class="token-help-note">
+                      A token is a name in capitals between double underscores. Each is expanded before the prompt is written;
+                      the same caption always gets the same characters. Open <em>Resolved caption</em> to see the result.
+                    </p>
+                    <dl class="token-help-list">
+                      <template v-for="t in TOKEN_HELP" :key="t.token">
+                        <dt><code>{{ t.token }}</code></dt>
+                        <dd>{{ t.meaning }}</dd>
+                      </template>
+                    </dl>
+                    <p class="token-help-note">
+                      A character's first mention gets the full description; later mentions get a short handle
+                      (“the auburn-haired woman”). Names and lists live in <code>data/t2i_captions/</code>.
+                    </p>
+                  </div>
+                </span>
                 <div class="source">
                   <div class="seg" role="radiogroup" aria-label="Caption source">
                     <label class="seg-opt">
@@ -1507,6 +1566,81 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
   letter-spacing: 0.4px;
   color: var(--text-color-secondary);
+}
+
+.title-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.help-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--surface-border);
+  border-radius: 50%;
+  background: none;
+  color: var(--text-color-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  cursor: pointer;
+}
+
+.help-btn:hover,
+.help-btn[aria-expanded='true'] {
+  color: var(--text-color);
+  border-color: var(--text-color-secondary);
+}
+
+.token-help {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: min(440px, 80vw);
+  padding: 10px 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: 8px;
+  background: var(--surface-overlay, var(--surface-card));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+  color: var(--text-color);
+}
+
+.token-help-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.token-help-note {
+  margin: 0 0 8px;
+  color: var(--text-color-secondary);
+  line-height: 1.4;
+}
+
+.token-help-note:last-child {
+  margin: 8px 0 0;
+}
+
+.token-help-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 10px;
+  margin: 0;
+}
+
+.token-help-list dt {
+  white-space: nowrap;
+}
+
+.token-help-list dd {
+  margin: 0;
+  line-height: 1.35;
 }
 
 .sec-head {
