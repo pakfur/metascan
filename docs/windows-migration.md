@@ -106,9 +106,6 @@ the model you use:
 venv\Scripts\python.exe setup_models.py --vlm qwen3vl-8b
 ```
 
-Then add the CUDA runtime DLLs, or `llama-server` cannot see your GPU: see
-[step 6 of the setup guide](first_time_setup.md#optional-vlm-tagging-and-prompt-writing).
-
 `run.bat` builds the UI on first start.
 
 ## 7. First start

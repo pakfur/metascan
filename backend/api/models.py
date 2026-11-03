@@ -33,7 +33,7 @@ from metascan.core.hardware import (
     report_to_dict,
     writer_training_gate,
 )
-from metascan.utils.app_paths import get_data_dir
+from metascan.utils.app_paths import get_data_dir, get_nltk_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ _NLTK_MODELS: List[Dict[str, Any]] = [
 
 
 def _nltk_data_dir() -> Path:
-    return Path.home() / ".metascan" / "nltk_data"
+    return get_nltk_data_dir()
 
 
 # ----------------------------------------------------------------------

@@ -40,6 +40,11 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+def get_nltk_data_dir() -> Path:
+    """The one NLTK data folder: setup, the Models tab and the tokenizer."""
+    return Path.home() / ".metascan" / "nltk_data"
+
+
 def get_config_path() -> Path:
     """Get the path to the config file.
 

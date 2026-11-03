@@ -108,6 +108,8 @@ The library organizes itself two ways. Static folders are manually curated colle
 
 ## Quick Start
 
+> **On Windows and just want to use it?** Run the [Windows installer](docs/windows-installer.md): no terminal, and it installs what Metascan needs.
+>
 > **First time on this machine?** Start with the [First-Time Setup guide](docs/first_time_setup.md) — it walks through Python 3.11, Node.js, FFmpeg, virtualenv creation, and dependency installation per platform. The steps below assume that's already done.
 
 ### Running the Application
@@ -163,6 +165,7 @@ Detailed documentation lives in [`docs/`](docs/):
 - **[Text to Image](docs/t2i.md)** — the Text to Image dialog: caption sources, character and wildcard files, prompt styles per model, server-side batches, and workflow requirements
 - **[API Reference](docs/api-reference.md)** — REST endpoints, WebSocket envelope, error shapes
 - **[Architecture](docs/architecture.md)** — client–server layout, database schema, backend/frontend layouts, key design decisions
+- **[Windows Installer](docs/windows-installer.md)** — install, update and remove Metascan on Windows with a setup wizard, and how to build the installer
 - **[Moving to Windows](docs/windows-migration.md)** — move a WSL2 install, library included, to native Windows for real-time file detection
 - **[Prompt-Writer Training](docs/writer-training.md)** — train a LoRA adapter for the prompt writer from your ✓ / ✗ grades and edits: Windows/WSL2 setup, base weights, the GPU lock, serving, and the blind scorecard
 - **[Hardware Detection](docs/hardware-detection.md)** — what gets probed, tier classification, per-model gates, auto-warnings

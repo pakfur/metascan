@@ -7,7 +7,19 @@ shapes so a future user-installed setup_models will compose URLs correctly.
 
 import pytest
 
+from types import SimpleNamespace
+
+from metascan.utils import llama_server
 from setup_models import resolve_qwen3vl_targets, resolve_vlm_targets
+
+
+_real_runtime_asset = llama_server.cuda_runtime_asset
+
+
+@pytest.fixture(autouse=True)
+def no_cuda_runtime(monkeypatch):
+    """The host's GPU must not change the target list."""
+    monkeypatch.setattr(llama_server, "cuda_runtime_asset", lambda report: None)
 
 
 def test_resolve_targets_for_4b():
@@ -70,3 +82,22 @@ def test_resolve_targets_honors_legacy_qwen3vl_repos_key(tmp_path, monkeypatch):
         if t.filename and t.filename.endswith(".gguf") and "mmproj" not in t.filename
     )
     assert gguf.repo == "me/legacy-remix"
+
+
+def test_a_runtime_archive_is_one_more_target_beside_the_binary(monkeypatch):
+    monkeypatch.setattr(
+        llama_server, "cuda_runtime_asset", lambda report: "cudart-test.zip"
+    )
+    targets = resolve_vlm_targets("qwen3vl-4b")
+    assert len(targets) == 4
+    runtime = targets[-1]
+    assert runtime.url.endswith("/cudart-test.zip")
+    assert runtime.dest == llama_server.binary_path().parent / "cudart64_12.dll"
+
+
+def test_only_windows_cuda_needs_the_runtime_archive():
+    gpu = object()
+    windows = SimpleNamespace(os="Windows", cuda=gpu)
+    assert "12.4" in _real_runtime_asset(windows)
+    assert _real_runtime_asset(SimpleNamespace(os="Windows", cuda=None)) is None
+    assert _real_runtime_asset(SimpleNamespace(os="Linux", cuda=gpu)) is None

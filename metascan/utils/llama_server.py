@@ -16,6 +16,7 @@ CUDA acceleration on Linux must build llama.cpp from source.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from metascan.core.hardware import HardwareReport, detect_hardware
 from metascan.utils.app_paths import get_data_dir
@@ -28,6 +29,10 @@ from metascan.utils.app_paths import get_data_dir
 # support. From this release line Linux/macOS assets are ``.tar.gz`` and
 # Windows stays ``.zip`` — ``setup_models._ensure_target`` handles both.
 LLAMA_CPP_RELEASE = "b10456"
+
+# One of the DLLs in the Windows CUDA runtime archive, so a downloader can tell
+# whether the archive is already unpacked next to llama-server.exe.
+CUDA_RUNTIME_DLL = "cudart64_12.dll"
 
 
 def binary_filename() -> str:
@@ -91,6 +96,18 @@ def pick_release_asset(report: HardwareReport) -> str:
     return f"llama-{rel}-bin-ubuntu-x64.tar.gz"
 
 
+def cuda_runtime_asset(report: HardwareReport) -> Optional[str]:
+    """The archive of CUDA DLLs a Windows CUDA build needs beside it, or None.
+
+    Upstream ships them apart from the binary, and without them llama-server
+    starts but lists no GPU. The name carries no build number, and its CUDA
+    version must stay the one ``pick_release_asset`` chose.
+    """
+    if report.os == "Windows" and report.cuda is not None:
+        return "cudart-llama-bin-win-cuda-12.4-x64.zip"
+    return None
+
+
 def release_url(asset: str) -> str:
     """GitHub releases download URL for the given asset filename."""
     return (
@@ -102,6 +119,8 @@ def release_url(asset: str) -> str:
 __all__ = [
     "binary_filename",
     "binary_path",
+    "CUDA_RUNTIME_DLL",
+    "cuda_runtime_asset",
     "pick_release_asset",
     "release_url",
     "LLAMA_CPP_RELEASE",

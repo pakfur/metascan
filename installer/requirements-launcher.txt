@@ -1,0 +1,2 @@
+# The Windows tray launcher (installer/launcher.py), on top of requirements.txt
+pystray==0.19.5

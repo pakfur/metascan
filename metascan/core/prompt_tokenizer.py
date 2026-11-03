@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import sys
 
+from metascan.utils.app_paths import get_nltk_data_dir
 from metascan.utils.startup_profiler import log_startup
 
 log_startup("prompt_tokenizer.py: Module loading started")
@@ -32,12 +33,10 @@ def _ensure_nltk_initialized() -> Set[str]:
 
     log_startup("prompt_tokenizer.py: NLTK import complete")
 
-    # Setup NLTK data path for bundled application
-    if getattr(sys, "frozen", False):
-        # In bundled app, use user directory for NLTK data
-        nltk_data_dir = Path.home() / ".metascan" / "nltk_data"
-        nltk_data_dir.mkdir(parents=True, exist_ok=True)
-        nltk.data.path.insert(0, str(nltk_data_dir))
+    # The folder setup_models.py and the Models tab download into
+    nltk_data_dir = get_nltk_data_dir()
+    nltk_data_dir.mkdir(parents=True, exist_ok=True)
+    nltk.data.path.insert(0, str(nltk_data_dir))
 
     log_startup("prompt_tokenizer.py: Checking NLTK stopwords data...")
     try:
@@ -45,7 +44,7 @@ def _ensure_nltk_initialized() -> Set[str]:
     except LookupError:
         try:
             log_startup("prompt_tokenizer.py: Downloading NLTK stopwords...")
-            nltk.download("stopwords", quiet=True)
+            nltk.download("stopwords", download_dir=str(nltk_data_dir), quiet=True)
         except Exception:
             # If download fails in bundled app, use empty set
             logger.warning("Could not download NLTK stopwords, using empty set")

@@ -4,7 +4,9 @@
 
 This guide walks you through getting Metascan running from a clean machine, end to end. If you already have Python 3.11, Node.js 20.19+ (or 22.12+), FFmpeg, ExifTool and Git installed, you can skip ahead to [Clone and bootstrap](#3-clone-and-bootstrap).
 
-> **On Windows, read every "Windows" block in each step.** Several steps differ there, and the plain commands install a CPU-only torch and a server that cannot run CLIP search. The Windows steps were last run on 2026-11-01 on Windows 11 with an RTX 5090. [What that run did not cover](#windows-what-is-tested) and [what the installer rebuild must fix](#windows-installer-rebuild-notes) are at the end.
+> **On Windows, the [Windows installer](windows-installer.md) does all of this for you.** This guide is for working on Metascan from a clone.
+>
+> **On Windows, read every "Windows" block in each step.** Several steps differ there, and the plain commands install a CPU-only torch and a server that cannot run CLIP search. The Windows steps were last run on 2026-11-01 on Windows 11 with an RTX 5090. [What that run did not cover](#windows-what-is-tested) and [what the installer rebuild left open](#windows-installer-rebuild-notes) are at the end.
 
 ## Why Python 3.11?
 
@@ -102,7 +104,7 @@ Run everything on Windows in **PowerShell** unless a step says otherwise. If you
    winget install --id Gyan.FFmpeg -e
    winget install --id OliverBetz.ExifTool -e   # shows an administrator prompt
    ```
-3. **NVIDIA driver.** Install a current driver if you have an NVIDIA card. You need its CUDA version in step 5. You do **not** need the CUDA Toolkit.
+3. **NVIDIA driver.** Install a current driver if you have an NVIDIA card. You need its CUDA version in step 5 (`nvidia-smi` calls it `CUDA UMD Version` from driver 610). You do **not** need the CUDA Toolkit.
 4. **Open a new terminal.** Tools installed above are not on the PATH of a terminal, or a server, that was already open. A server started from an old terminal logs `Failed to extract video metadata ... [WinError 2]` for every video because it cannot find `exiftool`.
 5. **Allow the activation script**, if `Get-ExecutionPolicy` says `Restricted`:
    ```powershell
@@ -238,7 +240,7 @@ With the virtualenv activated:
 
 **Windows with an NVIDIA GPU: install torch first.** The torch on PyPI is CPU-only on Windows, and `pip install` exits cleanly with it. Pick the index from the CUDA version `nvidia-smi` shows:
 
-| `nvidia-smi` CUDA version | Index | Newest torch (2026-11-01) |
+| `nvidia-smi` CUDA version (keep in step with `installer/provision.ps1`) | Index | Newest torch (2026-11-01) |
 |---|---|---|
 | 13.2 or higher | `cu132` | 2.15.0 |
 | 13.0 or 13.1 | `cu130` | 2.14.1 |
@@ -280,9 +282,9 @@ python setup_models.py
 
 The script downloads:
 
-- **NLTK data** (`punkt`, `stopwords`) — ~5 MB, into NLTK's default folder (`%APPDATA%\nltk_data` on Windows). Only `stopwords` is used at run time.
+- **NLTK data** (`punkt`, `stopwords`) — ~5 MB, into `~/.metascan/nltk_data`, the folder **Config → Models** checks. Only `stopwords` is used at run time.
 
-**CLIP weights are not part of this script.** They download the first time Embedding runs, or from **Config → Models**, into the Hugging Face cache (`~/.cache/huggingface/`). A new `config.json` uses the small model (ViT-B-16, about 600 MB of VRAM). `medium` is ViT-L-14 and `large` is ViT-H-14; pick one in **Config → Models**. While it downloads, the panel stays at "Embedding 0 of N".
+**CLIP weights are fetched only on request:** add `--clip small`, `medium` or `large`. Otherwise they download the first time Embedding runs, or from **Config → Models**, into the Hugging Face cache (`~/.cache/huggingface/`). A new `config.json` uses the small model (ViT-B-16, about 600 MB of VRAM). `medium` is ViT-L-14 and `large` is ViT-H-14; pick one in **Config → Models**. While it downloads, the panel stays at "Embedding 0 of N".
 
 > **Behind a corporate proxy or air-gapped?** Set `HTTPS_PROXY` and `HTTP_PROXY` before running the script, or pre-populate the cache by copying `~/.cache/huggingface/` and `~/.cache/torch/hub/` from a machine that has internet access.
 
@@ -300,17 +302,13 @@ Tagging with a vision model, and T2I / I2V prompt writing, need a VLM and the `l
 python setup_models.py --skip-nltk --vlm qwen3vl-8b
 ```
 
-**Windows with an NVIDIA GPU: add the CUDA runtime.** That command, and the Models tab's Download button, fetch a `llama-server` that cannot see your GPU, because upstream ships the CUDA DLLs in a second archive. Fetch them into the same folder, keeping the release (`b10456`) and CUDA version (`12.4`) the same as in the `llama-server` URL the setup prints:
+**Windows with an NVIDIA GPU:** that command, and the Models tab's Download button, also fetch the CUDA runtime DLLs, which upstream ships in a second archive of about 390 MB. To check:
 
 ```powershell
-$url = "https://github.com/ggml-org/llama.cpp/releases/download/b10456/cudart-llama-bin-win-cuda-12.4-x64.zip"
-Invoke-WebRequest $url -OutFile cudart.zip
-Expand-Archive cudart.zip -DestinationPath data\bin -Force
-Remove-Item cudart.zip
 .\data\bin\llama-server.exe --list-devices
 ```
 
-The last line must list `CUDA0` and your GPU. If it prints `(none)`, the DLLs are not next to `llama-server.exe`.
+It must list `CUDA0` and your GPU. If it prints `(none)`, the DLLs are not next to `llama-server.exe`: delete `data\bin\cudart64_12.dll` if it exists, and run the setup command again.
 
 Prompt-writer training has its own setup: see [writer training](writer-training.md).
 
@@ -346,7 +344,7 @@ Open <http://localhost:8700>. That one terminal runs everything; Ctrl+C stops it
 
 Each start, `run.bat` checks the frontend. It runs `npm install` if `package-lock.json` changed, rebuilds the UI if any frontend source is newer than the last build, and then starts the backend. A failed build stops the start, so you never get an old UI by accident. Set `METASCAN_SKIP_FRONTEND=1` to skip the check, `METASCAN_PORT` for another port, and `METASCAN_HOST=127.0.0.1` to keep it on this PC (by default, other devices on your network can connect, and Windows Firewall may ask).
 
-**Do not start the backend with `python run_server.py` on Windows.** It looks fine, and imports and thumbnails work, but with its auto-reload on, CLIP search hangs and fails with `NotImplementedError`, and the taste scorer and writer training can't start. `run.bat` starts uvicorn directly to avoid this. To do the same by hand:
+`python run_server.py` has no auto-reload on Windows, because reload picks an event loop that cannot start subprocesses: CLIP search would hang, and the taste scorer and writer training could not start. `run.bat` starts uvicorn directly. To do the same by hand:
 
 ```powershell
 venv\Scripts\Activate.ps1
@@ -387,8 +385,6 @@ From the running app:
 
 If ComfyUI is running on `127.0.0.1:8188`, Metascan connects to it without any setting.
 
-**Config → Models on Windows** lists both NLTK rows as missing after `setup_models.py`, because that page looks in `~/.metascan/nltk_data` and not where the script puts them. Keyword extraction still works, and `punkt` is not needed with this NLTK.
-
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |
@@ -397,8 +393,8 @@ If ComfyUI is running on `127.0.0.1:8188`, Metascan connects to it without any s
 | `WinError 10013` or `10048` starting the server (Windows) | Port 8700 is blocked. A Metascan running in WSL with `networkingMode=mirrored` does this while it runs, and the port can stay blocked after that server stops, with nothing listening in Linux or shown by `netstat`. `wsl --shutdown` cleared it on the test machine, but it stops everything running in WSL. Otherwise, start on another port (`--port 8702`) and open that port's URL. |
 | A page answers on port 8700, but shows the wrong library (Windows) | It may be a WSL server: with mirrored networking it answers on Windows' `localhost`. `GET /api/models/hardware` says `"is_wsl": true`. |
 | `torch.cuda.is_available()` is `False` (Windows) | PyPI's CPU-only torch was installed. Delete `venv`, recreate it, and install torch first (step 5). |
-| CLIP search hangs, then fails; `NotImplementedError` in `logs\server.log` (Windows) | The server was started with `run_server.py`. Use `run.bat` (step 8). |
-| `llama-server --list-devices` prints `(none)` (Windows) | The CUDA runtime DLLs are missing (step 6). |
+| CLIP search hangs, then fails; `NotImplementedError` in `logs\server.log` (Windows) | The server was started with auto-reload. Use `run.bat` (step 8). |
+| `llama-server --list-devices` prints `(none)` (Windows) | The CUDA runtime DLLs are missing or incomplete (step 6). |
 | `Failed to extract video metadata ... [WinError 2]` (Windows) | `exiftool` isn't on that server's PATH. Install it, then restart the server from a new terminal. |
 | `venv\Scripts\Activate.ps1 cannot be loaded` | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. |
 | `No module named 'faiss.swigfaiss_avx512'` in the log | Harmless. FAISS tries that build, then falls back. |
@@ -431,25 +427,20 @@ Run on 2026-11-01: Windows 11 Pro, RTX 5090, driver 610.88, Python 3.11.9, Node 
 Not tested yet:
 
 - Loading a VLM and tagging (no weights were downloaded, so `--vlm` ran for the binary only), T2I and I2V generation through ComfyUI, writer training, `requirements-train.txt`.
-- A truly clean machine. Python, Git, Node, FFmpeg and the driver were already there, and the winget commands for Node, Git, FFmpeg and the Install Manager were confirmed to resolve but not run. ExifTool and `py install 3.11` were run.
+- A truly clean machine, for these steps or [the installer](windows-installer.md#what-has-been-tested). Python, Git, Node, FFmpeg and the driver were already there, and the winget commands for Node, Git, FFmpeg and the Install Manager were confirmed to resolve but not run. ExifTool and `py install 3.11` were run.
 - `Set-ExecutionPolicy`: the test machine was already `RemoteSigned`.
 - The whole-library move in [windows-migration.md](windows-migration.md).
 
 ## Windows: installer rebuild notes
 
-Each workaround above exists because of something below. The new installer should remove these, so the steps can shrink.
+The [Windows installer](windows-installer.md) settled most of the list this section used to hold: reload is off on Windows, Setup detects the CUDA build and verifies it (and `CUDA UMD Version`), `setup_models.py` fetches the `llama-server` CUDA DLLs and takes `--clip`, a new install gets the hardware tier's CLIP model, NLTK has one folder, Setup checks for ExifTool and puts it on the server's PATH, and the tray launcher moves past a blocked port. `install.sh` still has the CPU torch gap, and `run.bat` still explains a blocked port only after the failure.
+
+Still open:
 
 | Problem | Where | What the rebuild should do |
 |---|---|---|
-| With `run_server.py`, CLIP search, the taste scorer and writer training fail. `reload=True` makes uvicorn pick `SelectorEventLoop`, which cannot spawn subprocesses. `run.bat` avoids it | `run_server.py`; callers in `inference_client.py`, `taste_runner.py`, `training_manager.py` | Turn reload off on Windows, or set the loop explicitly. Fail loudly: today the search request hangs after the error |
-| Plain install gives CPU torch and exits 0 | `requirements.txt` (`torch>=2.0.0`) | Detect the CUDA version, pick the index, and verify `torch.cuda.is_available()`. `install.sh` has the same gap |
-| `llama-server` can't see the GPU | `setup_models.py` (`resolve_vlm_targets`), `backend/api/models.py` (`_download_vlm`), `metascan/utils/llama_server.py` | Also fetch `cudart-llama-bin-win-cuda-<ver>-x64.zip`, then check `--list-devices`. Decide between the 12.4 and 13.3 builds for Blackwell |
-| CLIP isn't fetched at install, and the first Embedding looks stuck | `setup_models.py` | Download the chosen model, and show progress |
-| The default CLIP model is `small` even on a workstation-tier GPU | `config_example.json` | Use the hardware tier's recommendation |
-| The Models tab shows NLTK as missing after setup. Script and tab use different folders, and the tab offers `punkt` while NLTK 3.9.1 needs `punkt_tab` | `setup_models.py`, `backend/api/models.py` (`_nltk_data_dir`, `_NLTK_MODELS`) | Use one folder and one list. Only `stopwords` is read at run time |
-| `exiftool` missing shows up only as an error per video | `metascan/extractors/comfyui_video.py`; `install.sh` only warns | Check for it at install, including PATH |
-| A leftover WSL port block stops the server. `run.bat` explains it after the failure | `run.bat` | Check the port first |
 | `requirements.txt` carries dev tools (`mypy`, `black`), and `requirements-dev.txt` conflicts with `huggingface-hub` on `click` | requirements files | Move them, and loosen the `click` pin |
 | A FAISS index built on WSL is keyed by `/mnt/d/...`, so on Windows `has_file` misses every entry and re-embedding a file adds a second row. Search still works. `windows-migration.md` copies that index across and says nothing re-embeds | `metascan/core/embedding_manager.py` (`add`, `has_file`), `faiss_renames.py`, `backend/api/similarity.py` | Key the index by the stored path, or rebuild it as part of the move |
 | `make` targets don't exist on Windows, and CI has no Windows job | `Makefile`, `.github/workflows/python-package.yml` | Provide a script, and add a Windows job |
 | Other docs repeat the old steps | `windows-migration.md` (`--vlm` with no id, `cu128`, which stops at torch 2.11), `installation.md`, `writer-training.md`, `SYSTEM_REQUIREMENTS.md`, `install.sh` (Node 20) | Update them, or point them here |
+| `llama-server` uses the 12.4 CUDA build on Blackwell cards, where it was seen to work | `metascan/utils/llama_server.py` | Decide between the 12.4 and 13.3 builds |
