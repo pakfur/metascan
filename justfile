@@ -56,6 +56,11 @@ deps: venv
     {{ py }} -m pip install -r requirements.txt -r requirements-dev.txt flake8
     npm --prefix frontend install
 
+# Build the Windows installer. Needs Inno Setup: docs/windows-installer.md
+[windows]
+installer *args: venv
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1 {{ args }}
+
 # ---- Test --------------------------------------------------------------------
 
 # Run the tests in parallel: `just test tests/test_scorecard.py -k brief`

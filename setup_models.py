@@ -19,15 +19,17 @@ from typing import Optional
 # Add project to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from metascan.utils.app_paths import get_data_dir
+from metascan.utils.app_paths import get_data_dir, get_nltk_data_dir
 
-# Handle SSL certificate issues
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
+# Handle SSL certificate issues. Not on Windows: there Python reads the system
+# certificates, and this module fetches executables the app then runs.
+if sys.platform != "win32":
+    try:
+        _create_unverified_https_context = ssl._create_unverified_context
+    except AttributeError:
+        pass
+    else:
+        ssl._create_default_https_context = _create_unverified_https_context
 
 
 @dataclass
@@ -63,9 +65,16 @@ def _load_vlm_repo_overrides() -> dict[str, str]:
 
 
 def resolve_vlm_targets(model_id: str) -> list[DownloadTarget]:
-    """Return GGUF + mmproj + llama-server-binary download targets for ``model_id``."""
+    """Return GGUF + mmproj + llama-server-binary download targets for ``model_id``,
+    plus the CUDA runtime DLLs where upstream ships them apart."""
     from metascan.core.vlm_models import REGISTRY, resolve_repo
-    from metascan.utils.llama_server import binary_path, pick_release_asset, release_url
+    from metascan.utils.llama_server import (
+        CUDA_RUNTIME_DLL,
+        binary_path,
+        cuda_runtime_asset,
+        pick_release_asset,
+        release_url,
+    )
     from metascan.core.hardware import detect_hardware
 
     spec = REGISTRY[model_id]
@@ -73,7 +82,7 @@ def resolve_vlm_targets(model_id: str) -> list[DownloadTarget]:
     vlm_dir = get_data_dir() / "models" / "vlm"
 
     rpt = detect_hardware()
-    return [
+    targets = [
         DownloadTarget(
             repo=repo,
             filename=spec.gguf_filename,
@@ -89,6 +98,15 @@ def resolve_vlm_targets(model_id: str) -> list[DownloadTarget]:
             dest=binary_path(),
         ),
     ]
+    runtime = cuda_runtime_asset(rpt)
+    if runtime is not None:
+        targets.append(
+            DownloadTarget(
+                url=release_url(runtime),
+                dest=binary_path().parent / CUDA_RUNTIME_DLL,
+            )
+        )
+    return targets
 
 
 # Backwards-compat alias (pre-Qwen3.8 name).
@@ -121,14 +139,12 @@ def _ensure_target(t: DownloadTarget) -> bool:
         # so every .so must land next to the binary or it fails at startup
         # with "error while loading shared libraries". Extract the whole bin
         # folder into ``t.dest.parent``.
-        from metascan.utils.llama_server import binary_filename
-
         print(f"  ⇣ Downloading {t.url}…")
         is_targz = t.url.endswith(".tar.gz")
         tmp = t.dest.with_suffix(".tar.gz" if is_targz else ".zip")
         try:
             urllib.request.urlretrieve(t.url, tmp)
-            target_name = binary_filename()
+            target_name = t.dest.name
             if is_targz:
                 _extract_flat_bin_targz(tmp, t.dest, target_name)
             else:
@@ -277,16 +293,30 @@ def download_nltk_data():
     print("=" * 60)
 
     # Download required data
-    packages = ["stopwords", "punkt"]
+    packages = {"stopwords": "corpora", "punkt": "tokenizers"}
+    data_dir = get_nltk_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
 
-    for package in packages:
-        try:
-            nltk.data.find(f"tokenizers/{package}")
+    for package, kind in packages.items():
+        if (data_dir / kind / package).exists():
             print(f"✓ {package} already downloaded")
-        except LookupError:
-            print(f"Downloading {package}...")
-            nltk.download(package)
-            print(f"✓ {package} downloaded successfully")
+            continue
+        print(f"Downloading {package}...")
+        if not nltk.download(package, download_dir=str(data_dir)):
+            raise RuntimeError(f"could not download {package}")
+        print(f"✓ {package} downloaded successfully")
+
+
+def download_clip(key: str) -> None:
+    """Fetch the CLIP weights for ``key`` into the Hugging Face cache, so the
+    first Embedding does not sit at 0 of N while they download."""
+    from metascan.core.embedding_manager import EmbeddingManager
+
+    print("=" * 60)
+    print(f"Setting up CLIP ({key})...")
+    print("=" * 60)
+    EmbeddingManager(model_key=key, device="cpu")._ensure_model_loaded()
+    print(f"✓ CLIP {key} ready")
 
 
 if __name__ == "__main__":
@@ -307,6 +337,11 @@ if __name__ == "__main__":
         help="Alias for --qwen3vl.",
     )
     parser.add_argument(
+        "--clip",
+        choices=["small", "medium", "large"],
+        help="Also download the CLIP weights for this model size.",
+    )
+    parser.add_argument(
         "--skip-nltk",
         action="store_true",
         help="Skip the NLTK data download.",
@@ -321,6 +356,13 @@ if __name__ == "__main__":
             print("✓ NLTK setup complete!")
         except Exception as e:
             print(f"✗ NLTK setup failed: {e}")
+            sys.exit(1)
+
+    if args.clip:
+        try:
+            download_clip(args.clip)
+        except Exception as e:
+            print(f"✗ CLIP setup failed: {e}")
             sys.exit(1)
 
     if args.qwen3vl:

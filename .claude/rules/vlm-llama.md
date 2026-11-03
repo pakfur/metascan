@@ -344,7 +344,8 @@ the root CLAUDE.md still applies.
   reported from whichever weight files exist regardless of binary
   status, so the user still sees partial-download progress.
 - **VLM download stage label.** `_download_vlm` broadcasts
-  `download_progress` with `stage="downloading (n/3)"` and
+  `download_progress` with `stage="downloading (n/total)"` (3 targets, 4 with
+  Windows' CUDA runtime DLLs: `llama_server.cuda_runtime_asset`) and
   `percent=0.0`. Don't put the GGUF filename in the stage — it's
   several characters longer than the chip can render. The frontend
   `statusLabel` only appends `${pct}%` when `percent > 0`, so keeping

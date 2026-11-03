@@ -103,3 +103,6 @@ ehthumbs.db
 temp/
 .worktrees/
 .superpowers/
+
+# Windows installer staging and output (installer/build.ps1)
+installer/build/

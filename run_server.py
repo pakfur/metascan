@@ -15,12 +15,15 @@ from backend.config import get_server_config
 
 def main():
     config = get_server_config()
+    # On Windows, reload picks an event loop that cannot start subprocesses,
+    # which breaks CLIP search, the taste scorer and writer training.
+    reload = sys.platform != "win32"
     uvicorn.run(
         "backend.main:app",
         host=config.host,
         port=config.port,
-        reload=True,
-        reload_dirs=[str(project_root / "backend")],
+        reload=reload,
+        reload_dirs=[str(project_root / "backend")] if reload else None,
     )
 
 
