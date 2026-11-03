@@ -8,29 +8,6 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python package](https://github.com/pakfur/metascan/actions/workflows/python-package.yml/badge.svg)](https://github.com/pakfur/metascan/actions/workflows/python-package.yml)
 
-# Unreleased
-
-### Pass / Fail Grades
-
-Favorites and training signals are now two separate marks:
-
-- **★ Favorite** is back to "I want to look at this again": filters, smart folders and the tile star use it, and nothing learns from it
-- **✓ Pass / ✗ Fail grades** (P / X in the viewer, reasons on 1–6) are the only thing the taste scorer, prompt-writer training and the writer scorecard learn from; viewing an image teaches nothing
-- Grades show as a small ✓ / ✗ badge on library, Text to Image and Image to Video tiles, and smart folders get a **Grade** rule
-- Deleting a graded image keeps what it taught: its thumbnail, prompt and brief are kept for training, across CLIP model changes too
-- The training sections moved to a new **Config → Training** tab
-- **One-time upgrade:** the first start converts your ratings (favorites become ★ + ✓, old rejects ✗) after backing up the database to `data/metascan.db.pre-v6-<date>-<time>.bak`; if that fails the server refuses to start and changes nothing. See [Upgrading an existing library](docs/features.md#upgrading-an-existing-library-one-time) for restoring the backup and for the Ctrl-C a refused start needs under `run_server.py`
-
-### Search as a Filter
-
-Content search moved from a separate results view into the left filter panel, where it composes with everything else:
-
-- **SEARCH section** in the filter panel — CLIP text-to-image search, tag search (AND of multiple tags with autocomplete chips), and an adjustable score-threshold slider
-- **Search results are a filter layer** — they intersect with the Video/Images/Favorites presets, the standard filters, and the selected folder instead of replacing the grid
-- **Unbounded results** — everything above the score threshold is shown, not a fixed top-100
-- **Relevance sort** — auto-selected when a search runs, restoring your previous sort when cleared
-- **Find Similar** (right-click a thumbnail) uses the same filter model, with its own 0–1 threshold scale
-
 # Latest Release v0.14
 
 ## Changes since v0.3.0
