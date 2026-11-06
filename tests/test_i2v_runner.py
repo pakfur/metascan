@@ -1080,6 +1080,44 @@ class TestBatchRun(I2vRunnerBase):
         self.assertEqual(len(self.vlm.calls), 2)
         self.assertEqual(len(self.comfy.submits), 2)
 
+    def _lint_flags(self, bad_takes):
+        """Patch the lint so the given written takes (1-based VLM calls) have
+        a finding and every other take is clean."""
+        from unittest import mock
+
+        def lint(text, duration_s, template=None):
+            bad = any(f"Written take {n} " in text for n in bad_takes)
+            return ["a lint finding"] if bad else []
+
+        return mock.patch("metascan.core.i2v_runner.lint_i2v_prompt", lint)
+
+    def test_a_written_prompt_with_lint_findings_is_written_again(self):
+        with self._lint_flags({1, 2}):
+            self.run_batch(self._req(prompt="", batch_size=2))
+        # Batch 1 took three takes (1, 2 flagged), batch 2 one.
+        self.assertEqual(len(self.vlm.calls), 4)
+        texts = [p.positive for _, p, _ in self.comfy.submits]
+        self.assertIn("Written take 3", texts[0])
+        self.assertIn("Written take 4", texts[1])
+        last = [d for n, d in self.events if n == "batch_done"][-1]
+        self.assertEqual(last["warnings"], [])
+
+    def test_rerolls_stop_at_the_limit_and_label_what_is_left(self):
+        from metascan.core import i2v_runner as mod
+
+        with self._lint_flags(set(range(1, 10))):
+            self.run_batch(self._req(prompt="", batch_size=1))
+        self.assertEqual(len(self.vlm.calls), mod._LINT_ATTEMPTS)
+        self.assertEqual(len(self.comfy.submits), 1)
+        last = [d for n, d in self.events if n == "batch_done"][-1]
+        self.assertEqual(len(last["warnings"]), 1)
+        self.assertTrue(last["warnings"][0].startswith("Batch 1 (best of"))
+
+    def test_box_text_is_never_rewritten_for_its_lint(self):
+        with self._lint_flags(set(range(1, 10))):
+            self.run_batch(self._req(batch_size=1))
+        self.assertEqual(len(self.vlm.calls), 0)
+
     def test_count_renders_one_prompt_per_seed(self):
         started = self.run_batch(self._req(count_per_batch=3))
         self.assertEqual(started.total_videos, 3)

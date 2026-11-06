@@ -33,6 +33,8 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    Union,
+    cast,
 )
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
@@ -58,6 +60,17 @@ _RECONNECT_BACKOFF_SECONDS = (1.0, 3.0, 10.0)
 # to turn up before the poll acts on it. See _reconcile_loop.
 _RECONCILE_INTERVAL_SECONDS = 10.0
 _RECONCILE_GRACE_SECONDS = 2.0
+
+# A job ComfyUI has forgotten (it crashed or was restarted: its queue and
+# /history live in memory) is sent again at most this many times. A job
+# that itself takes ComfyUI down (out of memory on a long video) must not
+# crash it forever.
+_MAX_LOST_RESUBMITS = 2
+
+# A dispatch whose POST could not even connect (ComfyUI is down, e.g. being
+# restarted after a crash) puts the job back at the front of the queue and
+# holds the pump this long before trying again, rather than failing it.
+_DISPATCH_RETRY_SECONDS = 3.0
 
 # A connection that stayed open at least this long is trusted as "healthy"
 # even if it never delivered a frame (e.g. we connected but no job was
@@ -304,6 +317,12 @@ class ComfyClient:
         # identical bytes (e.g. a subject reused across panels) must
         # upload once and share the resolved name.
         self._upload_cache: Dict[str, str] = {}
+        # job id -> how often it was sent again because ComfyUI forgot it
+        # (see _resubmit_lost). Dropped when the job ends.
+        self._lost_resubmits: Dict[int, int] = {}
+        # Loop time before which the pump dispatches nothing: set when a
+        # POST /prompt could not connect (see _dispatch).
+        self._dispatch_retry_at: float = 0.0
 
     # ---- lifecycle ---------------------------------------------------
 
@@ -739,6 +758,7 @@ class ComfyClient:
                     self._queue
                     and len(self._running) < self.in_flight
                     and not gpu_reserved()
+                    and asyncio.get_running_loop().time() >= self._dispatch_retry_at
                 ):
                     job_id = self._pop_dispatchable()
                     if job_id is None:
@@ -828,6 +848,26 @@ class ComfyClient:
                 return
             self._emit(
                 "job_update", {"job_id": job_id, "state": "running", "error": None}
+            )
+        except httpx.ConnectError as exc:
+            # The POST never reached ComfyUI (down, or restarting after a
+            # crash): nothing was queued there, so the job waits here
+            # instead of failing, at the front, and the pump pauses.
+            self._running.discard(job_id)
+            if job_id in self._cancelled:
+                self._cancelled.discard(job_id)
+                await self._finish_job(job_id, "cancelled")
+                return
+            logger.warning(
+                "ComfyUI at %s is unreachable (%s); job %s waits and is sent "
+                "once it answers",
+                self.base_url,
+                exc,
+                job_id,
+            )
+            self._queue.appendleft(job_id)
+            self._dispatch_retry_at = (
+                asyncio.get_running_loop().time() + _DISPATCH_RETRY_SECONDS
             )
         except Exception as exc:
             message = f"ComfyUI at {self.base_url} rejected the job: {exc}"
@@ -1105,6 +1145,9 @@ class ComfyClient:
         )
 
     async def _reconcile_running_jobs(self) -> None:
+        # ComfyUI's queue, read at most once a pass and only when a prompt
+        # has no history: None = not read yet, False = could not be read.
+        queued: Union[None, bool, Set[str]] = None
         for prompt_id, job_id in list(self._prompt_to_job.items()):
             if not self._awaiting_end_of_prompt(prompt_id, job_id):
                 continue
@@ -1113,7 +1156,28 @@ class ComfyClient:
             except ComfyError:
                 return  # ComfyUI unreachable; try again next tick
             if not entry:
-                continue  # still queued or executing
+                # Still queued or executing -- unless ComfyUI no longer
+                # knows the prompt at all: it crashed or was restarted,
+                # which empties both its queue and its history, and no
+                # frame will ever come. Every prompt in this pass was
+                # POSTed before the queue is read (ComfyUI queues it
+                # before answering), and a prompt that ends between the
+                # two reads is in /history by the second one.
+                if queued is None:
+                    try:
+                        queued = await self.fetch_queue_ids()
+                    except ComfyError:
+                        queued = False
+                if queued is False or prompt_id in cast(Set[str], queued):
+                    continue
+                try:
+                    entry = await self.fetch_history(prompt_id)
+                except ComfyError:
+                    return
+                if not entry:
+                    if self._awaiting_end_of_prompt(prompt_id, job_id):
+                        await self._resubmit_lost(job_id, prompt_id)
+                    continue
             # History is written a hair before the trailing
             # `executing {node: null}` frame. Give the websocket its
             # chance so a healthy connection is never second-guessed.
@@ -1133,6 +1197,60 @@ class ComfyClient:
                 await self._on_prompt_end(job_id, {"prompt_id": prompt_id})
             else:
                 await self._finish_job(job_id, state, error=error)
+
+    async def _resubmit_lost(self, job_id: int, prompt_id: str) -> None:
+        """Send a job ComfyUI forgot again, from the front of the queue.
+
+        Its row goes back to ``queued`` (the same id, so its owner -- an I2V
+        run's window, a T2I batch, a storyboard beat -- keeps waiting on
+        it) and the pump re-derives the graph from the stored preset and
+        params. After ``_MAX_LOST_RESUBMITS`` it fails instead.
+        """
+        self._prompt_to_job.pop(prompt_id, None)
+        sent = self._lost_resubmits.get(job_id, 0)
+        if sent >= _MAX_LOST_RESUBMITS:
+            logger.warning(
+                "ComfyUI lost job %s again (prompt %s); it was already sent "
+                "%d more time(s), failing it",
+                job_id,
+                prompt_id,
+                sent,
+            )
+            await self._finish_job(
+                job_id,
+                "failed",
+                error=(
+                    f"ComfyUI lost this job {sent + 1} times (it crashed or "
+                    "restarted while the job was queued or running there); "
+                    "not sending it again."
+                ),
+            )
+            return
+        async with self._finish_lock:
+            current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if current is None or current["state"] != "running":
+                return  # it ended (or was cancelled) meanwhile
+            await asyncio.to_thread(
+                self.db.update_generation_job,
+                job_id,
+                state="queued",
+                comfy_prompt_id=None,
+                started_at=None,
+            )
+        self._lost_resubmits[job_id] = sent + 1
+        logger.warning(
+            "ComfyUI no longer knows prompt %s (job %s): it crashed or was "
+            "restarted. Sending the job again (%d of %d).",
+            prompt_id,
+            job_id,
+            sent + 1,
+            _MAX_LOST_RESUBMITS,
+        )
+        self._running.discard(job_id)
+        if job_id not in self._queue:
+            self._queue.appendleft(job_id)
+        self._emit("job_update", {"job_id": job_id, "state": "queued", "error": None})
+        self._pump_wake.set()
 
     async def _rehydrate_jobs(self) -> None:
         """Reconcile the generation_jobs table with a fresh process.
@@ -1572,6 +1690,7 @@ class ComfyClient:
         # cancel, cancel_all, or a dispatch failure) got it here.
         self._running.discard(job_id)
         self._job_source.pop(job_id, None)
+        self._lost_resubmits.pop(job_id, None)
         # The real anti-resurrection guard: a job already in a terminal
         # state never moves to a different one. Without this, a stale
         # completion -- e.g. a _complete_job task that was already
@@ -1671,6 +1790,26 @@ class ComfyClient:
             f"ComfyUI at {self.base_url} signalled that prompt {prompt_id} "
             "finished, but its /history entry never appeared"
         )
+
+    async def fetch_queue_ids(self) -> Set[str]:
+        """The prompt ids ComfyUI holds, running or pending (``GET /queue``:
+        each item is ``[number, prompt_id, prompt, extra, outputs]``)."""
+        try:
+            resp = await self._http.get(f"{self.base_url}/queue")
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            raise ComfyError(
+                f"Could not read the queue from {self.base_url}: {exc}"
+            ) from exc
+        ids: Set[str] = set()
+        if not isinstance(payload, dict):
+            raise ComfyError(f"Unexpected /queue answer from {self.base_url}")
+        for key in ("queue_running", "queue_pending"):
+            for item in payload.get(key) or []:
+                if isinstance(item, (list, tuple)) and len(item) > 1:
+                    ids.add(str(item[1]))
+        return ids
 
     async def fetch_history(self, prompt_id: str) -> Dict[str, Any]:
         """Return ComfyUI's history entry for a prompt, or {} if absent."""

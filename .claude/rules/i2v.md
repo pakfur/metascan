@@ -274,6 +274,18 @@ the root CLAUDE.md still applies.
   rebuilds its status). Order: with `comfy.unload_vlm_during_generation`
   every prompt is written first, then the VLM is shut down, then the jobs
   are submitted; off, each batch renders as soon as its prompt is written.
+  **A written prompt is rerolled for its lint**, since nobody sees it before
+  it renders: `_step_prompt` writes it again while `_lint_findings` (the
+  lint alone, not the assembly notes such as an off-screen role) finds
+  anything, up to `_LINT_ATTEMPTS` = 3 takes, and uses the take with the
+  fewest findings; findings that remain are reported prefixed
+  `Batch k (best of 3 takes): `. Box text is never rewritten.
+  **The job tiles come from the run's frames:** the run submits its jobs
+  over time and its reply carries no job ids, so every `i2v` batch frame
+  for the open image makes the store refetch the queued/running jobs
+  (`scheduleJobsRefresh`, one request at a time, merged so a tile keeps its
+  progress and a failed tile stays until dismissed; a job whose terminal
+  `job_update` already arrived, `endedJobs`, is never brought back).
   Submitting goes through a per-run `window` (`i2v.window`, default 4,
   floored at 1; an `asyncio.Semaphore`): a job takes a slot when submitted
   and its terminal `job_update` (`done`, `failed`, `cancelled`) frees it, so

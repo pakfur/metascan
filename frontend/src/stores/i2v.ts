@@ -216,8 +216,13 @@ export const useI2vStore = defineStore('i2v', () => {
     allVideos.value = allVideos.value.filter((v) => v.id !== id)
   }
 
-  // Reload-survival: rebuild the in-flight set from the server, filtered
-  // to this source image (the storyboard refreshActiveJobs pattern).
+  // Jobs whose terminal job_update has arrived (tracked or not yet).
+  const endedJobs = new Set<number>()
+  // Rebuild the in-flight set from the server, filtered to this source image
+  // (the storyboard refreshActiveJobs pattern). Runs on open, and whenever one
+  // of the image's runs reports progress: a run is server-owned and submits
+  // its jobs over time, so this is how its tiles appear. A chip already held
+  // keeps its live progress, and a failed one stays until dismissed.
   async function refreshActiveJobs(): Promise<void> {
     if (!sourcePath.value) return
     const seq = ++jobsSeq
@@ -227,13 +232,40 @@ export const useI2vStore = defineStore('i2v', () => {
       listJobs('running', 1000),
     ])
     if (seq !== jobsSeq) return
+    const held = jobs.value
     const next = new Map<number, I2vJobChip>()
     for (const j of [...queued, ...running]) {
+      // A reply that left before the job's last frame must not bring it back.
+      if (endedJobs.has(j.id)) continue
       if (j.i2v_source_path && norm(j.i2v_source_path) === src) {
-        next.set(j.id, { state: j.state === 'running' ? 'running' : 'queued' })
+        const state = j.state === 'running' ? 'running' : 'queued'
+        const chip = held.get(j.id)
+        next.set(j.id, chip && chip.state === state ? chip : { state, cancelling: chip?.cancelling })
       }
     }
+    for (const [id, chip] of held) if (chip.state === 'failed' && !next.has(id)) next.set(id, chip)
     jobs.value = next
+  }
+
+  // Run frames come once per written prompt and per submitted job: one
+  // refresh at a time, and one more after it when frames came meanwhile.
+  let jobsRefreshing = false
+  let jobsRefreshAgain = false
+  function scheduleJobsRefresh(): void {
+    if (jobsRefreshing) {
+      jobsRefreshAgain = true
+      return
+    }
+    jobsRefreshing = true
+    refreshActiveJobs()
+      .catch(() => {})
+      .finally(() => {
+        jobsRefreshing = false
+        if (jobsRefreshAgain) {
+          jobsRefreshAgain = false
+          scheduleJobsRefresh()
+        }
+      })
   }
 
   // The server's running runs, replacing the list wholesale: a run that
@@ -355,6 +387,10 @@ export const useI2vStore = defineStore('i2v', () => {
   // comfy channel: job_update / job_progress for jobs we track.
   function handleComfyEvent(event: string, data: Record<string, unknown>): void {
     const jobId = Number(data.job_id)
+    if (event === 'job_update' && ['done', 'failed', 'cancelled'].includes(String(data.state))) {
+      endedJobs.add(jobId)
+      while (endedJobs.size > 500) endedJobs.delete(endedJobs.values().next().value as number)
+    }
     if (!jobs.value.has(jobId)) return
     const next = new Map(jobs.value)
     if (event === 'job_update') {
@@ -404,6 +440,8 @@ export const useI2vStore = defineStore('i2v', () => {
       const fresh = (data.warnings as string[]).filter((w) => !warnings.value.includes(w))
       if (fresh.length) warnings.value = [...warnings.value, ...fresh]
     }
+    // The run's jobs reach ComfyClient one by one: pick them up as tiles.
+    if (mine) scheduleJobsRefresh()
     if (event === 'batch_progress') {
       upsertBatch(row)
       return

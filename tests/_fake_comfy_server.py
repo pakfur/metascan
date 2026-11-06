@@ -173,6 +173,7 @@ class FakeComfy:
         app.router.add_get("/view", self._get_view)
         app.router.add_post("/upload/image", self._post_upload)
         app.router.add_post("/queue", self._post_queue)
+        app.router.add_get("/queue", self._get_queue)
         app.router.add_post("/interrupt", self._post_interrupt)
         app.router.add_get("/ws", self._ws)
 
@@ -278,6 +279,35 @@ class FakeComfy:
                 found = True
         self.uploaded.append(name)
         return web.json_response({"name": name, "subfolder": "", "type": "input"})
+
+    async def _get_queue(self, request: web.Request) -> web.Response:
+        # ComfyUI's shape: [number, prompt_id, prompt, extra_data, outputs].
+        def item(n: int, pid: str) -> List[Any]:
+            return [n, pid, {}, {}, []]
+
+        running = [item(0, self._running_prompt)] if self._running_prompt else []
+        pending = [item(i + 1, pid) for i, (pid, _) in enumerate(self._pending)]
+        return web.json_response({"queue_running": running, "queue_pending": pending})
+
+    async def crash(self) -> None:
+        """ComfyUI dies and comes back: its queue, the running prompt, its
+        history and every socket are gone (all held in memory). Nothing is
+        sent for the prompts it held -- they simply no longer exist."""
+        if self._worker is not None:
+            self._worker.cancel()
+            try:
+                await self._worker
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._pending.clear()
+        self._running_prompt = None
+        self._interrupt_flag = False
+        self._history.clear()
+        self._prompt_client.clear()
+        self._registry.clear()
+        for ws in list(self._sockets):
+            await ws.close()
+        self._worker = asyncio.create_task(self._worker_loop())
 
     async def _post_queue(self, request: web.Request) -> web.Response:
         body = await request.json()

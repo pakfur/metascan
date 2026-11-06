@@ -94,6 +94,23 @@ the root CLAUDE.md still applies.
   means the event stream lost something. The socket drop itself is also
   a WARNING now (it was DEBUG, which is why a dead stream went unnoticed
   for hours), and `GET /api/comfy/status` reports `connected`.
+- **A ComfyUI crash or restart forgets every prompt it held** (queue and
+  history are in memory), and an empty `/history` alone reads as "still
+  running", so the reconcile pass also reads `GET /queue`
+  (`fetch_queue_ids`, once a pass, only when some prompt has no history):
+  a prompt in neither, history read again to close the race with a prompt
+  ending between the two reads, is lost. `_resubmit_lost` puts the same
+  job id back to `queued` (prompt id and `started_at` cleared) at the front
+  of the queue, emits `job_update queued`, and the pump sends it again, so
+  its owner (an I2V run's window, a T2I batch, a beat) keeps waiting on the
+  same id. At most `_MAX_LOST_RESUBMITS` = 2 times per job (a job that
+  itself crashes ComfyUI must not do it forever), then `failed`. A
+  `/queue` that can't be read judges nothing. A dispatch whose POST
+  raises `httpx.ConnectError` (ComfyUI down: nothing reached it) goes back
+  to the front of the queue and the pump waits `_DISPATCH_RETRY_SECONDS`
+  instead of failing the job; any other POST error still fails it (a
+  timeout may have been accepted). The fake server's `crash()` and
+  `GET /queue` model this.
 - **ComfyUI job rows are reconciled at startup, not just at reconnect.**
   `ComfyClient.start()` calls `_rehydrate_jobs` once: `queued` rows are
   re-enqueued into `_queue` (that's what makes "state survives a restart"

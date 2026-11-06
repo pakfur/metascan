@@ -134,6 +134,11 @@ SEED_MAX = 2**31 - 1
 # How many ended runs stay known, so a late cancel answers "over", not 404.
 _FINISHED_KEEP = 50
 
+# A run writes its prompts unseen, so a written prompt the lint finds fault
+# with is written again, up to this many takes in all; the take with the
+# fewest findings is used (and its findings reported, labelled by batch).
+_LINT_ATTEMPTS = 3
+
 
 async def _nothing_to_wait_for() -> None:
     return None
@@ -741,14 +746,41 @@ class I2vRunner:
                 "draft_prompt": req.draft_prompt,
                 "writer_model": req.writer_model,
             }
-        await self.wait_unpaused()  # a pause stops the writing between steps
-        self._writing += 1
-        try:
-            text, warnings, model = await self.write_prompt(
-                req.source_path, req.idea, req.duration_s, req.template_id, req.writer
-            )
-        finally:
-            self._writing -= 1
+        best: Optional[Tuple[str, List[str], str, List[str]]] = None
+        for attempt in range(1, _LINT_ATTEMPTS + 1):
+            await self.wait_unpaused()  # a pause stops the writing between steps
+            self._writing += 1
+            try:
+                text, warnings, model = await self.write_prompt(
+                    req.source_path,
+                    req.idea,
+                    req.duration_s,
+                    req.template_id,
+                    req.writer,
+                )
+            finally:
+                self._writing -= 1
+            lint = self._lint_findings(text, req)
+            if best is None or len(lint) < len(best[3]):
+                best = (text, warnings, model, lint)
+            if not lint:
+                break
+            if attempt < _LINT_ATTEMPTS:
+                logger.info(
+                    "i2v batch %s: prompt %d has %d lint finding(s); writing "
+                    "it again (take %d of %d)",
+                    b.id[:8],
+                    index + 1,
+                    len(lint),
+                    attempt + 1,
+                    _LINT_ATTEMPTS,
+                )
+        assert best is not None
+        text, warnings, model, lint = best
+        if lint:
+            # Nobody sees a written prompt before it renders: say which one.
+            label = f"Batch {index + 1} (best of {_LINT_ATTEMPTS} takes): "
+            warnings = [label + w if w in lint else w for w in warnings]
         b.warnings.extend(w for w in warnings if w not in b.warnings)
         self._progress(b)
         return text, {
@@ -756,6 +788,18 @@ class I2vRunner:
             "draft_prompt": text,
             "writer_model": model,
         }
+
+    @staticmethod
+    def _lint_findings(text: str, req: "I2vBatchRequest") -> List[str]:
+        """The lint's own findings on a written prompt -- not the assembly
+        notes ``write_prompt`` adds (an off-screen role is not a fault)."""
+        template = None
+        if req.template_id:
+            try:
+                template = get_i2v_template(req.template_id)
+            except I2vTemplateError:
+                template = None
+        return lint_i2v_prompt(text, req.duration_s, template=template)
 
     async def _submit_step(
         self, b: _I2vBatch, index: int, text: str, lineage: Dict[str, Optional[str]]

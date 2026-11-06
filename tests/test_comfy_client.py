@@ -1599,6 +1599,106 @@ async def test_reconcile_reports_a_failure_it_never_heard_about(
     assert "CUDA out of memory" in row["error"]
 
 
+# ---- ComfyUI crashes and restarts --------------------------------------
+#
+# ComfyUI keeps its queue and /history in memory: a crash forgets every
+# prompt it held, and no frame ever comes for them. The reconcile pass
+# sees "no history" -- which alone reads as "still running" -- so it asks
+# /queue too, and sends a prompt ComfyUI no longer holds again.
+
+
+async def test_jobs_comfyui_forgot_in_a_crash_are_sent_again(
+    started_client, fake_comfy
+):  # noqa: F811
+    release = asyncio.Event()
+    fake_comfy.hold = release
+    pid = await started_client.register_preset("crash1", "t2i", t2i_workflow())
+    running = await started_client.submit(pid, params(seed=1))
+    pending = await started_client.submit(pid, params(seed=2))
+    assert await _until(
+        lambda: fake_comfy.running_prompt is not None
+        and len(fake_comfy.pending_prompts) == 1
+    )
+    first_ids = {s["prompt_id"] for s in fake_comfy.submitted}
+
+    await fake_comfy.crash()
+    release.set()
+
+    a = await started_client.wait_for_job(running, timeout=30.0)
+    b = await started_client.wait_for_job(pending, timeout=30.0)
+    assert a["state"] == "done" and b["state"] == "done"
+    assert len(fake_comfy.submitted) == 4  # each one sent exactly once more
+    assert a["comfy_prompt_id"] not in first_ids
+    assert b["comfy_prompt_id"] not in first_ids
+    assert not started_client._lost_resubmits
+
+
+async def test_a_job_comfyui_keeps_forgetting_fails_after_the_retries(
+    started_client, fake_comfy, monkeypatch
+):  # noqa: F811
+    monkeypatch.setattr(comfy_client_module, "_MAX_LOST_RESUBMITS", 1)
+    fake_comfy.hold = asyncio.Event()  # never released: it never finishes
+    pid = await started_client.register_preset("crash2", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params())
+    for sends in (1, 2):
+        assert await _until(
+            lambda: len(fake_comfy.submitted) == sends
+            and fake_comfy.running_prompt is not None,
+            timeout=30.0,
+        )
+        await fake_comfy.crash()
+    row = await started_client.wait_for_job(job_id, timeout=30.0)
+    assert row["state"] == "failed"
+    assert "lost this job 2 times" in row["error"]
+    assert len(fake_comfy.submitted) == 2
+
+
+async def test_a_prompt_still_in_the_queue_is_never_sent_again(
+    started_client, fake_comfy
+):  # noqa: F811
+    release = asyncio.Event()
+    fake_comfy.hold = release
+    pid = await started_client.register_preset("crash3", "t2i", t2i_workflow())
+    job_id = await started_client.submit(pid, params())
+    assert await _until(lambda: fake_comfy.running_prompt is not None)
+    for _ in range(3):
+        await started_client._reconcile_running_jobs()
+    assert len(fake_comfy.submitted) == 1
+    release.set()
+    assert (await started_client.wait_for_job(job_id, timeout=15.0))["state"] == "done"
+
+
+async def test_a_dispatch_that_cannot_connect_waits_instead_of_failing(
+    workspace, monkeypatch
+):
+    monkeypatch.setattr(comfy_client_module, "_DISPATCH_RETRY_SECONDS", 0.05)
+    db = DatabaseManager(workspace / "db")
+    c = ComfyClient(
+        base_url="http://127.0.0.1:9",  # nothing listens here
+        output_root=workspace / "out",
+        db=db,
+        in_flight=2,
+    )
+    pump = asyncio.create_task(c._pump_loop())
+    try:
+        pid = await c.register_preset("down", "t2i", t2i_workflow())
+        job_id = await c.submit(pid, params())
+        # A refused connect is quick on Linux and ~2 s on Windows.
+        assert await _until(lambda: c._dispatch_retry_at > 0, timeout=10.0)
+        assert db.get_generation_job(job_id)["state"] == "queued"
+        assert job_id in c._queue or job_id in c._running  # never dropped
+        await c.cancel(job_id)  # mid-dispatch: the failed connect finishes it
+        assert await _until(
+            lambda: db.get_generation_job(job_id)["state"] == "cancelled",
+            timeout=10.0,
+        )
+    finally:
+        pump.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pump
+        await c.aclose()
+
+
 # ---- writer-training GPU lock ---------------------------------------------
 
 
