@@ -39,6 +39,7 @@ MODEL_FAMILY_TOKENS: Dict[str, Tuple[str, ...]] = {
     "qwen": ("qwen",),
     "sd": ("sdxl", "sd_xl", "sd-xl", "xl"),
     "zimage": ("z_image", "z-image", "zimage"),
+    "moss": ("moss",),
 }
 
 

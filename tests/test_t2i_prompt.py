@@ -27,6 +27,8 @@ NEW_KEYS = (
     "T2I_FALLBACK_PREFIX_SD",
     "T2I_FALLBACK_NEGATIVE_SD",
     "T2I_FALLBACK_NEGATIVE_QWEN",
+    "META_MOSS",
+    "T2I_FALLBACK_NEGATIVE_MOSS",
 )
 RESOLVED = (
     "A 31-year-old West African woman with olive skin, brown eyes and an athletic "
@@ -252,6 +254,27 @@ class TemplateTextTests(unittest.TestCase):
                     self.assertNotIn("(", text)
                     self.assertNotIn(")", text)
 
+    def test_the_moss_guideline_carries_its_prompting_rules(self) -> None:
+        # docs/t2i.md, "MOSS-Image": the points that differ from Krea 2.
+        text = prompt("META_MOSS")
+        lowered = text.lower()
+        self.assertRegex(text, r"120\s*-\s*220\s+words")  # long prompts
+        self.assertIn('"Negative: "', text)  # CFG works: ask for a negative
+        self.assertIn("worst quality, bad anatomy, watermark, jpeg artifact", text)
+        self.assertIn("with no other text", lowered)
+        self.assertIn("placeholder", lowered)
+        self.assertIn("line break", lowered)
+        self.assertIn("quality, score, meta, year, character, series, artist", text)
+
+    def test_a_moss_reply_keeps_line_breaks_inside_quoted_text(self) -> None:
+        raw = (
+            'A poster with a large title reading "NIGHT\nMARKET" across the top, '
+            "with no other text.\nNegative: worst quality, watermark"
+        )
+        positive, negative = parse_t2i_output(MODEL_PROFILES["moss"], raw)
+        self.assertIn('"NIGHT\nMARKET"', positive)
+        self.assertEqual(negative, "worst quality, watermark")
+
     def test_the_preamble_covers_the_spec_points(self) -> None:
         text = prompt("T2I_CAPTION_PREAMBLE")
         lowered = text.lower()
@@ -292,6 +315,7 @@ class FallbackTests(unittest.TestCase):
         negatives = {
             "sd": prompt("T2I_FALLBACK_NEGATIVE_SD").strip(),
             "qwen": prompt("T2I_FALLBACK_NEGATIVE_QWEN").strip(),
+            "moss": prompt("T2I_FALLBACK_NEGATIVE_MOSS").strip(),
         }
         return caption, negatives.get(profile_id)
 

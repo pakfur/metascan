@@ -445,7 +445,7 @@ def _validate_t2i(workflow: Dict[str, Any], found: Dict[str, str]) -> List[Findi
                 "no_negative",
                 "No MS_NEGATIVE node: the T2I dialog's negative prompt cannot "
                 "be applied and will be ignored. That is expected for a model "
-                "that takes none (Krea 2, Z-Image).",
+                "that takes none (Krea 2, Z-Image); MOSS-Image, Qwen-Image and SDXL use one.",
             )
         )
     return findings

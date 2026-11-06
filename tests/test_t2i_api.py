@@ -342,7 +342,7 @@ class TestConfig(T2iApiCase):
         self.assertEqual(body["default_model"], "krea2")
         self.assertEqual(
             body["model_workflows"],
-            {"krea2": None, "qwen": None, "sd": None, "zimage": None},
+            {"krea2": None, "qwen": None, "sd": None, "zimage": None, "moss": None},
         )
         self.assertEqual(body["content_mode"], "uncensored")
         self.assertEqual(body["identity"], {})
@@ -375,7 +375,7 @@ class TestConfig(T2iApiCase):
         models = {
             m["id"]: m for m in self.client.get("/api/t2i/config").json()["models"]
         }
-        self.assertEqual(list(models), ["krea2", "qwen", "sd", "zimage"])
+        self.assertEqual(list(models), ["krea2", "qwen", "sd", "zimage", "moss"])
         self.assertEqual(
             models["krea2"],
             {
@@ -387,7 +387,8 @@ class TestConfig(T2iApiCase):
         )
         self.assertEqual(models["sd"]["identity"], "noun")
         self.assertEqual(
-            [models[m]["has_negative"] for m in models], [False, True, True, False]
+            [models[m]["has_negative"] for m in models],
+            [False, True, True, False, True],
         )
         # A config override wins over the profile's default...
         self.app_config["t2i"] = {"identity": {"sd": "name", "krea2": "bogus"}}

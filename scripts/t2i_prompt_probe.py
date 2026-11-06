@@ -52,16 +52,18 @@ MODELS: Dict[str, bool] = {
     "qwen": True,
     "sd": True,
     "zimage": False,
+    "moss": True,
 }
 
 # Allowed prompt length in words. Each band is the range the model's guideline
 # in data/meta_prompt.yml asks for, widened a little: krea2 90-150, qwen 30-70,
-# sd 60-130, zimage 50-90 (hard ceiling 110).
+# sd 60-130, zimage 50-90 (hard ceiling 110), moss 120-220.
 WORD_BANDS: Dict[str, Tuple[int, int]] = {
     "krea2": (80, 165),
     "qwen": (25, 80),
     "sd": (50, 145),
     "zimage": (40, 110),
+    "moss": (105, 240),
 }
 
 

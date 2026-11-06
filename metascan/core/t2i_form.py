@@ -154,7 +154,7 @@ def _megapixels(value: Any, label: str = "megapixels") -> float:
 def t2i_dims(aspect_ratio: str, megapixels: float, multiple: int) -> Tuple[int, int]:
     """Output ``(width, height)`` for a ratio and a megapixel budget.
 
-    Both edges land on the ``multiple`` grid (16 for Krea2 / Qwen / Z-Image,
+    Both edges land on the ``multiple`` grid (16 for Krea2 / Qwen / Z-Image / MOSS,
     64 for SDXL) and neither is ever less than one multiple, so an extreme
     ratio on a coarse grid still yields a usable short edge. Rounding each
     edge on its own compounds the ratio error at that coarseness, so a

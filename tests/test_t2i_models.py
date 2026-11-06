@@ -20,12 +20,15 @@ SPEC_TABLE = [
     ("qwen", "Qwen-Image", "META_QWEN", True, "ref", 16, 320),
     ("sd", "SDXL", "META_SDXL", True, "noun", 64, 480),
     ("zimage", "Z-Image", "META_ZIMAGE", False, "ref", 16, 280),
+    ("moss", "MOSS-Image", "META_MOSS", True, "ref", 16, 640),
 ]
 
 
 class ProfileTableTests(unittest.TestCase):
     def test_table_matches_the_spec_and_keeps_its_order(self) -> None:
-        self.assertEqual(list(MODEL_PROFILES), ["krea2", "qwen", "sd", "zimage"])
+        self.assertEqual(
+            list(MODEL_PROFILES), ["krea2", "qwen", "sd", "zimage", "moss"]
+        )
         for row in SPEC_TABLE:
             with self.subTest(model=row[0]):
                 profile = MODEL_PROFILES[row[0]]
@@ -52,10 +55,10 @@ class ProfileTableTests(unittest.TestCase):
         for profile in MODEL_PROFILES.values():
             self.assertIn(profile.identity, IDENTITY_STYLES)
 
-    def test_only_qwen_and_sdxl_have_a_negative_prompt(self) -> None:
+    def test_only_qwen_sdxl_and_moss_have_a_negative_prompt(self) -> None:
         self.assertEqual(
             sorted(p.id for p in MODEL_PROFILES.values() if p.has_negative),
-            ["qwen", "sd"],
+            ["moss", "qwen", "sd"],
         )
 
     def test_dimension_multiples_are_positive_powers_of_two(self) -> None:

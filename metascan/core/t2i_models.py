@@ -37,6 +37,10 @@ MODEL_PROFILES: Dict[str, T2iModelProfile] = {
     "zimage": T2iModelProfile(
         "zimage", "Z-Image", "META_ZIMAGE", False, "ref", 16, 280
     ),
+    # MOSS-Image (SFT): no strong default look, so it wants long prompts
+    # (its guideline asks for 120-220 words) and runs with real CFG, so it
+    # takes a negative. Latent edges are multiples of 16.
+    "moss": T2iModelProfile("moss", "MOSS-Image", "META_MOSS", True, "ref", 16, 640),
 }
 
 

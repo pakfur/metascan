@@ -40,7 +40,7 @@ def _load() -> Any:
 
 probe = _load()
 
-MODELS = ("krea2", "qwen", "sd", "zimage")
+MODELS = ("krea2", "qwen", "sd", "zimage", "moss")
 
 
 def words(count: int, word: str = "word") -> str:
@@ -65,6 +65,7 @@ class TestWordCount(unittest.TestCase):
             "qwen": ("META_QWEN", 30, 70),
             "sd": ("META_SDXL", 60, 130),
             "zimage": ("META_ZIMAGE", 50, 90),
+            "moss": ("META_MOSS", 120, 220),
         }
         self.assertEqual(sorted(probe.WORD_BANDS), sorted(stated))
         for model, (key, low, high) in stated.items():
@@ -106,7 +107,7 @@ class TestCheckWordCount(unittest.TestCase):
 
 class TestCheckNegative(unittest.TestCase):
     def test_models_with_a_negative_need_one_and_a_clean_prompt(self) -> None:
-        for model in ("qwen", "sd"):
+        for model in ("qwen", "sd", "moss"):
             with self.subTest(model=model):
                 self.assertTrue(
                     probe.check_negative(model, "A calm beach.", "blurry, watermark").ok
@@ -318,6 +319,7 @@ GOOD = {
     "qwen": words(50, "calm"),
     "sd": words(90, "calm"),
     "zimage": words(70, "calm"),
+    "moss": words(160, "calm"),
 }
 
 
@@ -351,7 +353,9 @@ class TestEvaluate(unittest.TestCase):
     def test_a_good_output_passes_every_check_for_every_model(self) -> None:
         for model in MODELS:
             with self.subTest(model=model):
-                negative = "blurry, watermark" if model in ("qwen", "sd") else None
+                negative = (
+                    "blurry, watermark" if model in ("qwen", "sd", "moss") else None
+                )
                 checks = self.evaluate(model, self.good_prompt(model), negative)
                 self.assertEqual(
                     [c.name for c in checks],
@@ -477,7 +481,7 @@ class FakeServer:
     def default_prompt(model: str, body: Dict[str, Any]) -> Dict[str, Any]:
         """A prompt every check passes for, whatever the caption."""
         caption = body["caption"]
-        negative = "blurry, watermark" if model in ("qwen", "sd") else None
+        negative = "blurry, watermark" if model in ("qwen", "sd", "moss") else None
         return {
             "prompt": f"auburn hair green eyes {GOOD[model]} {CASE_KEEP[caption]}",
             "negative": negative,

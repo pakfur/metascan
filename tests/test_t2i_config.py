@@ -22,7 +22,13 @@ DEFAULTS = {
     "megapixels": [0.5, 1.0, 1.5, 2.0],
     "default_megapixels": 1.0,
     "default_model": "krea2",
-    "model_workflows": {"krea2": None, "qwen": None, "sd": None, "zimage": None},
+    "model_workflows": {
+        "krea2": None,
+        "qwen": None,
+        "sd": None,
+        "zimage": None,
+        "moss": None,
+    },
     "content_mode": "uncensored",
     "identity": {},
     "window": 4,
@@ -111,7 +117,7 @@ class TestValuesPassThrough(unittest.TestCase):
             "megapixels": [0.75, 1.25],
             "default_megapixels": 1.25,
             "default_model": "zimage",
-            "model_workflows": {"krea2": 3, "qwen": 4, "sd": 5, "zimage": 6},
+            "model_workflows": {"krea2": 3, "qwen": 4, "sd": 5, "zimage": 6, "moss": 8},
             "content_mode": "default",
             "identity": {"krea2": "name", "qwen": "noun", "sd": "ref", "zimage": "ref"},
             "window": 8,
@@ -222,7 +228,8 @@ class TestModelWorkflows(unittest.TestCase):
         c = cfg(model_workflows={"zimage": 7})
         self.assertEqual(list(c["model_workflows"]), list(MODEL_PROFILES))
         self.assertEqual(
-            c["model_workflows"], {"krea2": None, "qwen": None, "sd": None, "zimage": 7}
+            c["model_workflows"],
+            {"krea2": None, "qwen": None, "sd": None, "zimage": 7, "moss": None},
         )
 
     def test_unknown_model_ids_are_dropped(self):
