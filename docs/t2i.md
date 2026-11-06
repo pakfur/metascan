@@ -12,7 +12,7 @@ A caption comes from one of two places:
 The pipeline is always the same:
 
 1. **Resolve** — character-name tokens (`__ALICE__`, …) and body-part tokens (`__HAIR__`, …) become deterministic character descriptions: the same caption always gets the same characters, whatever the seed.
-2. **Rewrite** — the local VLM turns the resolved caption into a prompt in the selected model's style (Krea 2, Qwen-Image, SDXL, Z-Image).
+2. **Rewrite** — the local VLM turns the resolved caption into a prompt in the selected model's style (Krea 2, Qwen-Image, SDXL, Z-Image, MOSS-Image).
 3. **Render** — a registered ComfyUI workflow renders it. Every image is its own job with its own seed.
 
 Generated images are ordinary library media. They appear in the grid on the right of the dialog, and each one remembers the dialog contents that produced it.
@@ -28,8 +28,8 @@ The form is on the left, top to bottom: the caption and where it comes from, the
 | **Filter** | Random mode only. Nudity, the three scores, Males / Females, Aspect Ratio and Clothing, with a live "N captions match". |
 | **Generate Prompt** | Resolves the caption and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first batch (see Batches). |
 | **Writer** / **Variants** | Beside **Generate Prompt**, remembered in your browser (never saved with an image). **Writer**: *Base* (the prompt-writing model alone) or *Base + taste* (shown, as examples, the prompts of a few of your ✓ pass images close to the caption; it falls back to Base, with a warning, when it has none). The menu also lists your trained writers, each with its scorecard pass rate (`NN% pass`; see [Prompt-Writer Training](writer-training.md#using-an-adapter)). **Variants**: how many different prompts (1–4) are written for one caption; every variant renders the caption's same seeds, so the images differ by prompt only. See *Variants and drafts*. |
-| **Prompt** / **Negative** | The text that will be rendered. **Negative** appears only for models that write one (Qwen-Image, SDXL) and is sent only if the workflow has an `MS_NEGATIVE` node. |
-| **Model** | Krea 2, Qwen-Image, SDXL or Z-Image. Chooses the prompt style and the default workflow. |
+| **Prompt** / **Negative** | The text that will be rendered. **Negative** appears only for models that write one (Qwen-Image, SDXL, MOSS-Image) and is sent only if the workflow has an `MS_NEGATIVE` node. |
+| **Model** | Krea 2, Qwen-Image, SDXL, Z-Image or MOSS-Image. Chooses the prompt style and the default workflow. |
 | **Workflow** | Every registered `t2i` workflow. |
 | **Size** | Pixel budget in megapixels. |
 | **Aspect Ratio** | Manual: your choice. Random: taken from each caption's row (read-only while a batch runs). |
@@ -114,7 +114,7 @@ A bare *woman* or *man* makes image models draw the subject younger than the num
 
 | Style | Example | Default for |
 |---|---|---|
-| `ref` | *the copper-red-haired woman* | Krea 2, Qwen-Image, Z-Image |
+| `ref` | *the copper-red-haired woman* | Krea 2, Qwen-Image, Z-Image, MOSS-Image |
 | `noun` | *the woman* | SDXL |
 | `name` | *Alice* (introduced as "…woman named Alice") | — |
 
@@ -122,9 +122,20 @@ Override per model with `t2i.identity` in `config.json`.
 
 ## Models and prompt style
 
-Each model's guideline is an entry in `data/meta_prompt.yml`, edited live: `META_KREA2`, `META_QWEN`, `META_SDXL`, `META_ZIMAGE`. `T2I_CAPTION_PREAMBLE` tells the VLM that the caption stands in for the image. `META_KREA2` is a starting point — tune it. The **content mode** (`t2i.content_mode`) appends the existing *Uncensored* or *Keep SFW* directive, or nothing.
+Each model's guideline is an entry in `data/meta_prompt.yml`, edited live: `META_KREA2`, `META_QWEN`, `META_SDXL`, `META_ZIMAGE`, `META_MOSS`. `T2I_CAPTION_PREAMBLE` tells the VLM that the caption stands in for the image. `META_KREA2` is a starting point — tune it. The **content mode** (`t2i.content_mode`) appends the existing *Uncensored* or *Keep SFW* directive, or nothing.
 
-If no VLM is installed (its weights or `llama-server` are missing), or it fails inside a batch, the prompt falls back to the resolved caption (SDXL and Qwen-Image also get a stock negative, SDXL a quality prefix) and the step carries a warning.
+If no VLM is installed (its weights or `llama-server` are missing), or it fails inside a batch, the prompt falls back to the resolved caption (SDXL, Qwen-Image and MOSS-Image also get a stock negative, SDXL a quality prefix) and the step carries a warning.
+
+### MOSS-Image
+
+Most Krea 2 habits carry over to MOSS-Image: prose rather than tag lists, rendered text inside double quotes, and concrete light and materials rather than words like *beautiful*. `META_MOSS` differs where the model does:
+
+- **Longer prompts.** MOSS has no strong default look of its own, so whatever a prompt leaves out is left to chance. The writer aims for 120–220 words (MOSS reads up to about 4K tokens), against Krea 2's 90–150.
+- **A negative prompt.** MOSS runs with real CFG, so the writer also writes a `Negative:` line, starting from `worst quality, bad anatomy, watermark, jpeg artifact`; the fallback negative is the same four terms. Quality words go there, never into the prompt. A negative does nothing at guidance 1.
+- **Text in the picture.** The exact words go inside the quotes, never a placeholder, with each element's role, size and position (a large title at the top, a smaller subtitle below). A real line break goes inside the quotes wherever a line must end, and a prompt with text ends with *with no other text*. The text keeps its own language inside the quotes; the rest stays in English.
+- **Tags only for anime.** For clearly anime or manga art the writer may use booru tags instead of prose, in MOSS's order: quality, score, meta, year, character, series, artist, general.
+
+Set up the workflow to match. Start from **50 steps at CFG 3** with the SFT checkpoint (Base is meant for LoRA training), and raise CFG towards 4–6 only for short prompts that come out loose. Give it an `MS_NEGATIVE` node, or the negative is dropped. Turn the template's prompt enhancer off (`enable_prompt_enhancer` = `false` on its switch node), because the writer already sends a full caption. Small text needs pixels: pick **Size** 2 MP for text-heavy images. MOSS takes no reference images, so for a consistent character keep one fixed description in the caption and fix the seed. Expect each image to take far longer than an 8-step Krea 2 Turbo render. Layout and bounding-box prompting are not supported.
 
 ## Caption directions
 

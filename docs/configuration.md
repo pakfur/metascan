@@ -150,7 +150,7 @@ Read by `backend.config.get_t2i_config` and served to the frontend by `GET /api/
     "megapixels": [0.5, 1.0, 1.5, 2.0],
     "default_megapixels": 1.0,
     "default_model": "krea2",
-    "model_workflows": { "krea2": null, "qwen": null, "sd": null, "zimage": null },
+    "model_workflows": { "krea2": null, "qwen": null, "sd": null, "zimage": null, "moss": null },
     "content_mode": "uncensored",
     "identity": {},
     "window": 4,
@@ -163,9 +163,9 @@ Read by `backend.config.get_t2i_config` and served to the frontend by `GET /api/
 - **`output_root`** — absolute directory generated images are saved under (the **Browse…** picker walks the *server's* filesystem). Empty means `<comfy.output_root>/t2i`, created on demand. A configured directory must already exist — starting a batch against a missing one returns 400.
 - **`output_prefix`** — a path *relative to `output_root`* whose last component is the file name prefix; a unique number and the extension are appended. Same `strftime` tokens, `..` rule, and never-overwrite behaviour as the [`i2v`](#i2v) prefix. Default `"/%Y-%m-%d/t2i_"`.
 - **`megapixels`** / **`default_megapixels`** — size choices as a pixel budget, and the entry the dialog opens with (first entry if the default is not in the list). Width and height are derived from the budget and the aspect ratio and land on a multiple of the model's grid (16, or 64 for SDXL).
-- **`default_model`** — `krea2`, `qwen`, `sd` or `zimage`; anything else falls back to `krea2`.
+- **`default_model`** — `krea2`, `qwen`, `sd`, `zimage` or `moss`; anything else falls back to `krea2`.
 - **`model_workflows`** — a `workflow_presets.id` (kind `t2i`) or `null` per model. Choosing a model in the dialog selects its default workflow.
 - **`content_mode`** — `uncensored` (append the *Uncensored / Adult Detail* directive to the prompt-writing system prompt), `sfw` (append *Keep SFW*), or `default` (append nothing). Anything else falls back to `uncensored`.
-- **`identity`** — optional per-model override of how a later mention of a character reads: `ref`, `noun` or `name`. Unknown models and styles are dropped. Defaults: `ref` for `krea2`/`qwen`/`zimage`, `noun` for `sd`.
+- **`identity`** — optional per-model override of how a later mention of a character reads: `ref`, `noun` or `name`. Unknown models and styles are dropped. Defaults: `ref` for `krea2`/`qwen`/`zimage`/`moss`, `noun` for `sd`.
 - **`window`** — how many unfinished jobs one batch keeps inside ComfyClient's queue at once. Default `4`, floored at `1`.
 - **`max_batch_size`** / **`max_count_per_batch`** — ceilings the batch endpoint enforces. Defaults `500` and `32`.

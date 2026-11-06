@@ -229,6 +229,8 @@ def test_model_family_matching() -> None:
     ):
         assert not matches_model_family([tag_dialect], "sd"), tag_dialect
     assert matches_model_family(["z_image_turbo_bf16.safetensors"], "zimage")
+    assert matches_model_family(["moss_image_sft_bf16.safetensors"], "moss")
+    assert not matches_model_family(["moss_image_sft_bf16.safetensors"], "krea2")
     assert not matches_model_family(["flux1-dev.safetensors"], "krea2")
     assert not matches_model_family([], "krea2")
     assert not matches_model_family(["krea2_dev"], "unknown-model")

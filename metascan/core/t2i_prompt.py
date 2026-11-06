@@ -45,6 +45,7 @@ _FALLBACK_PREFIX_KEYS: Dict[str, str] = {"sd": "T2I_FALLBACK_PREFIX_SD"}
 _FALLBACK_NEGATIVE_KEYS: Dict[str, str] = {
     "sd": "T2I_FALLBACK_NEGATIVE_SD",
     "qwen": "T2I_FALLBACK_NEGATIVE_QWEN",
+    "moss": "T2I_FALLBACK_NEGATIVE_MOSS",
 }
 
 _CLOSING = "Write the prompt now."

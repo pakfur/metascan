@@ -345,7 +345,7 @@ def get_t2i_config(config: dict) -> dict:
             "default_megapixels": 1.0,
             "default_model": "krea2",    # a t2i_models profile id
             "model_workflows": {"krea2": None, "qwen": None, "sd": None,
-                                "zimage": None},   # workflow_presets.id or None
+                                "zimage": None, "moss": None},  # preset id or None
             "content_mode": "uncensored",  # uncensored | sfw | default
             "identity": {},              # per-model override: ref | noun | name
             "window": 4,                 # unfinished jobs per batch
