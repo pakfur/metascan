@@ -27,7 +27,9 @@ from metascan.core.t2i_characters import (
     resolve_caption,
 )
 from metascan.core.t2i_models import MODEL_PROFILES
+from metascan.utils.log_files import close_file_loggers
 from metascan.core.t2i_runner import (
+    STRUCTURED_LOG_NAME,
     WARN_STRUCTURED_NO_TASTE,
     BatchRequest,
 )
@@ -290,9 +292,43 @@ class TestCheck(unittest.TestCase):
             with self.subTest(bad):
                 raw = reply(["ALICE", "BELLA"], interactions=[bad])
                 self.assertTrue(any("uses she, he" in p for p in self.problems(raw)))
-        # The scene and the background name no one at all.
-        scene = reply(["ALICE", "BELLA"], background=["Her coat hangs on a hook."])
+        # A possessive in the background is fine; a subject pronoun is not.
+        coat = reply(["ALICE", "BELLA"], background=["Her coat hangs on a hook."])
+        self.assertEqual(self.problems(coat), [])
+        scene = reply(["ALICE", "BELLA"], background=["She leans on a tree."])
         self.assertTrue(any("background uses" in p for p in self.problems(scene)))
+
+    def test_words_the_reply_dropped_are_listed(self) -> None:
+        description = (
+            "{ALICE} sits on a park bench, watching {BELLA}. {ALICE} wears a red coat."
+        )
+        lost = reply(["ALICE", "BELLA"])
+        problems = t2i_structured.check(
+            t2i_structured.parse(lost, CAST), CAST, description
+        )
+        (missing,) = [p for p in problems if "missing" in p]
+        self.assertIn("'watching'", missing)
+        for kept in ("'park'", "'bench'", "'wears'", "'coat'"):
+            self.assertNotIn(kept, missing)
+        # A word kept in another form ("watches") counts as kept.
+        kept = reply(["ALICE", "BELLA"], interactions=["{ALICE} watches {BELLA}."])
+        data = t2i_structured.parse(kept, CAST)
+        self.assertEqual(t2i_structured.missing_words(data, CAST, description), [])
+        # A typo in the caption is kept by its right spelling.
+        spelled = t2i_structured.parse(
+            reply(["ALICE", "BELLA"], interactions=["{ALICE} is watching {BELLA}."]),
+            CAST,
+        )
+        self.assertEqual(
+            t2i_structured.missing_words(
+                spelled, CAST, "{ALICE} is vwatching {BELLA}."
+            ),
+            [],
+        )
+        # The cast's draws are the renderer's: a trait in the text is kept.
+        self.assertEqual(
+            t2i_structured.missing_words(data, CAST, "{ALICE} has grey eyes."), []
+        )
 
     def test_garment_labels_are_checked_only_when_handles_need_them(self) -> None:
         same = reply(
@@ -390,9 +426,7 @@ class TestRender(unittest.TestCase):
                 subject("BELLA", garment_label="coat"),
             ],
         )
-        self.assertIn(
-            "On the left, the woman on the left is", self.render(same, blondes)
-        )
+        self.assertIn(". The woman on the left is", self.render(same, blondes))
         # A shared hair value already gives the bare noun as the handle.
         shared = (
             member("ALICE", "auburn hair", "the woman", False),
@@ -401,6 +435,58 @@ class TestRender(unittest.TestCase):
         self.assertIn(
             "the woman in the red coat", self.render(reply(["ALICE", "BELLA"]), shared)
         )
+
+    def test_a_man_and_a_woman_are_named_by_their_nouns(self) -> None:
+        # Two brown-haired people with no clothing: the nouns tell them apart.
+        cast = (
+            member("ADAM", "chestnut brown hair", noun="man"),
+            member("ALICE", "espresso brown hair"),
+        )
+        raw = reply(
+            [],
+            subjects=[
+                subject(
+                    "ADAM",
+                    position="center",
+                    clothing=[],
+                    garment_label="",
+                    pose="sitting on his bed",
+                ),
+                subject(
+                    "ALICE",
+                    position="back",
+                    clothing=[],
+                    garment_label="",
+                    pose="stands in the doorway",
+                ),
+            ],
+            interactions=["{ALICE} watches {ADAM}."],
+        )
+        data = t2i_structured.parse(raw, cast)
+        self.assertEqual(t2i_structured.check(data, cast), [])
+        prompt, _ = t2i_structured.render(data, cast, MOSS)
+        self.assertIn("In the center, the man is a 30-year-old man", prompt)
+        self.assertIn("At the back, the woman is a 30-year-old woman", prompt)
+        self.assertIn("He is sitting on his bed.", prompt)
+        self.assertIn("She stands in the doorway.", prompt)
+        self.assertIn("The woman watches the man.", prompt)
+
+    def test_position_handles_read_as_english(self) -> None:
+        blondes = (
+            member("ALICE", "honey blonde hair"),
+            member("BELLA", "platinum blonde hair"),
+        )
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", position="center", clothing=[], garment_label=""),
+                subject("BELLA", position="back", clothing=[], garment_label=""),
+            ],
+        )
+        prompt = self.render(raw, blondes)
+        self.assertIn(". The woman in the center is a 30-year-old woman", prompt)
+        self.assertIn(". The woman at the back is a 30-year-old woman", prompt)
+        self.assertNotIn("In the center, the woman", prompt)
 
     def test_the_negative_is_the_stock_one_plus_new_extras(self) -> None:
         data = t2i_structured.parse(
@@ -437,11 +523,22 @@ class StructuredRunnerCase(RunnerCase):
         library, _ = self.library.get()
         return [m.name for m in mark_caption(TWO, 7, library).cast]
 
+    def good(self, seed: int = 7, **over: Any) -> Dict[str, Any]:
+        """A subject for ALICE that keeps everything TWO says about her."""
+        library, _ = self.library.get()
+        hair = mark_caption(TWO, seed, library).cast[0].hair
+        fields: Dict[str, Any] = dict(hair=f"long, wavy {hair}")
+        fields.update(over)
+        return subject("ALICE", **fields)
+
+    def good_reply(self, seed: int = 7, **over: Any) -> str:
+        return reply([], subjects=[self.good(seed, **over), subject("BELLA")])
+
 
 class TestGeneratePromptStructured(StructuredRunnerCase):
     async def test_a_two_character_moss_caption_is_written_structured(self) -> None:
         assert self.vlm is not None
-        self.vlm.replies.append(reply(self.names()))
+        self.vlm.replies.append(self.good_reply())
         result = await self.runner.generate_prompt(caption=TWO, seed=7, model="moss")
         (call,) = self.vlm.calls
         self.assertIn("grammar", call)
@@ -469,11 +566,11 @@ class TestGeneratePromptStructured(StructuredRunnerCase):
         hedged = reply(
             [],
             subjects=[
-                subject(names[0], clothing=["fabric resembling a sash"]),
+                self.good(clothing=["fabric resembling a sash"]),
                 subject(names[1]),
             ],
         )
-        self.vlm.replies.extend([hedged, reply(names)])
+        self.vlm.replies.extend([hedged, self.good_reply()])
         result = await self.runner.generate_prompt(caption=TWO, seed=7, model="moss")
         self.assertEqual(len(self.vlm.calls), 2)
         retry = self.vlm.calls[1]["user_prompt"]
@@ -488,7 +585,7 @@ class TestGeneratePromptStructured(StructuredRunnerCase):
         hedged = reply(
             [],
             subjects=[
-                subject(names[0], clothing=["fabric resembling a sash"]),
+                self.good(clothing=["fabric resembling a sash"]),
                 subject(names[1]),
             ],
         )
@@ -534,7 +631,7 @@ class TestGeneratePromptStructured(StructuredRunnerCase):
         assert self.vlm is not None
         fetch = mock.AsyncMock(return_value=(["a passed prompt"], None))
         self.runner.taste_examples = fetch
-        self.vlm.replies.append(reply(self.names()))
+        self.vlm.replies.append(self.good_reply())
         result = await self.runner.generate_prompt(
             caption=TWO, seed=7, model="moss", writer="base+taste"
         )
@@ -544,13 +641,106 @@ class TestGeneratePromptStructured(StructuredRunnerCase):
 
     async def test_each_variant_gets_its_angle(self) -> None:
         assert self.vlm is not None
-        self.vlm.default_reply = reply(self.names())
+        self.vlm.default_reply = self.good_reply()
         result = await self.runner.generate_prompt(
             caption=TWO, seed=7, model="moss", variants=2
         )
         self.assertEqual([d.writer_id for d in result.drafts], [WRITER_STRUCTURED] * 2)
         turns = sorted(str(c["user_prompt"]) for c in self.vlm.calls)
         self.assertEqual(sum("ANGLE: lead with" in t for t in turns), 1)
+
+
+class TestStructuredJsonLog(StructuredRunnerCase):
+    def log_path(self) -> Any:
+        directory = self.root / "logs"
+        self.runner.structured_log_dir = directory
+        path = directory / STRUCTURED_LOG_NAME
+        self.addCleanup(close_file_loggers, path)
+        return path
+
+    def entries(self, path: Any) -> List[Dict[str, Any]]:
+        close_file_loggers(path)  # flush and release the file (Windows)
+        text = path.read_text(encoding="utf-8")
+        decoder = json.JSONDecoder()
+        out, at = [], 0
+        while at < len(text):
+            if text[at].isspace():
+                at += 1
+                continue
+            obj, at = decoder.raw_decode(text, at)
+            out.append(obj)
+        return out
+
+    async def test_off_by_default_nothing_is_written(self) -> None:
+        assert self.vlm is not None
+        path = self.log_path()
+        self.assertFalse(self.cfg["structured_json_log"])
+        self.vlm.replies.append(self.good_reply())
+        await self.runner.generate_prompt(caption=TWO, seed=7, model="moss")
+        self.assertFalse(path.exists())
+
+    async def test_each_structured_prompt_is_one_pretty_entry(self) -> None:
+        assert self.vlm is not None
+        path = self.log_path()
+        self.cfg["structured_json_log"] = True
+        self.vlm.replies.append(self.good_reply())
+        await self.runner.generate_prompt(caption=TWO, seed=7, model="moss")
+        (entry,) = self.entries(path)
+        self.assertEqual(entry["caption"], TWO)
+        self.assertEqual(entry["writer_model"], "qwen3vl-8b")
+        self.assertEqual(
+            [x["id"] for x in entry["json"]["subjects"]], ["ALICE", "BELLA"]
+        )
+        self.assertEqual(entry["checks_failing"], [])
+        self.assertNotIn("retry", entry)
+        self.assertRegex(entry["timestamp"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]")
+        # Pretty-printed: one key per line, indented.
+        self.assertIn('\n  "caption": ', path.read_text(encoding="utf-8"))
+
+    async def test_a_retry_logs_the_first_reply_and_its_problems(self) -> None:
+        assert self.vlm is not None
+        path = self.log_path()
+        self.cfg["structured_json_log"] = True
+        hedged = reply(
+            [],
+            subjects=[
+                self.good(clothing=["fabric resembling a sash"]),
+                subject("BELLA"),
+            ],
+        )
+        self.vlm.replies.extend([hedged, self.good_reply()])
+        await self.runner.generate_prompt(caption=TWO, seed=7, model="moss")
+        (entry,) = self.entries(path)
+        self.assertEqual(
+            entry["retry"]["first_json"]["subjects"][0]["clothing"],
+            ["fabric resembling a sash"],
+        )
+        self.assertTrue(
+            any("resembling" in p for p in entry["retry"]["first_problems"])
+        )
+        self.assertEqual(entry["checks_failing"], [])
+
+    async def test_a_failed_write_never_fails_the_prompt(self) -> None:
+        assert self.vlm is not None
+        self.log_path()
+        self.cfg["structured_json_log"] = True
+        self.vlm.replies.append(self.good_reply())
+        with mock.patch(
+            "metascan.core.t2i_runner.get_file_logger", side_effect=OSError("disk full")
+        ):
+            result = await self.runner.generate_prompt(
+                caption=TWO, seed=7, model="moss"
+            )
+        self.assertEqual(result.drafts[0].writer_id, WRITER_STRUCTURED)
+
+    async def test_prose_prompts_are_never_logged(self) -> None:
+        assert self.vlm is not None
+        path = self.log_path()
+        self.cfg["structured_json_log"] = True
+        await self.runner.generate_prompt(
+            caption="__ALICE__ waves.", seed=7, model="moss"
+        )
+        self.assertFalse(path.exists())
 
 
 class TestBatchStructured(BatchCase):
@@ -571,7 +761,10 @@ class TestBatchStructured(BatchCase):
 
     async def test_a_batch_step_is_written_structured(self) -> None:
         assert self.vlm is not None
-        self.vlm.replies.append(reply(self.cast_names()))
+        library, _ = self.library.get()
+        hair = mark_caption(TWO, 10, library).cast[0].hair
+        good = subject("ALICE", hair=f"long, wavy {hair}")
+        self.vlm.replies.append(reply([], subjects=[good, subject("BELLA")]))
         batch_id = await self.run_to_end(self.named())
         (step,) = self.written(batch_id)
         self.assertEqual(step["writer_id"], WRITER_STRUCTURED)

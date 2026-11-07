@@ -42,6 +42,7 @@ DEFAULTS = {
         "act_min": 0.80,
         "skip_act_on_conflict": True,
     },
+    "structured_json_log": False,
 }
 
 JUNK = [None, True, False, 5, 1.5, "x", "", [], ["x"], {}, {"a": 1}]
@@ -131,8 +132,15 @@ class TestValuesPassThrough(unittest.TestCase):
                 "act_min": 0.95,
                 "skip_act_on_conflict": False,
             },
+            "structured_json_log": True,
         }
         self.assertEqual(get_t2i_config({"t2i": section}), section)
+
+    def test_the_structured_json_log_is_on_only_for_true(self):
+        for value in (True, False, 1, "true", None):
+            with self.subTest(value=value):
+                got = get_t2i_config({"t2i": {"structured_json_log": value}})
+                self.assertIs(got["structured_json_log"], value is True)
 
 
 class TestOutputPlacement(unittest.TestCase):

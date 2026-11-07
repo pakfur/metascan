@@ -137,6 +137,7 @@ class MarkedCaption:
     text: str
     cast: Tuple[CastMember, ...]
     warnings: List[str]
+    source: str = ""  # the caption as given, tokens and all
 
 
 # ``(?<!_)`` keeps a long run of underscores linear: a token can only start
@@ -809,7 +810,7 @@ def mark_caption(caption: str, seed: int, library: Library) -> MarkedCaption:
     warnings: List[str] = []
     matches = list(_TOKEN_RE.finditer(caption))
     if not matches:
-        return MarkedCaption(text=caption, cast=(), warnings=warnings)
+        return MarkedCaption(text=caption, cast=(), warnings=warnings, source=caption)
     genders = _name_genders(library.config)
     plan = _Planner(caption, matches, library, genders, warnings).run()
     cast_names = [
@@ -856,4 +857,6 @@ def mark_caption(caption: str, seed: int, library: Library) -> MarkedCaption:
                 handle_has_hair=renderer.handle_carries_hair(name),
             )
         )
-    return MarkedCaption(text=text, cast=tuple(members), warnings=warnings)
+    return MarkedCaption(
+        text=text, cast=tuple(members), warnings=warnings, source=caption
+    )

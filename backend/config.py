@@ -359,6 +359,8 @@ def get_t2i_config(config: dict) -> dict:
                 "act_min": 0.80,
                 "skip_act_on_conflict": True,
             },
+            "structured_json_log": False,  # write the structured writer's JSON
+                                           # to logs/structured_prompts.log
         }
 
     ``output_root`` + ``output_prefix`` place generated images the way the
@@ -479,4 +481,5 @@ def get_t2i_config(config: dict) -> dict:
         "max_batch_size": _at_least_one(raw.get("max_batch_size"), 500),
         "max_count_per_batch": _at_least_one(raw.get("max_count_per_batch"), 32),
         "directions": directions,
+        "structured_json_log": raw.get("structured_json_log") is True,
     }

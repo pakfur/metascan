@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
+from difflib import get_close_matches
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from metascan.core.prompt_store import PromptStore, get_prompt_store
@@ -68,14 +70,30 @@ _HEDGE_RE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER_RE = re.compile(r"\{([A-Z][A-Z0-9]*)\}")
-_PRONOUN_RE = re.compile(r"\b(she|he|her|his|hers|him)\b", re.IGNORECASE)
-# In an interaction the actor's own possessive ("{ALICE} wraps her right arm
-# around {BELLA}") is clear; what can point at the wrong person is a subject
-# or object pronoun: she, he, him, hers, and "her" used as an object before
-# a noun phrase ("hands her a cup").
-_INTERACTION_PRONOUN_RE = re.compile(
+# A possessive in the scene, the background or an interaction ("a man on his
+# bed", "{ALICE} wraps her right arm around {BELLA}") is clear; what can point
+# at the wrong person is a subject or object pronoun: she, he, him, hers, and
+# "her" used as an object before a noun phrase ("hands her a cup").
+_PERSON_PRONOUN_RE = re.compile(
     r"\b(she|he|him|hers)\b|\bher\s+(?:a|an|the|some|one|two)\b", re.IGNORECASE
 )
+
+# Words of a description that say nothing a reply must keep: framing words a
+# reply rephrases ("shows" becomes "a photograph of"), the verbs the renderer
+# writes itself ("She wears ...") and function words.
+_RECALL_SKIP = frozenset(
+    """shows show shown showing depicts depicting features featuring image
+    picture photo photograph scene setting shot view frame framed composition
+    visible positioned appears there their they them this that these those
+    with from into onto over under behind between while which whose where
+    when also very some each other both another about around near next
+    across along against toward towards upon within without through
+    being been have having does doing slightly gently softly wear wears
+    wearing worn dressed""".split()
+)
+RECALL_MAX = 8
+# How close a reply's word must be to a caption word to count as it (difflib).
+RECALL_TYPO_CUTOFF = 0.85
 
 # Hair colour families: two handles from one family ("honey blonde" and
 # "platinum blonde") look alike, so the renderer names those people by a
@@ -304,10 +322,54 @@ def _all_text(data: Dict[str, Any]) -> List[Tuple[str, str]]:
     return out
 
 
-def check(data: Dict[str, Any], cast: Sequence[CastMember]) -> List[str]:
+def missing_words(
+    data: Dict[str, Any], cast: Sequence[CastMember], description: str
+) -> List[str]:
+    """Content words of ``description`` (the marked caption) that appear
+    nowhere in the reply or in what code adds itself (the cast's draws), at
+    most :data:`RECALL_MAX`, in the order they appear. A word counts as kept
+    when the reply holds a word sharing its first five letters ("watching"
+    is kept by "watches") or a close spelling of it (a caption typo:
+    "vwatching" is kept by "watching"), so a dropped fact shows and a
+    rephrasing mostly does not."""
+    kept_text = " ".join(t for _, t in _all_text(data))
+    kept_text += " " + " ".join(
+        " ".join([m.identity, *m.traits, m.hair or ""]) for m in cast
+    )
+    kept_words = set(re.findall(r"[a-z]+", kept_text.lower()))
+    kept = {w[:5] for w in kept_words}
+    words = re.findall(r"[a-z]+", _PLACEHOLDER_RE.sub(" ", description).lower())
+    missing: List[str] = []
+    for word in words:
+        if len(word) < 4 or word in _RECALL_SKIP or word[:5] in kept:
+            continue
+        if get_close_matches(word, kept_words, n=1, cutoff=RECALL_TYPO_CUTOFF):
+            continue  # a typo in the caption ("vwatching") the reply spelled right
+        if word not in missing:
+            missing.append(word)
+        if len(missing) == RECALL_MAX:
+            break
+    return missing
+
+
+def check(
+    data: Dict[str, Any],
+    cast: Sequence[CastMember],
+    description: Optional[str] = None,
+) -> List[str]:
     """What the reply got wrong, each worded as an instruction the model can
-    follow on a retry. Empty: nothing to fix."""
+    follow on a retry. Empty: nothing to fix. With ``description`` (the
+    marked caption) it also lists the description's words the reply lost.
+    A problem may quote those words: problems go to the model, and the
+    runner's warning carries only their count, so never log them."""
     problems: List[str] = []
+    if description is not None:
+        lost = missing_words(data, cast, description)
+        if lost:
+            problems.append(
+                "these words of the description are missing, put what they "
+                "say in the right field: " + ", ".join(repr(w) for w in lost)
+            )
     for where, text in _all_text(data):
         hedges = sorted({m.group(0).lower() for m in _HEDGE_RE.finditer(text)})
         if hedges:
@@ -321,10 +383,11 @@ def check(data: Dict[str, Any], cast: Sequence[CastMember]) -> List[str]:
                 f"the pose of {{{s['id']}}} involves another person: "
                 "move that part to interactions"
             )
-    for where in ("scene", "interactions", "background"):
-        texts = [data[where]] if where == "scene" else data[where]
-        pattern = _INTERACTION_PRONOUN_RE if where == "interactions" else _PRONOUN_RE
-        if any(pattern.search(t) for t in texts):
+    # The scene may not name anyone, so a pronoun is the only way it can
+    # refer back ("a woman watching him"); the other two can use the names.
+    for where in ("interactions", "background"):
+        texts = data[where]
+        if any(_PERSON_PRONOUN_RE.search(t) for t in texts):
             problems.append(
                 f"{where} uses she, he, her or his for a person: "
                 "use the names in braces"
@@ -337,7 +400,9 @@ def check(data: Dict[str, Any], cast: Sequence[CastMember]) -> List[str]:
     positions = [s["position"] for s in data["subjects"]]
     if len(set(positions)) != len(positions):
         problems.append("two people have the same position: give each their own")
-    if _needs_garment_handles(cast):
+    if _needs_garment_handles(cast) and all(s["clothing"] for s in data["subjects"]):
+        # Only when everyone has clothing: a description without any cannot
+        # give a label, and the handles then fall back to position.
         labels = [s["garment_label"].lower() for s in data["subjects"]]
         if any(not label for label in labels) or len(set(labels)) != len(labels):
             problems.append(
@@ -346,16 +411,60 @@ def check(data: Dict[str, Any], cast: Sequence[CastMember]) -> List[str]:
     return problems
 
 
+def log_entry(
+    caption: str,
+    model_id: str,
+    data: Dict[str, Any],
+    problems: Sequence[str],
+    *,
+    first: Optional[Dict[str, Any]] = None,
+    first_problems: Sequence[str] = (),
+    when: Optional[datetime] = None,
+) -> str:
+    """One pretty-printed JSON entry for ``t2i.structured_json_log``: the
+    time (local, ISO 8601), the caption as typed, the writer model, the JSON
+    the prompt was rendered from and the checks it still fails; after a
+    retry also the first reply and what was wrong with it."""
+    stamp = (when or datetime.now()).astimezone().isoformat(timespec="seconds")
+    entry: Dict[str, Any] = {
+        "timestamp": stamp,
+        "caption": caption,
+        "writer_model": model_id,
+        "json": data,
+        "checks_failing": list(problems),
+    }
+    if first is not None:
+        entry["retry"] = {"first_json": first, "first_problems": list(first_problems)}
+    return json.dumps(entry, indent=2, ensure_ascii=False) + "\n"
+
+
 # ---- rendering -------------------------------------------------------------
 
 
-def _needs_garment_handles(cast: Sequence[CastMember]) -> bool:
-    """True when the hair handles cannot tell the cast apart: a handle
-    without hair, or two hair values of one colour family."""
+def _hair_tells_apart(cast: Sequence[CastMember]) -> bool:
+    """True when every hair handle names a hair colour of its own family."""
     if any(not m.handle_has_hair for m in cast):
-        return True
+        return False
     families = [hair_family(m.hair) for m in cast]
-    return None in families or len(set(families)) != len(families)
+    return None not in families and len(set(families)) == len(families)
+
+
+def _needs_garment_handles(cast: Sequence[CastMember]) -> bool:
+    """True when neither the hair nor the nouns tell the cast apart (a man
+    and a woman are "the man" and "the woman")."""
+    if _hair_tells_apart(cast):
+        return False
+    nouns = [m.noun for m in cast]
+    return len(set(nouns)) != len(nouns)
+
+
+_POSITION_PHRASE: Dict[str, str] = {
+    "left": "on the left",
+    "right": "on the right",
+    "center": "in the center",
+    "front": "in front",
+    "back": "at the back",
+}
 
 
 def _ordinal(n: int) -> str:
@@ -364,17 +473,23 @@ def _ordinal(n: int) -> str:
 
 def handles(data: Dict[str, Any], cast: Sequence[CastMember]) -> Dict[str, str]:
     """One fixed, distinct name per cast member: the resolver's hair handle
-    when the hair tells everyone apart, else "the woman in the navy dress",
-    else "the woman on the left", and as a last resort an ordinal."""
+    when the hair tells everyone apart, else the bare noun when the nouns
+    do ("the man", "the woman"), else "the woman in the navy dress", else
+    "the woman on the left", and as a last resort an ordinal."""
     by_id = {s["id"]: s for s in data["subjects"]}
     out: Dict[str, str] = {}
-    if not _needs_garment_handles(cast):
+    if _hair_tells_apart(cast):
         return {m.name: m.handle for m in cast}
+    if not _needs_garment_handles(cast):
+        return {m.name: f"the {m.noun}" for m in cast}
     for m in cast:
         label = re.sub(r"^(a|an|the)\s+", "", by_id[m.name]["garment_label"].lower())
         out[m.name] = f"the {m.noun} in the {label}" if label else ""
     if any(not h for h in out.values()) or len(set(out.values())) != len(out):
-        out = {m.name: f"the {m.noun} on the {by_id[m.name]['position']}" for m in cast}
+        out = {
+            m.name: f"the {m.noun} {_POSITION_PHRASE[by_id[m.name]['position']]}"
+            for m in cast
+        }
     if len(set(out.values())) != len(out):
         out = {m.name: f"the {_ordinal(i)} {m.noun}" for i, m in enumerate(cast)}
     return out
@@ -396,6 +511,32 @@ def _sentence(text: str) -> str:
 
 
 _PRONOUNS: Dict[str, Tuple[str, str]] = {"woman": ("She", "her"), "man": ("He", "his")}
+# Bare verbs that end in -ing, which a participle check must not touch.
+_ING_VERBS = frozenset(
+    {
+        "bring",
+        "cling",
+        "fling",
+        "ring",
+        "sing",
+        "sling",
+        "spring",
+        "sting",
+        "string",
+        "swing",
+        "wring",
+    }
+)
+
+
+def _finite(pose: str) -> str:
+    """A pose the model wrote as a participle ("sitting on his bed") made
+    to follow "She" / "He": "is sitting on his bed". A finite verb
+    ("sits") is left alone."""
+    first = pose.split(" ", 1)[0].lower()
+    if first.endswith("ing") and first not in _ING_VERBS:
+        return "is " + pose
+    return pose
 
 
 def render(
@@ -428,9 +569,12 @@ def render(
         withs += s["features"]
         if s["hair"]:
             withs.append(s["hair"])
-        intro = (
-            _POSITION_LEAD[s["position"]] + f"{names[member.name]} is {member.identity}"
-        )
+        handle = names[member.name]
+        if handle.endswith(_POSITION_PHRASE[s["position"]]):
+            # "The woman in the center is ..." already says where she is.
+            intro = f"{handle[0].upper()}{handle[1:]} is {member.identity}"
+        else:
+            intro = _POSITION_LEAD[s["position"]] + f"{handle} is {member.identity}"
         if withs:
             intro += " with " + _join_and(withs)
         person = [intro + "."]
@@ -438,7 +582,7 @@ def render(
             person.append(f"{subject} wears {_join_and(s['clothing'])}.")
         pose = s["pose"]
         if pose and not (_PLACEHOLDER_RE.search(pose) and data["interactions"]):
-            person.append(f"{subject} {fill(pose).rstrip('.')}.")
+            person.append(f"{subject} {_finite(fill(pose)).rstrip('.')}.")
         if s["expression"]:
             person.append(f"{subject} has {s['expression'].rstrip('.')}.")
         parts.append(" ".join(person))

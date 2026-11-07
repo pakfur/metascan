@@ -125,6 +125,8 @@ from metascan.core.writer_adapters import (
     parse_adapter_writer_id,
 )
 from metascan.core.vlm_select import VlmSelectError, pick_vlm_model
+from metascan.utils.app_paths import get_data_dir
+from metascan.utils.log_files import get_file_logger
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,8 @@ WARN_STRUCTURED_PROSE = (
     "structured prompt unavailable ({reason}) - the prompt was written as prose"
 )
 WARN_STRUCTURED_CHECKS = "structured prompt: {count} check(s) still failing"
+# The file t2i.structured_json_log appends to, in the logs directory.
+STRUCTURED_LOG_NAME = "structured_prompts.log"
 
 # Prompt variants per caption, and the writers a request may ask for
 # (besides ``adapter:<id>``, a prompt-writer adapter, used without examples).
@@ -754,6 +758,9 @@ class T2iRunner:
         # ✓ prompts for the "base+taste" writer; None means guidance
         # is unavailable (a step warning says so and the writer is "base").
         self.taste_examples = taste_examples
+        # Where t2i.structured_json_log writes (None: <data dir>/../logs, the
+        # server log's directory; tests point it at a temp dir).
+        self.structured_log_dir: Optional[Path] = None
         self.output_root = Path(output_root)
         self.unload_vlm_during_generation = unload_vlm_during_generation
         # Called afresh for every prompt and every batch, so an edit to the
@@ -1002,6 +1009,18 @@ class T2iRunner:
             raise VlmError("the VLM returned an empty prompt")
         return prompt, negative
 
+    def _write_structured_log(self, entry: str) -> None:
+        """Append one entry to logs/structured_prompts.log (the opt-in
+        t2i.structured_json_log). It holds captions and prompts, so it is a
+        file of its own and never reaches server.log; a failed write is
+        logged by its type and never fails the prompt."""
+        try:
+            directory = self.structured_log_dir or get_data_dir().parent / "logs"
+            directory.mkdir(parents=True, exist_ok=True)
+            get_file_logger(directory / STRUCTURED_LOG_NAME).info(entry)
+        except Exception as exc:
+            logger.warning("structured JSON log not written (%s)", type(exc).__name__)
+
     async def _marked(
         self, profile: T2iModelProfile, caption: str, seed: int, writer: str
     ) -> Optional[MarkedCaption]:
@@ -1052,18 +1071,31 @@ class T2iRunner:
 
         raw = await ask(user)
         data = t2i_structured.parse(raw, marked.cast)
-        problems = t2i_structured.check(data, marked.cast)
+        problems = t2i_structured.check(data, marked.cast, marked.text)
+        first: Optional[Dict[str, Any]] = None
+        first_problems = list(problems)
         if problems:
+            first = data
             again = await ask(t2i_structured.retry_user(user, raw, problems))
             try:
                 second = t2i_structured.parse(again, marked.cast)
             except StructuredError:
                 second = None
             if second is not None:
-                left = t2i_structured.check(second, marked.cast)
+                left = t2i_structured.check(second, marked.cast, marked.text)
                 if len(left) <= len(problems):
                     data, problems = second, left
         prompt, negative = t2i_structured.render(data, marked.cast, profile)
+        if self._get_config().get("structured_json_log") is True:
+            entry = t2i_structured.log_entry(
+                marked.source,
+                model_id,
+                data,
+                problems,
+                first=first,
+                first_problems=first_problems,
+            )
+            await asyncio.to_thread(self._write_structured_log, entry)
         notes = [WARN_STRUCTURED_CHECKS.format(count=len(problems))] if problems else []
         return prompt, negative, notes
 

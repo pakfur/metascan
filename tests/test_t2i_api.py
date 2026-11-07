@@ -332,6 +332,7 @@ class TestConfig(T2iApiCase):
                     "csv",
                     "wildcards",
                     "directions",
+                    "structured_json_log",
                 ]
             ),
         )
