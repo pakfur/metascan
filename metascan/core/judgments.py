@@ -36,12 +36,21 @@ WRITER_BASE = "base"
 WRITER_BASE_TASTE = "base+taste"
 WRITER_FALLBACK = "fallback"
 WRITER_MANUAL = "manual"
+# The base model filling the structured multi-character JSON, with the prose
+# rendered by code (metascan/core/t2i_structured.py). Never requested: the
+# runner picks it for a base / base+taste request whose caption qualifies.
+WRITER_STRUCTURED = "structured"
 # Writers a supplied draft may name (a typed-from-scratch prompt is MANUAL).
-DRAFT_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE, WRITER_FALLBACK)
+DRAFT_WRITERS: Tuple[str, ...] = (
+    WRITER_BASE,
+    WRITER_BASE_TASTE,
+    WRITER_FALLBACK,
+    WRITER_STRUCTURED,
+)
 
 
 # Writers whose drafts come from a VLM, so the lineage names its model.
-MODEL_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE)
+MODEL_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE, WRITER_STRUCTURED)
 
 
 class WriterModelError(ValueError):

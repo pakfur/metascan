@@ -4,6 +4,7 @@ import type {
   CaptionFilter,
   CaptionMeta,
   CaptionRow,
+  CaptionToken,
   T2iBatchInfo,
   T2iBatchRequest,
   T2iBatchStarted,
@@ -32,6 +33,12 @@ export function countCaptions(filter: CaptionFilter = {}): Promise<CaptionCount>
 // One random matching row. Answers 404 (ApiError) when nothing matches.
 export function randomCaption(filter: CaptionFilter = {}): Promise<CaptionRow> {
   return post('/t2i/captions/random', { filter })
+}
+
+// The tokens a caption may use (character names, owner-bound slots, plain
+// wildcard lists), spelled as typed, for the caption box's `__` completion.
+export function fetchCaptionTokens(): Promise<{ tokens: CaptionToken[] }> {
+  return get('/t2i/captions/tokens')
 }
 
 // The caption with its __TOKEN__s resolved for this seed and model. Review

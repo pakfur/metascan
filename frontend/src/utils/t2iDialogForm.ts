@@ -29,9 +29,16 @@ import { isAdapterWriterId } from '../types/writers'
 
 /**
  * Every value the dialog's inputs hold. The first eleven are the editable copy
- * an image keeps (T2iFormState, see toFormState); seed policy, Batch Size and
- * Count per Batch are session-local: actions, not properties of an image, so
- * loading an image or a draft never touches them.
+ * an image keeps (T2iFormState, see toFormState); seed policy and the three run
+ * counts are session-local: actions, not properties of an image, so loading an
+ * image or a draft never touches them.
+ *
+ * The run counts are the three tiers of a Generate: CAPTIONS x PROMPTS x
+ * IMAGES. Each caption gets PROMPTS prompts, and each prompt renders IMAGES
+ * images with the caption's seeds (the prompts of one caption share them, so
+ * they differ by prompt alone -- what makes them a fair comparison for the
+ * writer's training). On the wire they are `batch_size`, `variants` and
+ * `count_per_batch`.
  */
 export interface T2iFields {
   mode: T2iMode
@@ -46,8 +53,12 @@ export interface T2iFields {
   negative: string
   loras: T2iLora[]
   seedPolicy: SeedPolicy
-  batchSize: number
-  countPerBatch: number
+  /** CAPTIONS: Random only (Manual renders the one in its Caption box). */
+  captionCount: number
+  /** PROMPTS per caption (1..MAX_VARIANTS). */
+  promptCount: number
+  /** IMAGES per prompt, one seed each (Fixed forces 1). */
+  imageCount: number
 }
 
 const PREFERRED_ASPECT = '3:2'
@@ -82,8 +93,9 @@ export function initialFields(cfg: T2iConfig | null, presetIds: number[], seed: 
     negative: '',
     loras: [],
     seedPolicy: 'fixed',
-    batchSize: 1,
-    countPerBatch: 1,
+    captionCount: 1,
+    promptCount: 1,
+    imageCount: 1,
   }
 }
 
@@ -109,8 +121,8 @@ export function toFormState(f: T2iFields): T2iFormState {
  * inputs are not mutated). A key that is absent, and a null model, workflow,
  * size, aspect ratio or seed, leaves the current value alone: an image
  * ingested without one of them has nothing better to offer. A null text or
- * filter means an empty box. Seed policy, Batch Size and Count per Batch are
- * never touched, so loading an image can never queue a large re-run.
+ * filter means an empty box. Seed policy and the run counts are never
+ * touched, so loading an image can never queue a large re-run.
  */
 export function mergeFormState(f: T2iFields, s: Partial<T2iFormState>): T2iFields {
   return {
@@ -170,8 +182,6 @@ export interface BatchContext {
   hasNegative: boolean
   maxBatchSize: number
   maxCount: number
-  /** The Variants picker (prompt variants per caption). Default 1. */
-  variants?: number
   /** The Writer picker. Default `base`. */
   writer?: T2iWriter
   /** The drafts the store holds behind the Prompt box, if any. */
@@ -242,7 +252,7 @@ export function draftSetFromSteps(steps: T2iBatchStep[], shown: T2iBatchStep): T
 
 /** Writers whose drafts a supplied prompt may name (judgments.DRAFT_WRITERS). */
 // The writers whose drafts a tile can hand back (plus any `adapter:<id>`).
-const DRAFT_WRITERS = ['base', 'base+taste', 'fallback']
+const DRAFT_WRITERS = ['base', 'base+taste', 'fallback', 'structured']
 
 /**
  * A selected tile's lineage as a one-entry draft set, so re-rendering a
@@ -296,10 +306,10 @@ export function draftSetFromImage(
  * belongs to the boxes: none held, written for another caption, or an empty
  * Prompt box (which means "write me one", never "render a draft"). A box
  * whose text came from a draft is never sent as typed:
- *  - the drafts were written for as many variants as the picker asks for:
+ *  - the drafts were written for as many prompts as PROMPTS asks for:
  *    every variant held goes out (all of them, or the ones a cut-short run
  *    handed back), the shown one with the boxes' live text;
- *  - the picker has changed since: the variant on show goes out alone.
+ *  - PROMPTS has changed since: the variant on show goes out alone.
  * Entries are numbered 0..k-1 in the request (the server renders k variants
  * of this caption; drawn captions after it still get the picker's number).
  */
@@ -309,7 +319,7 @@ export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt
   if (!set || set.caption !== f.caption || !f.prompt.trim() || set.entries.length === 0) return null
   const shownEntry = set.entries[set.current]
   if (!shownEntry) return null
-  const picked = set.variants === (ctx.variants ?? 1) ? set.entries : [shownEntry]
+  const picked = set.variants === f.promptCount ? set.entries : [shownEntry]
   return picked.map((e, i) => {
     const shown = e === shownEntry
     const text = shown ? f.prompt : e.text
@@ -335,17 +345,45 @@ export function usablePrompts(f: T2iFields, ctx: BatchContext): T2iVariantPrompt
 }
 
 /**
- * How many steps (prompts) a Generate renders, each Count per Batch images:
- * batch 1 has one per held draft, one for a typed prompt, else one per
- * variant; the batches after it one per variant.
+ * The Prompt box holds a typed prompt: text no held draft belongs to. It is
+ * rendered as written, once (a writer is not asked for more of it), so it is
+ * caption 1's only prompt -- and, in Manual, the whole run's.
  */
-export function plannedSteps(f: T2iFields, ctx: BatchContext): number {
-  const variants = ctx.variants ?? 1
+export function typedPrompt(f: T2iFields, ctx: BatchContext): boolean {
+  return firstBatchSource(f) === 'prompt' && usablePrompts(f, ctx) === null
+}
+
+/** PROMPTS as a Manual Generate uses it: a typed prompt locks it at 1. */
+export function promptsLocked(f: T2iFields, ctx: BatchContext): boolean {
+  return f.mode === 'manual' && typedPrompt(f, ctx)
+}
+
+/** PROMPTS as sent: whole, 1..max. */
+export function effectivePromptCount(f: T2iFields, max: number): number {
+  const n = Math.trunc(Number(f.promptCount))
+  return Number.isFinite(n) ? Math.min(Math.max(n, 1), max) : 1
+}
+
+/**
+ * A Manual Generate with a caption and an empty Prompt box: PROMPTS prompts
+ * are written for the caption first (the same call Generate Prompt makes),
+ * then rendered. The server's Manual mode only renders prompts it is given.
+ */
+export function writesPromptsFirst(f: T2iFields): boolean {
+  return f.mode === 'manual' && firstBatchSource(f) === 'caption'
+}
+
+/**
+ * How many prompts a Generate renders, each IMAGES images: caption 1 has one
+ * per held draft, one for a typed prompt, else PROMPTS; every caption after
+ * it PROMPTS.
+ */
+export function plannedSteps(f: T2iFields, ctx: BatchContext, maxPrompts: number): number {
+  const prompts = effectivePromptCount(f, maxPrompts)
   const held = usablePrompts(f, ctx)
-  const typed = f.mode === 'manual' || firstBatchSource(f) === 'prompt'
-  const first = held ? held.length : typed ? 1 : variants
-  const captions = effectiveBatchSize(f.mode, f.batchSize, ctx.maxBatchSize)
-  return first + (captions - 1) * variants
+  const first = held ? held.length : typedPrompt(f, ctx) ? 1 : prompts
+  const captions = effectiveBatchSize(f.mode, f.captionCount, ctx.maxBatchSize)
+  return first + (captions - 1) * prompts
 }
 
 /**
@@ -356,10 +394,11 @@ export function plannedSteps(f: T2iFields, ctx: BatchContext): number {
  * hold (see firstBatchSource): the prompt in the Prompt box, rendered as it
  * stands; else the caption in the Caption box, which has a prompt written for
  * it; else nothing, and the server rolls a caption. The batches after the first
- * always roll a caption and write a prompt. The counts are the EFFECTIVE ones:
- * Manual is locked at Batch Size 1, and Fixed forces Count per Batch to 1.
+ * always roll a caption and write PROMPTS prompts. The counts are the
+ * EFFECTIVE ones: Manual is locked at one caption, a typed prompt renders once,
+ * and Fixed forces IMAGES to 1.
  */
-export function buildBatchRequest(f: T2iFields, ctx: BatchContext): T2iBatchRequest {
+export function buildBatchRequest(f: T2iFields, ctx: BatchContext, maxPrompts: number): T2iBatchRequest {
   if (f.presetId === null) throw new Error('Choose a workflow first')
   const req: T2iBatchRequest = {
     mode: f.mode,
@@ -368,10 +407,10 @@ export function buildBatchRequest(f: T2iFields, ctx: BatchContext): T2iBatchRequ
     megapixels: f.megapixels,
     seed: f.seed,
     seed_policy: f.seedPolicy,
-    batch_size: effectiveBatchSize(f.mode, f.batchSize, ctx.maxBatchSize),
-    count_per_batch: effectiveCount(f.seedPolicy, f.countPerBatch, ctx.maxCount),
+    batch_size: effectiveBatchSize(f.mode, f.captionCount, ctx.maxBatchSize),
+    count_per_batch: effectiveCount(f.seedPolicy, f.imageCount, ctx.maxCount),
     loras: f.loras.map((l) => ({ name: l.name, strength: l.strength })),
-    variants: ctx.variants ?? 1,
+    variants: effectivePromptCount(f, maxPrompts),
     writer: ctx.writer ?? 'base',
   }
   const held = usablePrompts(f, ctx)
@@ -387,7 +426,7 @@ export function buildBatchRequest(f: T2iFields, ctx: BatchContext): T2iBatchRequ
     req.aspect_ratio = f.aspect
     if (f.caption.trim()) req.caption = f.caption
     if (ctx.hasNegative && f.negative.trim()) req.negative = f.negative
-    // A typed Manual prompt renders once, whatever the picker says.
+    // A typed Manual prompt renders once (PROMPTS is locked at 1 for it).
     if (f.mode === 'manual') req.variants = 1
   }
   if (f.mode === 'random') {
@@ -443,7 +482,7 @@ export function requestSignature(
     aspect: f.aspect,
     loras: f.loras.map((l) => [l.name, l.strength]),
     policy: f.seedPolicy,
-    count: effectiveCount(f.seedPolicy, f.countPerBatch),
+    count: effectiveCount(f.seedPolicy, f.imageCount),
   })
 }
 
@@ -483,5 +522,6 @@ export function generateBlocker(f: T2iFields, ctx: BlockerContext): string | nul
   if (!f.model) return 'Choose a model'
   if (f.presetId === null) return 'Choose a workflow'
   if (f.mode === 'random') return ctx.csvAvailable ? null : 'The caption file is not available'
-  return f.prompt.trim() ? null : 'Write or generate a prompt first'
+  // An empty Prompt box with a caption has its prompts written first.
+  return f.prompt.trim() || f.caption.trim() ? null : 'Write a caption or a prompt first'
 }

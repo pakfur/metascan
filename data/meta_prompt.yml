@@ -641,6 +641,41 @@ META_MOSS: |-
   A photograph of a weathered fisherman in his sixties mending an orange net on a wooden pier at dawn, his deep-set grey eyes fixed on a knot between thick, scarred fingers. He wears a faded navy wool sweater with a frayed collar and yellow rubber bib trousers glossy with seawater. Coiled ropes, a dented aluminium bucket and a stack of blue plastic crates crowd the foreground; behind him the harbour fades into low mist where two moored trawlers sit as soft silhouettes. Shot at eye level on a 50mm lens at f/2.8, he fills the left third of the frame and the background falls into creamy blur. Low sun from the right rims his beard and cheekbone in warm gold while the shadow side stays cool blue from the overcast sky. Muted teal and slate tones with one saturated orange accent from the net. Visible pores, salt-crusted wool fibres, splintered grey planks slick with dew, fine 35mm film grain. Quiet, patient and unhurried.
   Negative: worst quality, bad anatomy, watermark, jpeg artifact, deformed hands, oversaturated, plastic skin
 
+# --- T2I structured multi-character writer (metascan/core/t2i_structured.py)
+# For a caption with two or more character tokens, on a model profile with
+# structured = True: the VLM fills a grammar-constrained JSON object and code
+# renders the prose, so each person keeps their own traits and one fixed
+# name. The user turn is PEOPLE / DESCRIPTION / optional DIRECTION and ANGLE.
+T2I_STRUCTURED_SYSTEM: |-
+  You turn a DESCRIPTION of a picture with two or more people into JSON for an image prompt. Code writes the final prompt from your JSON: it introduces each person with their age, looks and one fixed name, so put every piece of information in the right field and nothing else.
+
+  # People
+  - The description names its people {ALICE}, {BELLA}, {ADAM} and so on. The JSON already has one entry per name, in order: fill each with what the description says about that person.
+  - Inside any text, refer to a person only by their name in braces, such as {ALICE}, never by "she", "her", "the woman" or a description. Inside a person's own pose, "her", "his" and "their" for that person are fine.
+  - position: where the person is in the frame, one of left, right, center, front, back. Use what the description says; if it says nothing, choose one consistent with the arrangement. Give two people the same position only when the description does.
+  - hair: the person's hair as a noun phrase with its style and colour, in the description's words: "long, straight ash blonde hair falling over her shoulders". Empty when the description says nothing about the hair.
+  - features: other physical traits the description gives that person, each a short noun phrase. Empty when there are none.
+  - clothing: each garment or accessory of that person, each a noun phrase: "a fitted navy blue long-sleeved dress with a subtle sheen".
+  - garment_label: the person's most distinctive garment in two or three words with its colour or pattern, such as "navy dress" or "floral sundress"; a different label for each person. Empty only when the description gives no clothing.
+  - pose: what the person does on their own, as a verb phrase in the present tense without a subject: "sits with her legs slightly crossed". Anything that involves another person, such as touching, holding, handing or looking at them, goes in interactions, never in pose.
+  - expression: the person's expression as a noun phrase, such as "a soft, warm smile". Empty when not given.
+
+  # Rules for every field
+  - Use only what the description says about a person. Never invent a garment, an age, a hairstyle or a colour.
+  - Every trait, garment and object stays with the person the description gives it to. Never drop one.
+  - Write each fact once, in one field, in the description's own words.
+  - No hedges: never write "possibly", "likely", "appears", "resembling", "seems" or "visible at the edge of the frame". Say what is there: "red fabric visible at the lower edge of the frame, possibly part of a garment" becomes "a red garment".
+  - No parentheses anywhere.
+
+  # Scene and the rest
+  - scene: one sentence with the medium, the shot type, the setting, how many people there are and how they are arranged, with no individual traits and no names. Start with the medium: "A photograph of two women sitting side by side on a beige couch, framed as a medium close-up."
+  - interactions: one sentence for each thing two or more people do together or to each other, using names: "{ALICE} hands {BELLA} a slice of watermelon." Empty when there are none.
+  - background: setting details, objects and background from the description that the scene sentence did not already say.
+  - camera, lighting, colour, textures, mood: never mention a person or a name in these. One sentence each in the style of a MOSS-Image prompt: keep what the description states and add concrete detail that contradicts nothing, such as a lens and aperture, each light source and its direction, the dominant hues and accents, the materials and surfaces, the mood. Describe light by its source, direction and colour. No quality words such as "masterpiece", "best quality" or "8k".
+  - negative_extra: one to four flaws this particular picture risks, such as "deformed hands" or "merged bodies".
+  - unresolved: anything you had to guess, briefly, without quoting the description. Empty if nothing.
+  - If a DIRECTION block follows the description, carry it out in the fields where it belongs. If an ANGLE line follows, let it lead the camera, lighting, colour, textures and mood sentences.
+
 T2I_CAPTION_PREAMBLE: |-
   # Caption-to-prompt mode
   No image is attached to this request. The user message holds a DESCRIPTION of the picture to be made. Treat the DESCRIPTION as ground truth: wherever the guideline below says "the image", read it as "the description".

@@ -7,7 +7,6 @@ import {
   MAX_VARIANTS,
   SEED_MAX,
   T2I_WRITERS,
-  VARIANTS_STORAGE_KEY,
   WRITER_STORAGE_KEY,
   activeFilterCount,
   effectiveBatchSize,
@@ -40,6 +39,9 @@ import type { Media } from '../../types/media'
 import type { WorkflowPreset } from '../../types/storyboard'
 import { ApiError } from '../../api/client'
 import { listPresets } from '../../api/comfy'
+import { fetchCaptionTokens } from '../../api/t2i'
+import type { CaptionToken } from '../../types/t2i'
+import TokenTextarea from '../generation/TokenTextarea.vue'
 import { useFoldersStore } from '../../stores/folders'
 import { useT2iStore } from '../../stores/t2i'
 import { useTasteStore } from '../../stores/taste'
@@ -53,6 +55,9 @@ import { useWriterPick } from '../../composables/useWriterPick'
 import { GPU_BUSY_TEXT, isGpuBusyTraining } from '../../utils/gpuBusy'
 import {
   buildBatchRequest,
+  effectivePromptCount,
+  promptsLocked,
+  writesPromptsFirst,
   defaultPresetFor,
   draftSetFromImage,
   draftSetFromResult,
@@ -302,34 +307,6 @@ function setDirections(on: boolean) {
     /* private mode: the choice lasts for this session */
   }
 }
-// Writer and Variants: also per browser, never per image (form_state does not
-// carry them), so loading an image never changes them.
-function readPref(key: string): string | null {
-  try {
-    return localStorage.getItem(key)
-  } catch {
-    return null
-  }
-}
-function writePref(key: string, value: string) {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    /* private mode: the choice lasts for this session */
-  }
-}
-function storedVariants(): number {
-  const n = Number(readPref(VARIANTS_STORAGE_KEY))
-  return Number.isInteger(n) && n >= 1 && n <= MAX_VARIANTS ? n : 1
-}
-const variants = ref<number>(storedVariants())
-const variantChoices = Array.from({ length: MAX_VARIANTS }, (_, i) => i + 1)
-function setVariants(v: string) {
-  const n = Number(v)
-  if (!Number.isInteger(n) || n < 1 || n > MAX_VARIANTS) return
-  variants.value = n
-  writePref(VARIANTS_STORAGE_KEY, String(n))
-}
 
 // Categories every image of the next batch is tagged with. Session-local, like
 // the directions switch: not part of form_state, so selecting a tile never
@@ -459,14 +436,16 @@ function toggleResolved() {
 // Review-only: writes the prompt into the box and shows what the caption
 // resolved to, and never starts a render. A 502 means the language model
 // failed (or timed out): the caption is fine and a retry usually works.
-async function onGeneratePrompt() {
-  if (!form.caption.trim() || !form.model || generating.value) return
+// Writes PROMPTS prompts; true when they went into the boxes (a Manual
+// Generate with only a caption calls it first, then renders them).
+async function onGeneratePrompt(): Promise<boolean> {
+  if (!form.caption.trim() || !form.model || generating.value) return false
   const body = {
     caption: form.caption,
     seed: form.seed,
     model: form.model,
     directions: useDirections.value,
-    variants: variants.value,
+    variants: promptCount.value,
     writer: writer.value,
     category_ids: [...categoryIds.value],
   }
@@ -484,7 +463,7 @@ async function onGeneratePrompt() {
         'info',
         4000,
       )
-      return
+      return false
     }
     form.prompt = r.prompt // a Random Generate renders it as its first batch
     if (hasNegative.value && r.negative !== null) form.negative = r.negative
@@ -501,11 +480,12 @@ async function onGeneratePrompt() {
     promptDirection.value = r.direction ? { text: r.direction, parts: r.direction_parts } : null
     resolved.value = { key: JSON.stringify([body.caption, body.seed, body.model]), text: r.resolved_caption, warnings: r.warnings }
     resolvedOpen.value = true
+    return true
   } catch (e) {
-    if (handledAdapterError(e)) return
+    if (handledAdapterError(e)) return false
     if (isGpuBusyTraining(e)) {
       toast.show(GPU_BUSY_TEXT, 'warn', 5000)
-      return
+      return false
     }
     if (isUnknownCategoryError(e)) {
       void refreshCategories()
@@ -514,7 +494,7 @@ async function onGeneratePrompt() {
         'warn',
         6000,
       )
-      return
+      return false
     }
     toast.show(
       e instanceof ApiError && e.status === 502
@@ -523,6 +503,7 @@ async function onGeneratePrompt() {
       'warn',
       6000,
     )
+    return false
   } finally {
     generating.value = false
   }
@@ -561,6 +542,17 @@ async function onRoll() {
 // Typing in the Caption box: drafts belong to the caption they were written
 // for, so any change lets them go (the Prompt box keeps its text, which a
 // Generate then sends as typed).
+// The tokens the caption box completes after `__` (fetched once; none on a
+// failure, which only costs the list).
+const captionTokens = ref<CaptionToken[]>([])
+onMounted(async () => {
+  try {
+    captionTokens.value = (await fetchCaptionTokens()).tokens
+  } catch (e) {
+    console.error('Failed to load caption tokens', e)
+  }
+})
+
 function onCaptionInput(text: string) {
   form.caption = text
   if (store.drafts) store.discardDrafts()
@@ -577,7 +569,7 @@ const draftLabel = computed(() => {
   const set = draftSet.value
   if (!set) return ''
   const entry = set.entries[set.current]
-  return `variant ${set.current + 1} of ${set.entries.length} · ${writerName(store.adapters, entry.writer_id)}`
+  return `prompt ${set.current + 1} of ${set.entries.length} · ${writerName(store.adapters, entry.writer_id)}`
 })
 // An explicit user action: what the boxes hold stays with the variant being
 // left, and the other variant's text (as last left) goes in.
@@ -662,33 +654,46 @@ watch(filterOpen, (open) => {
   askFilterCount()
 })
 
-// ---- batch numbers ------------------------------------------------------------------------------------
-const shownBatchSize = computed(() => effectiveBatchSize(form.mode, form.batchSize, maxBatchSize.value))
-const countIgnored = computed(() => !isCountEffective(form.seedPolicy, form.countPerBatch))
-// What a Generate sends besides the form: limits, the pickers and the drafts.
+// ---- the run counts: CAPTIONS x PROMPTS x IMAGES ---------------------------------------------------
+// Session-local like the seed policy (never form_state, never localStorage), so
+// loading an image or reopening the dialog can never queue a large run.
+const shownCaptions = computed(() => effectiveBatchSize(form.mode, form.captionCount, maxBatchSize.value))
+const promptCount = computed(() => effectivePromptCount(form, MAX_VARIANTS))
+const imagesIgnored = computed(() => !isCountEffective(form.seedPolicy, form.imageCount))
+const shownImages = computed(() => effectiveCount(form.seedPolicy, form.imageCount, maxCount.value))
+// What a Generate sends besides the form: limits, the writer and the drafts.
 const batchContext = computed<BatchContext>(() => ({
   hasNegative: hasNegative.value,
   maxBatchSize: maxBatchSize.value,
   maxCount: maxCount.value,
-  variants: variants.value,
   writer: writer.value,
   drafts: store.drafts,
 }))
-const planned = computed(
-  () => plannedSteps(form, batchContext.value) * effectiveCount(form.seedPolicy, form.countPerBatch, maxCount.value),
-)
+// A typed Manual prompt renders as written, once: PROMPTS shows 1 and is locked.
+const promptsFixed = computed(() => promptsLocked(form, batchContext.value))
+const shownPrompts = computed(() => (promptsFixed.value ? 1 : promptCount.value))
+const plannedPrompts = computed(() => plannedSteps(form, batchContext.value, MAX_VARIANTS))
+const planned = computed(() => plannedPrompts.value * shownImages.value)
 const generateLabel = computed(() => (planned.value > 1 ? `Generate ×${planned.value}` : 'Generate'))
+// Grades of prompts that share a caption's seeds train the writer (variant
+// preference pairs), so a run that gives some caption 2+ prompts says so.
+const trainsWriter = computed(() => plannedPrompts.value > shownCaptions.value)
 
 // A committed number settles on what will really be used (whole, within the limits).
-function onBatchSize(e: Event) {
+function onCaptionCount(e: Event) {
   const input = e.target as HTMLInputElement
-  form.batchSize = effectiveBatchSize('random', Number(input.value), maxBatchSize.value)
-  input.value = String(form.batchSize)
+  form.captionCount = effectiveBatchSize('random', Number(input.value), maxBatchSize.value)
+  input.value = String(form.captionCount)
 }
-function onCountPerBatch(e: Event) {
+function onPromptCount(e: Event) {
   const input = e.target as HTMLInputElement
-  form.countPerBatch = effectiveCount('increment', Number(input.value), maxCount.value)
-  input.value = String(form.countPerBatch)
+  form.promptCount = effectivePromptCount({ ...form, promptCount: Number(input.value) }, MAX_VARIANTS)
+  input.value = String(form.promptCount)
+}
+function onImageCount(e: Event) {
+  const input = e.target as HTMLInputElement
+  form.imageCount = effectiveCount('increment', Number(input.value), maxCount.value)
+  input.value = String(form.imageCount)
 }
 
 // ---- Generate / Cancel -----------------------------------------------------------------------------------
@@ -703,25 +708,26 @@ const batchWarnings = ref<string[]>([])
 const firstBatch = computed(() => firstBatchSource(form))
 // Says what Generate will do, from the same boxes that decide it.
 const firstBatchHint = computed(() => {
-  const more = shownBatchSize.value > 1
+  const more = shownCaptions.value > 1
+  const prompts = promptCount.value > 1 ? `${promptCount.value} prompts` : 'a prompt'
   switch (firstBatch.value) {
     case 'prompt':
       if ((usablePrompts(form, batchContext.value)?.length ?? 0) > 1) {
         return more
-          ? 'Batch 1 renders the prompt variants above; the others roll new captions and write their prompts'
-          : 'Renders the prompt variants above'
+          ? `Caption 1 renders the prompts above; each caption after it is rolled and gets ${prompts} written`
+          : 'Renders the prompts above'
       }
       return more
-        ? 'Batch 1 renders the prompt above; the others roll new captions and write their prompts'
-        : 'Renders the prompt above'
+        ? `Caption 1 renders the prompt above, once; each caption after it is rolled and gets ${prompts} written`
+        : 'Renders the prompt above, once'
     case 'caption':
       return more
-        ? 'Batch 1 writes a prompt for the caption above; the others roll new captions'
-        : 'Writes a prompt for the caption above, then renders it'
+        ? `Caption 1 is the one above; every caption gets ${prompts} written, the others are rolled`
+        : `Writes ${prompts} for the caption above, then renders`
     default:
       return more
-        ? 'Every batch rolls a new caption and writes its prompt'
-        : 'Rolls a caption, writes its prompt, then renders it'
+        ? `Every caption is rolled and gets ${prompts} written`
+        : `Rolls a caption, writes ${prompts} for it, then renders`
   }
 })
 
@@ -748,9 +754,21 @@ function startErrorText(e: unknown): string {
 
 async function onGenerate() {
   if (blocker.value !== null) return
+  if (writesPromptsFirst(form)) {
+    // Manual with only a caption: PROMPTS prompts are written into the boxes
+    // first (as Generate Prompt would), and the run renders those drafts.
+    submitting.value = true
+    let written = false
+    try {
+      written = await onGeneratePrompt()
+    } finally {
+      submitting.value = false
+    }
+    if (!written || blocker.value !== null || writesPromptsFirst(form)) return
+  }
   // The server owns the run: one snapshot of the form goes out, and nothing
   // typed afterwards can reach a batch that is already running.
-  const req = buildBatchRequest(form, batchContext.value)
+  const req = buildBatchRequest(form, batchContext.value, MAX_VARIANTS)
   req.directions = useDirections.value
   req.category_ids = [...categoryIds.value]
   const signature = req.mode === 'manual' ? requestSignature(form, hasNegative.value, req.prompts ?? null) : null
@@ -829,7 +847,7 @@ const gridItems = computed(() => {
 })
 
 // Clicking an image loads its saved form_state into the form and starts
-// autosaving into it. Seed policy, Batch Size and Count per Batch stay as they
+// autosaving into it. Seed policy and CAPTIONS / PROMPTS / IMAGES stay as they
 // are, and nothing is started (a stored Random mode only restores the mode
 // and its filter). The grid only reports the FIRST click of a double-click,
 // so opening the viewer never selects twice.
@@ -1121,15 +1139,14 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </div>
-              <textarea
+              <TokenTextarea
                 id="t2i-caption"
-                class="area"
-                rows="3"
-                spellcheck="false"
+                :rows="3"
+                :tokens="captionTokens"
                 :value="shownCaption"
                 :readonly="randomLocked"
-                :placeholder="randomLocked ? 'A caption is drawn from the caption file for each batch…' : 'Describe the image. Character tokens like __ALICE__ and __HAIR__ are filled in for you.'"
-                @input="onCaptionInput(($event.target as HTMLTextAreaElement).value)"
+                :placeholder="randomLocked ? 'A caption is drawn from the caption file for each caption of the run…' : 'Describe the image. Type __ for character tokens like __ALICE__ and __HAIR__: they are filled in for you, and two or more characters keep their traits apart.'"
+                @input="onCaptionInput"
               />
               <div class="sec-foot">
                 <button
@@ -1157,22 +1174,13 @@ onBeforeUnmount(() => {
                       >{{ a.label }}</option>
                     </select>
                   </label>
-                  <label class="inline-pick" title="How many different prompts are written for one caption; each renders the caption's same seeds">
-                    <span>Variants</span>
-                    <select
-                      :value="variants"
-                      :disabled="randomLocked"
-                      @change="setVariants(($event.target as HTMLSelectElement).value)"
-                    >
-                      <option v-for="n in variantChoices" :key="n" :value="n">{{ n }}</option>
-                    </select>
-                  </label>
                   <button
                     type="button"
                     class="btn"
-                    :disabled="generating || randomLocked || !form.caption.trim() || !form.model"
+                    :disabled="generating || submitting || randomLocked || !form.caption.trim() || !form.model"
+                    :title="promptCount > 1 ? `Writes ${promptCount} prompts (PROMPTS) for the caption, to read and edit before rendering` : 'Writes the prompt for the caption, to read and edit before rendering'"
                     @click="onGeneratePrompt"
-                  >{{ generating ? (variants > 1 ? 'Writing prompts…' : 'Writing prompt…') : 'Generate Prompt' }}</button>
+                  >{{ generating ? (promptCount > 1 ? 'Writing prompts…' : 'Writing prompt…') : (promptCount > 1 ? 'Generate Prompts' : 'Generate Prompt') }}</button>
                 </div>
               </div>
               <div v-if="resolvedOpen && !randomLocked" class="resolved">
@@ -1236,7 +1244,7 @@ onBeforeUnmount(() => {
                 spellcheck="false"
                 :value="shownPrompt"
                 :readonly="randomLocked"
-                :placeholder="randomLocked ? 'A prompt is written for each batch…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
+                :placeholder="randomLocked ? 'The prompts are written for each caption…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
                 @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
               />
               <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
@@ -1301,7 +1309,7 @@ onBeforeUnmount(() => {
                 >
                   <option v-for="a in aspectOptions" :key="a" :value="a">{{ a }}</option>
                 </select>
-                <small v-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatch !== 'draw' ? 'used for batch 1, then taken from each caption' : 'taken from each caption' }}</small>
+                <small v-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatch !== 'draw' ? 'used for caption 1, then taken from each caption' : 'taken from each caption' }}</small>
               </label>
               <SeedControls
                 class="f-seed"
@@ -1325,32 +1333,52 @@ onBeforeUnmount(() => {
               <div class="counts">
                 <label
                   class="fld fld-inline"
-                  title="Random Caption: how many batches a run renders. Each batch is one caption, one prompt and Count Per Batch images; batch 1 uses the prompt above when there is one. Manual always renders one prompt."
+                  :class="{ 'fld-off': form.mode === 'manual' }"
+                  :title="form.mode === 'manual' ? 'Manual renders the caption above: switch to Random Caption to roll more' : 'How many captions a run rolls (caption 1 is the boxes above when they hold one)'"
                 >
-                  <span>Batch Size</span>
+                  <span>Captions</span>
                   <input
                     type="number"
                     min="1"
                     :max="maxBatchSize"
                     step="1"
-                    :value="shownBatchSize"
-                    :disabled="form.mode === 'manual'"
-                    @change="onBatchSize"
+                    :value="shownCaptions"
+                    :disabled="form.mode === 'manual' || randomLocked"
+                    @change="onCaptionCount"
                   />
                 </label>
+                <span class="times" aria-hidden="true">×</span>
                 <label
                   class="fld fld-inline"
-                  :class="{ 'fld-off': countIgnored }"
-                  :title="countIgnored ? 'Ignored while the seed is Fixed: the same seed would render the same image again' : 'How many images to render for each prompt'"
+                  :class="{ 'fld-off': promptsFixed }"
+                  :title="promptsFixed ? 'A typed prompt renders as written, once. Empty the Prompt box (or press Generate Prompt) to have several written for the caption.' : 'How many prompts are written for each caption. They render the caption\'s same seeds, so they differ by prompt alone.'"
                 >
-                  <span>Count Per Batch</span>
+                  <span>Prompts</span>
+                  <input
+                    type="number"
+                    min="1"
+                    :max="MAX_VARIANTS"
+                    step="1"
+                    :value="shownPrompts"
+                    :disabled="promptsFixed || randomLocked"
+                    @change="onPromptCount"
+                  />
+                </label>
+                <span class="times" aria-hidden="true">×</span>
+                <label
+                  class="fld fld-inline"
+                  :class="{ 'fld-off': imagesIgnored }"
+                  :title="imagesIgnored ? 'Ignored while the seed is Fixed: the same seed would render the same image again' : 'How many images (one seed each) to render for each prompt'"
+                >
+                  <span>Images</span>
                   <input
                     type="number"
                     min="1"
                     :max="maxCount"
                     step="1"
-                    :value="form.countPerBatch"
-                    @change="onCountPerBatch"
+                    :value="form.imageCount"
+                    :disabled="randomLocked"
+                    @change="onImageCount"
                   />
                 </label>
               </div>
@@ -1363,7 +1391,7 @@ onBeforeUnmount(() => {
                   @click="onCancel"
                 >{{ cancelling ? 'Cancelling…' : 'Cancel' }}</button>
                 <button type="button" class="btn primary" :disabled="blocker !== null" @click="onGenerate">
-                  {{ submitting ? 'Submitting…' : generateLabel }}
+                  {{ generating && submitting ? 'Writing prompts…' : submitting ? 'Submitting…' : generateLabel }}
                 </button>
               </div>
             </div>
@@ -1372,6 +1400,8 @@ onBeforeUnmount(() => {
               <p class="status" role="status" aria-live="polite">{{ store.statusText }}</p>
               <p v-if="blocker !== null && blocker !== 'Still loading'" class="hint">{{ blocker }}</p>
               <p v-else-if="form.mode === 'random' && !randomLocked" class="hint">{{ firstBatchHint }}</p>
+              <p v-else-if="form.mode === 'manual' && firstBatch === 'caption'" class="hint">{{ firstBatchHint }}</p>
+              <p v-if="trainsWriter && !randomLocked" class="hint" title="Prompts of one caption render the same seeds; grading their images (✓ / ✗) teaches the prompt writer which one worked">Grading these trains the writer</p>
             </div>
             <ul v-if="batchWarnings.length" class="lint">
               <li v-for="w in batchWarnings" :key="w">⚠ {{ w }}</li>
@@ -1658,7 +1688,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-/* Writer and Variants sit beside Generate Prompt, the button they shape. */
+/* The Writer sits beside Generate Prompt, the button it shapes. */
 .writer-row {
   display: flex;
   align-items: center;
@@ -1976,7 +2006,13 @@ onBeforeUnmount(() => {
 .counts {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 16px;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.counts .times {
+  color: var(--text-color-secondary);
+  font-size: 12px;
 }
 
 .actions {

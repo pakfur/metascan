@@ -137,6 +137,32 @@ export interface CaptionCount {
   total: number
 }
 
+/** A token the caption box offers after `__` (GET /api/t2i/captions/tokens). */
+export interface CaptionToken {
+  token: string // spelled as typed: "__ALICE__"
+  kind: 'character' | 'slot' | 'wildcard'
+  note: string // "woman", "the owner's", "random pick"
+}
+
+/**
+ * The completion for the caret: when the text before it ends in `__` plus
+ * letters or digits (not inside a longer word), the tokens that start with
+ * what was typed, case-insensitively. `start` is where the typed `__` begins.
+ */
+export function tokenCompletion(
+  text: string,
+  caret: number,
+  tokens: readonly CaptionToken[],
+): { start: number; matches: CaptionToken[] } | null {
+  const before = text.slice(0, caret)
+  const m = /(?:^|[^A-Za-z0-9_])(__[A-Za-z0-9]*)$/.exec(before)
+  if (!m) return null
+  const typed = m[1].toUpperCase()
+  const matches = tokens.filter((t) => t.token.startsWith(typed) && t.token !== typed)
+  if (!matches.length) return null
+  return { start: caret - m[1].length, matches }
+}
+
 /** One CSV row, as POST /api/t2i/captions/random returns it. */
 export interface CaptionRow {
   id: number
@@ -314,6 +340,7 @@ export function t2iWriterLabel(
   if (builtin) return builtin.label
   if (writerId === 'manual') return 'Typed prompt (no writer)'
   if (writerId === 'fallback') return 'Fallback: the caption became the prompt (no writer model)'
+  if (writerId === 'structured') return 'Structured: base Qwen filled each character in, code wrote the prompt'
   if (isAdapterWriterId(writerId)) {
     if (adapters === null) return `${writerId} (adapter)`
     // The registry lists every adapter but the deleted ones.
@@ -821,26 +848,26 @@ export function imageWindow(held: number, pages: number, pageSize: number, serve
 // ---- status line -------------------------------------------------------------
 
 /**
- * "Batch 3/10 · variant 2/4": which caption is on show (the UI calls each
- * caption a batch) and which of its prompt variants. The variant part only
- * when there is more than one; null for a single step (Manual, one variant).
- * Frames from a server without caption_index fall back to counting steps.
+ * "Caption 3/10 · Prompt 2/4": which caption is on show and which of its
+ * prompts (the server's variant). The prompt part only when there is more
+ * than one; null for a single step (Manual, one prompt). Frames from a
+ * server without caption_index fall back to counting steps.
  */
 export function stepLabel(s: T2iBatchStep): string | null {
-  const variants = s.variants > 1 ? ` · variant ${s.variant_index + 1}/${s.variants}` : ''
+  const prompt = s.variants > 1 ? `Prompt ${s.variant_index + 1}/${s.variants}` : ''
   if (s.caption_index != null && s.captions != null) {
-    const batch = s.captions > 1 ? `Batch ${s.caption_index + 1}/${s.captions}` : ''
-    const text = [batch, variants.replace(/^ · /, '')].filter(Boolean).join(' · ')
+    const caption = s.captions > 1 ? `Caption ${s.caption_index + 1}/${s.captions}` : ''
+    const text = [caption, prompt].filter(Boolean).join(' · ')
     return text || null
   }
-  return s.total_steps > 1 ? `Batch ${s.step}/${s.total_steps}` : null
+  return s.total_steps > 1 ? `Step ${s.step}/${s.total_steps}` : null
 }
 
 /**
- * "Batch 12/40 · 37/160 images · 2 failed · rendering". The batch part is
- * dropped for a single-step (Manual) batch; images appear once one finished.
- * The batch part is the one being rendered (the server puts it on show), even
- * while later prompts are still being written.
+ * "Caption 12/40 · Prompt 1/2 · 37/160 images · 2 failed · rendering". The
+ * caption part is dropped for a single-step (Manual) batch; images appear
+ * once one finished. The caption part is the one being rendered (the server
+ * puts it on show), even while later prompts are still being written.
  */
 export function batchStatusLine(b: T2iActiveBatch): string {
   const parts: string[] = []

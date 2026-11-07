@@ -19,15 +19,15 @@ Generated images are ordinary library media. They appear in the grid on the righ
 
 ## The form
 
-The form is on the left, top to bottom: the caption and where it comes from, the prompt, then the model, image and seed settings and the LoRAs. **Batch Size**, **Count per Batch**, **Cancel** and **Generate** stay pinned at its bottom, so they are in reach however far the form is scrolled; while an image is selected, a bar pinned at its top says so.
+The form is on the left, top to bottom: the caption and where it comes from, the prompt, then the model, image and seed settings and the LoRAs. **Captions × Prompts × Images**, **Cancel** and **Generate** stay pinned at its bottom, so they are in reach however far the form is scrolled; while an image is selected, a bar pinned at its top says so.
 
 | Control | What it does |
 |---|---|
 | **Caption** | The description to expand. Plain text; tokens are optional. A collapsible *Resolved caption* shows exactly what the VLM will be given. |
 | **Manual / Random Caption** | Where captions come from. In Random mode the 🎲 button loads one caption and **empties the Prompt**, so the next **Generate** writes a prompt for that caption and renders it. |
 | **Filter** | Random mode only. Nudity, the three scores, Males / Females, Aspect Ratio and Clothing, with a live "N captions match". |
-| **Generate Prompt** | Resolves the caption and writes the prompt into **Prompt**. Review-only: nothing is queued. In Random Caption mode the next **Generate** renders that prompt as its first batch (see Batches). |
-| **Writer** / **Variants** | Beside **Generate Prompt**, remembered in your browser (never saved with an image). **Writer**: *Base* (the prompt-writing model alone) or *Base + taste* (shown, as examples, the prompts of a few of your ✓ pass images close to the caption; it falls back to Base, with a warning, when it has none). The menu also lists your trained writers, each with its scorecard pass rate (`NN% pass`; see [Prompt-Writer Training](writer-training.md#using-an-adapter)). **Variants**: how many different prompts (1–4) are written for one caption; every variant renders the caption's same seeds, so the images differ by prompt only. See *Variants and drafts*. |
+| **Generate Prompt** | Resolves the caption and writes **Prompts** prompts for it into **Prompt**, to read and edit. Review-only: nothing is queued. The next **Generate** renders them (in Random Caption mode as caption 1; see Runs). You can skip it: **Generate** with a caption and an empty Prompt writes them for you. |
+| **Writer** | Beside **Generate Prompt**, remembered in your browser (never saved with an image): *Base* (the prompt-writing model alone) or *Base + taste* (shown, as examples, the prompts of a few of your ✓ pass images close to the caption; it falls back to Base, with a warning, when it has none). The menu also lists your trained writers, each with its scorecard pass rate (`NN% pass`; see [Prompt-Writer Training](writer-training.md#using-an-adapter)). |
 | **Prompt** / **Negative** | The text that will be rendered. **Negative** appears only for models that write one (Qwen-Image, SDXL, MOSS-Image) and is sent only if the workflow has an `MS_NEGATIVE` node. |
 | **Model** | Krea 2, Qwen-Image, SDXL, Z-Image or MOSS-Image. Chooses the prompt style and the default workflow. |
 | **Workflow** | Every registered `t2i` workflow. |
@@ -35,31 +35,43 @@ The form is on the left, top to bottom: the caption and where it comes from, the
 | **Aspect Ratio** | Manual: your choice. Random: taken from each caption's row (read-only while a batch runs). |
 | **Seed** and policy | The seed, plus how it advances: **Fixed**, **Increment**, **Decrement** or **Randomize**. |
 | **LoRAs** | Same editor as Image to Video. Needs an `MS_LORA_STACK` node in the workflow. |
-| **Batch Size** | How many batches a run renders (Random mode). Batch 1 is the prompt in the box when there is one. Locked at 1 in Manual mode. |
-| **Count per Batch** | How many images each batch renders, differing only in their seed. Above 1 needs a non-Fixed policy. |
+| **Captions** | How many captions a run renders (Random mode). Caption 1 is the boxes when they hold a caption or a prompt. Locked at 1 in Manual mode. |
+| **Prompts** | How many prompts (1–4) are written for each caption. Every prompt of a caption renders that caption's same seeds, so its images differ by prompt alone. Locked at 1 while the Prompt box holds a prompt you typed (it renders as written, once). |
+| **Images** | How many images each prompt renders, one seed each. Above 1 needs a non-Fixed policy. |
 
-## Batches
+## Runs
 
-**Generate** starts a batch on the server, so it keeps running if you close the dialog or reload the page; reopening the dialog reattaches to it. **Cancel** stops every running batch and cancels its unfinished jobs.
+A run renders **Captions × Prompts × Images** images:
 
-- **Manual:** one step — your caption and prompt — rendered `Count per Batch` times.
-- **Random Caption:** a run is `Batch Size` batches. A **batch** is one caption, one prompt and `Count per Batch` images that differ only in their seed. The boxes decide what **batch 1** is, and nothing else does (nothing is remembered about how the text got there):
-  - the **Prompt** box holds text → that prompt is rendered as it stands (with the Caption, Aspect Ratio and Negative in the boxes); no caption is rolled and no prompt is written;
-  - the Prompt is empty but the **Caption** box is not → a prompt is written for that caption, then rendered; no caption is rolled;
+```
+for each caption (Captions of them; Manual: the one in the box)
+  write Prompts prompts for it
+  for each prompt
+    render Images images, with the caption's seeds
+```
+
+The seeds belong to the caption: prompt 1 and prompt 2 of a caption render the same seeds, which is what lets your grades compare them fairly. Whenever a run gives a caption two or more prompts, the footer says **Grading these trains the writer**: grade their images ✓ / ✗ in the viewer as usual and they become training pairs for the prompt writer ([Prompt-Writer Training](writer-training.md)). Nothing else is needed.
+
+**Generate** starts a run on the server, so it keeps running if you close the dialog or reload the page; reopening the dialog reattaches to it. **Cancel** stops every running batch and cancels its unfinished jobs.
+
+- **Manual:** one caption, the one in the box. A prompt you typed renders `Images` times. With an empty Prompt, **Generate** writes `Prompts` prompts for the caption first (they appear in the box, as **Generate Prompt** would put them), then renders each `Images` times.
+- **Random Caption:** a run is `Captions` captions. The boxes decide what **caption 1** is, and nothing else does (nothing is remembered about how the text got there):
+  - the **Prompt** box holds text → that prompt is rendered as it stands (with the Caption, Aspect Ratio and Negative in the boxes), or the prompts **Generate Prompt** wrote, all of them; no caption is rolled and no prompt is written;
+  - the Prompt is empty but the **Caption** box is not → `Prompts` prompts are written for that caption, then rendered; no caption is rolled;
   - both are empty → a caption is rolled from the Filter and a prompt written for it.
 
-  Every later batch rolls a new caption from the Filter, takes its aspect ratio, writes its prompt, then renders its images. Within a batch the prompt and every setting are kept; only the seed changes from image to image. When a run ends the boxes keep the last batch's caption and prompt, so the next **Generate** starts with that prompt and the next seeds; to start on something new, empty the Prompt (or press 🎲, which loads a caption and empties the Prompt). While a run is going, the Caption, Prompt, Aspect and Seed boxes show the batch being rendered and cannot be edited. Only one Random batch runs at a time. If you close the dialog during a run it carries on: reopening shows it live, and if it has already finished the boxes are as you left them (the last batch's values are handed back only to an open dialog), though the Seed box is always current.
+  Every later caption is rolled from the Filter, takes its aspect ratio and gets `Prompts` prompts written, then renders. Within a prompt every setting is kept; only the seed changes from image to image. When a run ends the boxes keep the last caption and its prompts, so the next **Generate** starts with that prompt and the next seeds; to start on something new, empty the Prompt (or press 🎲, which loads a caption and empties the Prompt). While a run is going, the Caption, Prompt, Aspect and Seed boxes show the caption and prompt being rendered and cannot be edited. Only one Random batch runs at a time. If you close the dialog during a run it carries on: reopening shows it live, and if it has already finished the boxes are as you left them (the last caption's values are handed back only to an open dialog), though the Seed box is always current.
 
-**Variants and drafts.** With **Variants** above 1, **Generate Prompt** writes that many prompts for the caption (variant 1 plainly, the others each from another angle) and the Prompt label shows **variant k of N** with **◀ ▶** to switch between them. Edits in the box belong to the variant on show; switching keeps them. **Generate** then renders every variant (Manual: `variants × Count per Batch` images; Random: batch 1 is the variants, and every later batch writes as many variants of its own caption). Each image records which writer drafted its prompt, which variant it is, the draft, and whether you edited it; a prompt typed from scratch is recorded as *manual*. If you change **Variants** after the prompts were written, **Generate** renders just the variant on show (still recorded as the writer's). Changing the caption (typing or 🎲), the model, or loading an image drops the drafts, and the Prompt box is then sent as typed. When a Random run ends, the drafts of its last caption are handed back with its prompt. The status line reads `Batch k/N · variant v/V`, and a tile from a caption with several variants is labelled `v2` next to its taste score.
+**Prompts and drafts.** With **Prompts** above 1, **Generate Prompt** writes that many prompts for the caption (each from a slightly different emphasis, so they really differ) and the Prompt label shows **prompt k of N** with **◀ ▶** to switch between them. Edits in the box belong to the prompt on show; switching keeps them. **Generate** then renders every one of them, `Images` each. Each image records which writer drafted its prompt, which of the caption's prompts it is, the draft, and whether you edited it; a prompt typed from scratch is recorded as *manual*. If you change **Prompts** after the prompts were written, **Generate** renders just the prompt on show (still recorded as the writer's). Changing the caption (typing or 🎲), the model, or loading an image drops the drafts, and the Prompt box is then sent as typed. When a Random run ends, the drafts of its last caption are handed back with its prompt. The status line reads `Caption k/N · Prompt p/P`, and a tile from a caption with several prompts is labelled `v2` next to its taste score.
 
 **Seed.** The box always holds the seed the next image will use, and it moves on after every image unless the policy is **Fixed**: **Increment** and **Decrement** step by one, **Randomize** draws a random one. While a Random run renders, the box shows the seed of the image being rendered; when **Generate** is pressed the dialog's own seed also jumps to the next unused one, so it is right when the boxes unlock, after a reload, and if you closed the dialog mid-run. Under **Randomize** the first image of a Generate uses the seed shown in the box, the rest are random, and the run ends on a fresh random seed. A run stops early, with a message, rather than leave `0` to `2147483647` (the batch then plans fewer images and the seed box is left alone, because no unused seed remains). **The seed does not choose the characters.** A caption's cast is drawn from the text of the caption itself, so the same caption always describes the same people whatever the seed, and a new seed changes the image (and the value of any plain `__TOKEN__` wildcard) but not who is in it. The flip side: editing the caption, even by a comma, draws a new cast.
 
 **GPU order** follows the existing `comfy.unload_vlm_during_generation` setting:
 
 - **On (default):** all prompts are written first, then the VLM is unloaded, then the images render. The first image appears only after the last prompt is written. A Manual **Generate** also unloads the VLM, so the next **Generate Prompt** reloads it.
-- **Off:** each batch renders as soon as its prompt is ready, overlapping the next prompt.
+- **Off:** each prompt renders as soon as it is ready, overlapping the next prompt.
 
-Either way the boxes stay on the batch being rendered: a prompt written ahead of the render waits, and is shown when that batch's images start.
+Either way the boxes stay on the prompt being rendered: a prompt written ahead of the render waits, and is shown when its images start.
 
 Jobs are submitted through a small window (`t2i.window`, default 4 unfinished jobs per batch) so a large batch cannot bury Image to Video and storyboard jobs in ComfyUI's shared queue.
 
@@ -78,6 +90,8 @@ A token is a name in capitals between double underscores.
 - **Anything else** — `__TOKEN__` resolves from `token.txt` if that list exists, as one value used everywhere in the caption, picked by the seed; otherwise it becomes the plain lowercase word.
 
 Malformed underscores (`____ALICE____`) are tolerated. A caption with no tokens passes through unchanged.
+
+**Typing tokens.** In the Caption box, type `__` and a list of the tokens opens under it, narrowing as you type (`__al` → `__ALICE__`): Up / Down choose, Enter or Tab inserts, Escape closes. Use the character tokens in your own captions when a picture has two or more people: with MOSS-Image they switch on the structured writer (below), which keeps each person's traits apart.
 
 ### Lists
 
@@ -134,6 +148,15 @@ Most Krea 2 habits carry over to MOSS-Image: prose rather than tag lists, render
 - **A negative prompt.** MOSS runs with real CFG, so the writer also writes a `Negative:` line, starting from `worst quality, bad anatomy, watermark, jpeg artifact`; the fallback negative is the same four terms. Quality words go there, never into the prompt. A negative does nothing at guidance 1.
 - **Text in the picture.** The exact words go inside the quotes, never a placeholder, with each element's role, size and position (a large title at the top, a smaller subtitle below). A real line break goes inside the quotes wherever a line must end, and a prompt with text ends with *with no other text*. The text keeps its own language inside the quotes; the rest stays in English.
 - **Tags only for anime.** For clearly anime or manga art the writer may use booru tags instead of prose, in MOSS's order: quality, score, meta, year, character, series, artist, general.
+
+#### Two or more people: the structured writer
+
+A free rewrite of a scene with several people tends to mix them up: one person's clothes end up on another, a pronoun points at the wrong one, a second mention of a person becomes a new person. So when a MOSS-Image caption names **two to four characters** (`__ALICE__`, `__BELLA__`, …) and the writer is **Base** or **Base + taste**, the prompt is written in two steps:
+
+1. The VLM fills a JSON form under a grammar: one entry per character, in order, with what the caption says about that person (hair, other features, clothing, pose, expression, where they are in the frame), plus the scene, what the people do to each other, and one sentence each for the background, camera, lighting, colour, textures and mood. The people are named `{ALICE}`, `{BELLA}` there, never *she* or *the woman*.
+2. Code writes the prompt from the form: the scene first, then each person in turn (*On the left, the auburn-haired woman is a 34-year-old Latina woman with …*), using the very age, looks and hair the caption engine drew, then the interactions, then the rest. Each person has one fixed name everywhere. When two hair colours look alike (two blondes) the names come from clothing instead (*the woman in the navy dress*).
+
+The form is checked before it is used: hedges (*possibly*, *resembling*), a pose that involves the other person, a person mentioned in the lighting, two people in one place. A form with problems is sent back once with the list, and the better of the two is used; problems that remain show as a warning. A reply that cannot be used at all, or a VLM failure inside a run, means the prompt is written the usual way, with a warning. The images record the writer **Structured**, so Config → Training → Writers shows its pass rate next to Base. Taste examples are not used for these captions (a warning says so), and a trained writer adapter always writes prose. The form's instructions are `T2I_STRUCTURED_SYSTEM` in `data/meta_prompt.yml`, edited live like the guidelines. A caption with one character, or none, is written as before.
 
 Set up the workflow to match. Start from **50 steps at CFG 3** with the SFT checkpoint (Base is meant for LoRA training), and raise CFG towards 4–6 only for short prompts that come out loose. Give it an `MS_NEGATIVE` node, or the negative is dropped. Turn the template's prompt enhancer off (`enable_prompt_enhancer` = `false` on its switch node), because the writer already sends a full caption. Small text needs pixels: pick **Size** 2 MP for text-heavy images. MOSS takes no reference images, so for a consistent character keep one fixed description in the caption and fix the seed. Expect each image to take far longer than an 8-step Krea 2 Turbo render. Layout and bounding-box prompting are not supported.
 
@@ -195,7 +218,7 @@ The **Validate** button lists everything at once and warns when `MS_LORA_STACK` 
 ## Results
 
 - The grid on the right shows your images newest first, three to a row, 60 at a time: **Show more** at the end of the grid adds the next 60. It scrolls on its own, beside the form. A running job shows as a placeholder in front of the images (its progress, ✕ cancels it). While a run adds images the grid stays at the pages you have open, so new images push the oldest shown ones behind **Show more** instead of making the grid longer; reopening the dialog starts again at 60.
-- Click a thumbnail to load the dialog contents that produced it (mode, filter, caption, model, workflow, size, aspect ratio, seed, prompt, negative, LoRAs). Edits save automatically into that image. **Stop editing** returns to a scratch form. Seed policy, Batch Size and Count per Batch are never restored, so selecting an image cannot trigger a large re-run.
+- Click a thumbnail to load the dialog contents that produced it (mode, filter, caption, model, workflow, size, aspect ratio, seed, prompt, negative, LoRAs). Edits save automatically into that image. **Stop editing** returns to a scratch form. Seed policy, Captions, Prompts and Images are never restored, so selecting an image cannot trigger a large re-run.
 - **Generate** with an image selected first saves your pending edits into it, then leaves editing mode before the seed advances (the form keeps its values), so the automatic seed advance never rewrites the saved form of the image it came from. Thumbnails cannot be selected while a Random batch runs.
 - New images reach the library grid while the dialog is open *and* after you close it, without the dimming "Loading media…" overlay.
 - Double-click to view (the viewer steps through the images the grid shows) and grade it there: **P** ✓ pass, **X** ✗ fail, with reasons on 1–6 (see [Rating](features.md#rating-favorites-and-grades)). Grades are what the taste scorer and prompt-writer training learn from; a tile shows its grade as a small ✓ / ✗ badge, and its taste score is the chance you'd pass it. **★** stars it (the library's favorite flag, which never grades it); **✕** deletes the file and its library entry (a graded image keeps counting for training).

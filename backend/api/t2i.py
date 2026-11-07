@@ -310,6 +310,21 @@ async def random_caption(body: CaptionFilterBody) -> Dict[str, Any]:
     return row.to_dict()
 
 
+@router.get("/captions/tokens")
+async def caption_tokens() -> Dict[str, Any]:
+    """The tokens a caption may use: character names, owner-bound slots
+    (``__HAIR__`` ...) and plain wildcard lists, for the caption box's
+    ``__`` completion."""
+    runner = _require_runner()
+    try:
+        return dict(await runner.caption_tokens())
+    except Exception as exc:
+        mapped = _http_error(exc)
+        if mapped is None:
+            raise
+        raise mapped from exc
+
+
 @router.post("/captions/resolve")
 async def resolve_caption(body: CaptionRequest) -> Dict[str, Any]:
     runner = _require_runner()

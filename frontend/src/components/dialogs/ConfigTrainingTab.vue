@@ -136,7 +136,7 @@ async function onTasteRetrain() {
 // Rows are per (writer, model): a base draft from another model is not it.
 const BASELINE_WRITER = 'base'
 const BASELINE_MODEL = 'qwen3vl-8b'
-const WRITER_ORDER = ['base', 'base+taste', 'fallback', 'manual']
+const WRITER_ORDER = ['base', 'base+taste', 'structured', 'fallback', 'manual']
 
 const writerStats = computed(() => taste.writerStats)
 const writerStatsError = ref<string | null>(null)

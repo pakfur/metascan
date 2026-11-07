@@ -25,6 +25,7 @@ from metascan.core.t2i_runner import (
     PromptResult,
     T2iConflictError,
     T2iRequestError,
+    WARN_TYPED_PROMPT_ONCE,
 )
 from metascan.core.taste_examples import variant_angles
 from tests.test_t2i_api import T2iApiCase
@@ -449,7 +450,7 @@ class TestSuppliedPrompts(VariantCase):
         started = await self.start(self.manual(count_per_batch=2, variants=3))
         await self.wait(started.batch_id)
         self.assertEqual(started.total_images, 2)
-        self.assertTrue(any("variants" in w for w in started.warnings))
+        self.assertIn(WARN_TYPED_PROMPT_ONCE, started.warnings)
 
     async def test_a_random_first_batch_supplies_its_variants(self) -> None:
         assert self.vlm is not None

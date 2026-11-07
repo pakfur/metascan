@@ -28,6 +28,11 @@ class T2iModelProfile:
     identity: str  # default identity style: ref | noun | name
     dim_multiple: int  # both edges of the latent must be a multiple of this
     max_tokens: int  # token budget for the VLM's reply
+    # Captions with 2-4 character tokens go through the structured writer
+    # (metascan/core/t2i_structured.py): JSON, then prose rendered by code.
+    # Its renderer writes this model's long descriptive style, so a profile
+    # with a different style needs its own renderer before it turns this on.
+    structured: bool = False
 
 
 MODEL_PROFILES: Dict[str, T2iModelProfile] = {
@@ -40,7 +45,9 @@ MODEL_PROFILES: Dict[str, T2iModelProfile] = {
     # MOSS-Image (SFT): no strong default look, so it wants long prompts
     # (its guideline asks for 120-220 words) and runs with real CFG, so it
     # takes a negative. Latent edges are multiples of 16.
-    "moss": T2iModelProfile("moss", "MOSS-Image", "META_MOSS", True, "ref", 16, 640),
+    "moss": T2iModelProfile(
+        "moss", "MOSS-Image", "META_MOSS", True, "ref", 16, 640, structured=True
+    ),
 }
 
 

@@ -152,6 +152,25 @@ def compose_guided_t2i_prompts(
     return ComposedPrompts(system, user, examples_used)
 
 
+def content_directive(content_mode: str, store: Optional[PromptStore] = None) -> str:
+    """The directive ``content_mode`` appends to a system prompt ("" for
+    ``default``), exactly as :func:`compose_guided_t2i_prompts` appends it."""
+    key = _DIRECTIVE_KEYS.get(content_mode)
+    if key is None:
+        return ""
+    return (store or get_prompt_store()).get(key)
+
+
+def stock_negative(
+    profile: T2iModelProfile, store: Optional[PromptStore] = None
+) -> Optional[str]:
+    """The model's stock negative prompt, None for a model without one."""
+    key = _FALLBACK_NEGATIVE_KEYS.get(profile.id)
+    if not profile.has_negative or key is None:
+        return None
+    return (store or get_prompt_store()).get(key).strip()
+
+
 def add_categories_line(user: str, names: Sequence[str]) -> str:
     """Splice a ``CATEGORIES: a, b`` line in front of the closing line of a
     composed user turn (an ``all``-scope writer adapter is trained with the

@@ -58,6 +58,7 @@ from metascan.core.judgments import (
     WRITER_BASE_TASTE,
     WRITER_FALLBACK,
     WRITER_MANUAL,
+    WRITER_STRUCTURED,
     WriterModelError,
     check_writer_model,
     writer_id_allowed,
@@ -73,7 +74,14 @@ from metascan.core.t2i_directions import (
     SnippetCache,
     build_direction,
 )
-from metascan.core.t2i_characters import ResolvedCaption, resolve_caption
+from metascan.core.t2i_characters import (
+    MarkedCaption,
+    ResolvedCaption,
+    mark_caption,
+    resolve_caption,
+)
+from metascan.core import t2i_structured
+from metascan.core.t2i_structured import StructuredError
 from metascan.core.t2i_form import (
     ASPECT_RATIOS,
     SEED_MAX,
@@ -137,8 +145,16 @@ WARN_TASTE_NO_PREAMBLE = (
     WARN_TASTE_PREFIX + "T2I_EXAMPLES_PREAMBLE is missing from meta_prompt.yml"
 )
 WARN_TYPED_PROMPT_ONCE = (
-    "variants apply to written prompts: the typed prompt renders once"
+    "PROMPTS applies to written prompts: the typed prompt renders once"
 )
+# The structured writer (2-4 character tokens) takes no taste examples.
+WARN_STRUCTURED_NO_TASTE = (
+    "taste examples are not used for captions with two or more characters"
+)
+WARN_STRUCTURED_PROSE = (
+    "structured prompt unavailable ({reason}) - the prompt was written as prose"
+)
+WARN_STRUCTURED_CHECKS = "structured prompt: {count} check(s) still failing"
 
 # Prompt variants per caption, and the writers a request may ask for
 # (besides ``adapter:<id>``, a prompt-writer adapter, used without examples).
@@ -431,6 +447,8 @@ class _CaptionContext:
     direction: Optional[Direction]
     examples: List[str]
     warnings: List[str]
+    # Set when the caption is written structured (t2i_structured.applies).
+    marked: Optional[MarkedCaption] = None
 
 
 def default_output_root(comfy_output_root: Any) -> Path:
@@ -806,6 +824,32 @@ class T2iRunner:
         _check_seed(seed)
         return await self._resolve(profile, caption, seed, self._get_config())
 
+    async def caption_tokens(self) -> Dict[str, List[Dict[str, str]]]:
+        """The tokens a caption may use, for the caption box's completion:
+        the character names (with their gender), the owner-bound
+        characteristic slots and the plain wildcard lists, each as
+        ``{token, kind, note}`` with ``token`` spelled as it is typed."""
+        library, _ = await asyncio.to_thread(self.library.get)
+        cfg = library.config
+        characters = [
+            {"token": f"__{n}__", "kind": "character", "note": cfg.noun_female}
+            for n in cfg.female_names
+        ] + [
+            {"token": f"__{n}__", "kind": "character", "note": cfg.noun_male}
+            for n in cfg.male_names
+        ]
+        slots = [
+            {"token": f"__{s.upper()}__", "kind": "slot", "note": "the owner's"}
+            for s in cfg.token_slots
+        ]
+        taken = set(cfg.slots) | set(cfg.token_slots)
+        wildcard_names = sorted({key.split(".", 1)[0] for key in library.lists} - taken)
+        wildcards = [
+            {"token": f"__{w.upper()}__", "kind": "wildcard", "note": "random pick"}
+            for w in wildcard_names
+        ]
+        return {"tokens": characters + slots + wildcards}
+
     async def _usable_model(self, vlm: Any) -> Tuple[Optional[str], str]:
         """The model to ask and, when there is none, the warning to show:
         the picker found no loadable model (``WARN_VLM_UNAVAILABLE``), or
@@ -958,6 +1002,71 @@ class T2iRunner:
             raise VlmError("the VLM returned an empty prompt")
         return prompt, negative
 
+    async def _marked(
+        self, profile: T2iModelProfile, caption: str, seed: int, writer: str
+    ) -> Optional[MarkedCaption]:
+        """The marked caption when ``caption`` is written structured: the
+        profile asks for it, the writer is a base writer (an adapter was
+        trained on prose) and the caption names 2-4 characters. Else None."""
+        if not profile.structured or writer not in REQUEST_WRITERS:
+            return None
+        library, _ = await asyncio.to_thread(self.library.get)
+        marked = mark_caption(caption, seed, library)
+        return marked if t2i_structured.applies(profile, marked) else None
+
+    async def _structured_prompt(
+        self,
+        vlm: Any,
+        model_id: str,
+        profile: T2iModelProfile,
+        marked: MarkedCaption,
+        content_mode: str,
+        direction: Optional[str],
+        angle: Optional[str],
+    ) -> Tuple[str, Optional[str], List[str]]:
+        """``(prompt, negative, warnings)`` from the structured writer: the
+        grammar-constrained JSON, asked once more with :func:`check`'s list
+        when it found problems (the reply with fewer problems wins), then
+        rendered by code. Raises StructuredError for a reply that cannot be
+        used, and what :meth:`_vlm_prompt`'s call raises."""
+        system, user = t2i_structured.compose(marked, content_mode, direction, angle)
+        grammar = t2i_structured.grammar(marked.cast)
+
+        async def ask(turn: str) -> str:
+            try:
+                with self._vlm_hold("Prompt writer"):
+                    await vlm.ensure_started(model_id)
+                    reply: str = await vlm.generate_text(
+                        system_prompt=system,
+                        user_prompt=turn,
+                        temperature=_VLM_TEMPERATURE,
+                        max_tokens=t2i_structured.MAX_TOKENS,
+                        timeout=_VLM_TIMEOUT_S,
+                        grammar=grammar,
+                    )
+            except TimeoutError:
+                raise
+            except OSError as exc:
+                raise VlmError(f"the VLM could not be used: {exc}") from exc
+            return reply
+
+        raw = await ask(user)
+        data = t2i_structured.parse(raw, marked.cast)
+        problems = t2i_structured.check(data, marked.cast)
+        if problems:
+            again = await ask(t2i_structured.retry_user(user, raw, problems))
+            try:
+                second = t2i_structured.parse(again, marked.cast)
+            except StructuredError:
+                second = None
+            if second is not None:
+                left = t2i_structured.check(second, marked.cast)
+                if len(left) <= len(problems):
+                    data, problems = second, left
+        prompt, negative = t2i_structured.render(data, marked.cast, profile)
+        notes = [WARN_STRUCTURED_CHECKS.format(count=len(problems))] if problems else []
+        return prompt, negative, notes
+
     async def _find_row(
         self, caption: str, warnings: List[str]
     ) -> Optional[CaptionRow]:
@@ -1071,6 +1180,11 @@ class T2iRunner:
         cfg = self._get_config()
         resolved = await self._resolve(profile, caption, seed, cfg)
         warnings = list(resolved.warnings)
+        marked = (
+            await self._marked(profile, caption, seed, writer)
+            if lora_path is None
+            else None
+        )
 
         enabled = (
             cfg["directions"]["enabled"] if directions is None else bool(directions)
@@ -1112,9 +1226,14 @@ class T2iRunner:
                     writer, f"it is built on {adapter_base}, the writer runs {model_id}"
                 )
             adapter_categories = await self._adapter_categories(writer, category_names)
-            examples, taste_warning = await self._examples_for(
-                writer, resolved.text, profile.id
-            )
+            examples: List[str] = []
+            taste_warning: Optional[str] = None
+            if marked is None:
+                examples, taste_warning = await self._examples_for(
+                    writer, resolved.text, profile.id
+                )
+            elif writer == WRITER_BASE_TASTE:
+                taste_warning = WARN_STRUCTURED_NO_TASTE
             if taste_warning:
                 warnings.append(taste_warning)
             # The variants are independent: write them concurrently, as many
@@ -1124,6 +1243,26 @@ class T2iRunner:
 
             async def write(k: int) -> PromptDraft:
                 angle = None if lora_path is not None else self._angle(k)
+                if marked is not None:
+                    try:
+                        async with slots:
+                            s_prompt, s_negative, notes = await self._structured_prompt(
+                                vlm,
+                                model_id,
+                                profile,
+                                marked,
+                                cfg["content_mode"],
+                                text,
+                                angle,
+                            )
+                        warnings.extend(n for n in notes if n not in warnings)
+                        return PromptDraft(
+                            s_prompt, s_negative, WRITER_STRUCTURED, k, angle, model_id
+                        )
+                    except StructuredError as exc:
+                        note = WARN_STRUCTURED_PROSE.format(reason=exc)
+                        if note not in warnings:
+                            warnings.append(note)
                 composed = self._for_adapter(
                     compose_guided_t2i_prompts(
                         profile,
@@ -1543,6 +1682,7 @@ class T2iRunner:
         direction: Optional[str] = None,
         angle: Optional[str] = None,
         examples: Tuple[str, ...] = (),
+        marked: Optional[MarkedCaption] = None,
     ) -> Tuple[str, Optional[str], List[str], str, Optional[str]]:
         """``(prompt, negative, warnings, writer_id, writer_model)`` for one
         step of a running batch (``writer_model``: the VLM model asked, None
@@ -1554,6 +1694,9 @@ class T2iRunner:
         never swallowed, and neither is anything that is not a VLM failure.
         The writer is ``base+taste`` only when the examples actually went
         into the prompt (a hot reload can drop the preamble they need).
+        A ``marked`` caption is written structured first; when that cannot
+        be used (a bad reply, or a VLM failure) the step is written as prose
+        as usual, with a warning.
         """
         profile = batch.profile
 
@@ -1577,13 +1720,39 @@ class T2iRunner:
                     f"writer {batch.req.writer} is built on {adapter_base}, the "
                     f"writer runs {model_id} - used the resolved caption"
                 )
+        prose_notes: List[str] = []
+        if marked is not None and lora_path is None:
+            try:
+                s_prompt, s_negative, s_notes = await self._structured_prompt(
+                    vlm,
+                    model_id,
+                    profile,
+                    marked,
+                    batch.content_mode,
+                    direction,
+                    angle,
+                )
+                return s_prompt, s_negative, s_notes, WRITER_STRUCTURED, model_id
+            except asyncio.CancelledError:
+                raise
+            except (StructuredError, VlmError, TimeoutError, RuntimeError) as exc:
+                # The type only: a VLM error's text could quote the reply.
+                logger.warning(
+                    "t2i batch %s: structured prompt failed (%s); writing prose",
+                    batch.id,
+                    type(exc).__name__,
+                )
+                reason = (
+                    str(exc) if isinstance(exc, StructuredError) else self._reason(exc)
+                )
+                prose_notes.append(WARN_STRUCTURED_PROSE.format(reason=reason))
         composed = self._for_adapter(
             compose_guided_t2i_prompts(
                 profile, resolved_text, batch.content_mode, direction, angle, examples
             ),
             batch.adapter_categories,
         )
-        notes = (
+        notes = prose_notes + (
             [WARN_TASTE_NO_PREAMBLE] if examples and not composed.examples_used else []
         )
         failure: BaseException = VlmError("no attempt was made")
@@ -1707,8 +1876,16 @@ class T2iRunner:
             batch.directions,
             warnings,
         )
+        marked = (
+            await self._marked(batch.profile, caption, seeds[0], batch.req.writer)
+            if batch.lora_path is None
+            else None
+        )
         examples: List[str] = []
-        if self.get_vlm() is not None:  # no VLM: nothing to guide
+        if marked is not None:
+            if batch.req.writer == WRITER_BASE_TASTE:
+                warnings.append(WARN_STRUCTURED_NO_TASTE)
+        elif self.get_vlm() is not None:  # no VLM: nothing to guide
             examples, taste_warning = await self._examples_for(
                 batch.req.writer, resolved.text, batch.profile.id
             )
@@ -1725,6 +1902,7 @@ class T2iRunner:
             direction=direction,
             examples=examples,
             warnings=warnings,
+            marked=marked,
         )
 
     async def _random_step(
@@ -1741,6 +1919,7 @@ class T2iRunner:
             # sampling alone.
             None if batch.lora_path is not None else self._angle(variant),
             tuple(context.examples),
+            context.marked,
         )
         return _Step(
             index=index,

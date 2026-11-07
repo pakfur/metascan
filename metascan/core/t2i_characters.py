@@ -104,6 +104,41 @@ class ResolvedCaption:
     warnings: List[str]
 
 
+@dataclass(frozen=True)
+class CastMember:
+    """One named character of a caption, as the structured writer needs it.
+
+    The values are the same draws :func:`resolve_caption` makes for the
+    caption (they are keyed on its text), so a structured prompt and the
+    resolved caption describe the same people."""
+
+    name: str  # ALICE, ADAM ...
+    noun: str  # woman | man (characters.yml can rename them)
+    # The first mention's head, age bracket included: "a 52-year-old
+    # Moroccan middle aged woman".
+    identity: str
+    # The with-slot values the caption does not spell out itself (a caption
+    # that writes __HAIR__ carries the hair in its own words).
+    traits: Tuple[str, ...]
+    hair: Optional[str]  # the drawn hair value, None without a hair list
+    # The ``ref`` later-mention phrase: "the ash-blonde-haired woman", or the
+    # bare "the woman" when the cast shares a hair value.
+    handle: str
+    handle_has_hair: bool
+
+
+@dataclass(frozen=True)
+class MarkedCaption:
+    """A caption with every character mention written as ``{NAME}`` and
+    every other token resolved exactly as :func:`resolve_caption` resolves
+    it (hair and the other owner-bound slots included), plus its cast in
+    order of first mention."""
+
+    text: str
+    cast: Tuple[CastMember, ...]
+    warnings: List[str]
+
+
 # ``(?<!_)`` keeps a long run of underscores linear: a token can only start
 # at the beginning of a run, never inside one.
 _TOKEN_RE = re.compile(r"(?<!_)_{2,}([A-Z][A-Z0-9]*)_{2,}")
@@ -559,7 +594,10 @@ class _Renderer:
         plan: _Plan,
         characters: Dict[str, Dict[str, str]],
         ambiguous: Set[str],
+        markers: bool = False,
     ) -> None:
+        # markers: write each character mention as "{NAME}" (mark_caption).
+        self.markers = markers
         self.caption = caption
         self.seed = seed
         self.style = style
@@ -694,7 +732,9 @@ class _Renderer:
             match = ref.match
             out.add(self.caption[last : match.start()])
             last = match.end()
-            if ref.kind == "char":
+            if ref.kind == "char" and self.markers:
+                piece = "{" + ref.name + "}"
+            elif ref.kind == "char":
                 if ref.name in seen:
                     piece = self.handle(ref.name)
                 else:
@@ -758,3 +798,62 @@ def resolve_caption(
     return ResolvedCaption(
         text=renderer.render(), characters=characters, warnings=warnings
     )
+
+
+def mark_caption(caption: str, seed: int, library: Library) -> MarkedCaption:
+    """``caption`` for the structured writer: each character mention as
+    ``{NAME}``, everything else resolved for ``seed`` as in the ``ref``
+    style, and the named cast (in order of first mention) with the very
+    draws :func:`resolve_caption` makes. Pure, deterministic, never raises
+    on data problems. A caption with no character names has an empty cast."""
+    warnings: List[str] = []
+    matches = list(_TOKEN_RE.finditer(caption))
+    if not matches:
+        return MarkedCaption(text=caption, cast=(), warnings=warnings)
+    genders = _name_genders(library.config)
+    plan = _Planner(caption, matches, library, genders, warnings).run()
+    cast_names = [
+        name for name in genders if name in plan.named or name in plan.defaults
+    ]
+    characters, ambiguous = _draw_cast(
+        _caption_key(caption), cast_names, genders, library, plan.referenced, warnings
+    )
+    renderer = _Renderer(
+        caption,
+        seed,
+        DEFAULT_IDENTITY_STYLE,
+        library,
+        genders,
+        plan,
+        characters,
+        ambiguous,
+        markers=True,
+    )
+    text = renderer.render()
+    order: List[str] = []
+    for ref in plan.refs:
+        if ref.kind == "char" and ref.name not in order:
+            order.append(ref.name)
+    cfg = library.config
+    members: List[CastMember] = []
+    for name in order:
+        drawn = characters.get(name, {})
+        head = " ".join(
+            [drawn[s] for s in cfg.head_slots if s in drawn]
+            + [renderer.head_noun(name)]
+        )
+        spelled = plan.referenced.get(name, set())
+        members.append(
+            CastMember(
+                name=name,
+                noun=renderer.noun(name),
+                identity=f"{_article(head)} {head}",
+                traits=tuple(
+                    drawn[s] for s in cfg.with_slots if s in drawn and s not in spelled
+                ),
+                hair=drawn.get("hair"),
+                handle=renderer.handle(name),
+                handle_has_hair=renderer.handle_carries_hair(name),
+            )
+        )
+    return MarkedCaption(text=text, cast=tuple(members), warnings=warnings)
