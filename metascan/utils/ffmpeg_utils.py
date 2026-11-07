@@ -46,6 +46,8 @@ def probe_with_timeout(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         if result.returncode != 0:

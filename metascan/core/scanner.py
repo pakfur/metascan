@@ -475,7 +475,14 @@ class Scanner:
                 str(file_path),
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
             if result.returncode != 0:
                 return self._get_video_info_fallback(file_path)
 
@@ -503,6 +510,8 @@ class Scanner:
                 ["exiftool", "-ImageWidth", "-ImageHeight", "-json", str(file_path)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
             if result.returncode == 0:

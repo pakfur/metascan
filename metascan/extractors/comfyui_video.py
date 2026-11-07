@@ -557,6 +557,8 @@ class ComfyUIVideoExtractor(MetadataExtractor):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
             if proc.returncode != 0:
@@ -637,6 +639,8 @@ class ComfyUIVideoExtractor(MetadataExtractor):
                 ["exiftool", "-Comment", "-json", str(media_path)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
 
@@ -677,6 +681,8 @@ class ComfyUIVideoExtractor(MetadataExtractor):
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
 
