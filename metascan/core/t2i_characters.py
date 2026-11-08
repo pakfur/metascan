@@ -152,6 +152,14 @@ def has_tokens(caption: str) -> bool:
 
 
 _POSSESSIVE_RE = re.compile(r"['\u2019\u02bc][sS]\b")
+# The end of a sentence. A semicolon is not one: in "...; she has __HAIR__"
+# the hair is still the sentence subject's.
+_SENTENCE_END_RE = re.compile(r"[.!?](?:\s|$)")
+# "X, who ..." with no other name, sentence end or clause break before the
+# token: the relative clause speaks of X.
+_WHO_CLAUSE_RE = re.compile(r",\s+who\s+[^.!?;]*$")
+# A name joined straight to another: "X and Y", "X, Y", "X, and Y".
+_COMPOUND_NEXT_RE = re.compile(r"\s*(?:,\s*(?:and\s+)?|and\s+)_{2,}[A-Z]")
 
 # After a first mention, details stay inline ("... woman with olive skin")
 # unless the next word would make that awkward.
@@ -419,10 +427,31 @@ class _Planner:
         )
         # "female" | "male" | "any" -> the latest character name seen so far
         self.current: Dict[str, str] = {}
+        # The sentence's subject: its first character named not in a
+        # possessive ("X's") and not in a compound subject ("X and Y").
+        self.subject: Optional[str] = None
+        self.subject_open = True  # no character named in this sentence yet
+        self.previous: Optional["re.Match[str]"] = None
+        # The last sentence's subject, for a sentence that names no one
+        # before its token ("Her __HAIR__ falls ...").
+        self.carried: Optional[str] = None
+        # The sentence's first character named possessively ("X's right arm
+        # wraps around Y's waist, her __HAIR__ ..." is X's): its subject when
+        # every name before the token is possessive.
+        self.first_possessive: Optional[str] = None
 
     def run(self) -> _Plan:
         for match in self.matches:
             token = match.group(1)
+            start = self.previous.end() if self.previous is not None else 0
+            if _SENTENCE_END_RE.search(self.caption, start, match.start()):
+                # "Her __HAIR__ falls ..." opening the next sentence still
+                # speaks of this sentence's subject: carry it over until the
+                # new sentence names one of its own.
+                if self.subject is not None:
+                    self.carried = self.subject
+                self.subject, self.subject_open = None, True
+                self.first_possessive = None
             if token in self.genders:
                 ref = self._character(match, token)
             elif token.lower() in self.token_slots:
@@ -430,12 +459,55 @@ class _Planner:
             else:
                 ref = self._wildcard(match, token)
             self.plan.refs.append(ref)
+            self.previous = match
         return self.plan
 
     def _character(self, match: "re.Match[str]", token: str) -> _Ref:
         self.current[self.genders[token]] = token
         self.current["any"] = token
+        possessive = bool(_POSSESSIVE_RE.match(self.caption, match.end()))
+        if self.subject_open and possessive and self.first_possessive is None:
+            self.first_possessive = token
+        if self.subject_open and not possessive:
+            self.subject_open = False
+            compound = bool(_COMPOUND_NEXT_RE.match(self.caption, match.end()))
+            # "X and Y pose ..." names no single subject.
+            self.subject = None if compound else token
         return _Ref(match, "char", name=token)
+
+    def _sentence_owner(
+        self, match: "re.Match[str]", want: Optional[str]
+    ) -> Optional[str]:
+        """The owner the sentence makes plain, before proximity decides: a
+        character named possessively right before the token ("X's
+        __HAIR__"), else the sentence's subject when the gender fits. "{BELLA}
+        leans over {ALICE}'s lap, her __HAIR__ falling forward" is BELLA's
+        hair; the nearest name before the token, ALICE, is not its owner."""
+        prev = self.previous
+        if prev is not None and prev.group(1) in self.genders:
+            between = self.caption[prev.end() : match.start()]
+            name = prev.group(1)
+            fits = want is None or self.genders[name] == want
+            if _POSSESSIVE_RE.match(between) and len(between.strip()) <= 3 and fits:
+                return name
+            # "... to kiss X, who sits upright with her __HAIR__ tied back":
+            # the relative clause is X's.
+            if _WHO_CLAUSE_RE.match(between) and fits:
+                return name
+        if self.subject is not None:
+            candidates = [self.subject]
+        elif self.subject_open and want is not None:
+            # No subject named yet in this sentence, but a pronoun points
+            # back: an all-possessive one ("X's arm ... Y's waist, her
+            # __HAIR__"), else the last sentence's ("Her __HAIR__ falls ...").
+            # Without a pronoun ("The __HAIR__ is long.") proximity decides.
+            candidates = [n for n in (self.first_possessive, self.carried) if n]
+        else:
+            candidates = []  # a compound subject: proximity decides
+        for name in candidates:
+            if want is None or self.genders[name] == want:
+                return name
+        return None
 
     def _wildcard(self, match: "re.Match[str]", token: str) -> _Ref:
         slot = token.lower()
@@ -461,7 +533,12 @@ class _Planner:
         want: Optional[str] = self.fixed_gender.get(slot)
         if want not in (_FEMALE, _MALE):
             want = _pronoun_gender(self.caption, match.start())
-        owner, is_default = self._find_owner(want)
+        sentence_owner = self._sentence_owner(match, want)
+        owner: Optional[str]
+        if sentence_owner is not None:
+            owner, is_default = sentence_owner, False
+        else:
+            owner, is_default = self._find_owner(want)
         if owner is None:
             _warn(
                 self.warnings,

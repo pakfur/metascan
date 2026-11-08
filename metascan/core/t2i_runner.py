@@ -156,7 +156,6 @@ WARN_STRUCTURED_NO_TASTE = (
 WARN_STRUCTURED_PROSE = (
     "structured prompt unavailable ({reason}) - the prompt was written as prose"
 )
-WARN_STRUCTURED_CHECKS = "structured prompt: {count} check(s) still failing"
 # The file t2i.structured_json_log appends to, in the logs directory.
 STRUCTURED_LOG_NAME = "structured_prompts.log"
 
@@ -1096,7 +1095,10 @@ class T2iRunner:
                 first_problems=first_problems,
             )
             await asyncio.to_thread(self._write_structured_log, entry)
-        notes = [WARN_STRUCTURED_CHECKS.format(count=len(problems))] if problems else []
+        leftover = t2i_structured.leftover_warning(
+            data, marked.cast, marked.text, problems
+        )
+        notes = [leftover] if leftover else []
         return prompt, negative, notes
 
     async def _find_row(

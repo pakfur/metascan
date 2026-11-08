@@ -5,20 +5,22 @@ two steps instead of one free rewrite:
 
 1. The VLM fills a JSON object under a GBNF grammar: one entry per cast
    member, in cast order with its id fixed by the grammar, holding what the
-   caption says about that person (hair, features, clothing, pose,
-   expression, position), plus the scene, the interactions (``{ALICE}``
-   placeholders) and free sentences for the background, camera, lighting,
-   colour, textures and mood.
+   caption says about that person -- hair, features and clothing as noun
+   phrases, where they are, and ``sentences``: complete sentences in the
+   model's own words about what that person alone does and how they look --
+   plus the scene, the interactions (``{ALICE}`` placeholders) and free
+   sentences for the background, camera, lighting, colour, textures and mood.
 2. Code renders the prose (:func:`render`). Each person is introduced with
    the resolver's own draws (``CastMember.identity`` / ``traits``), named by
    one fixed handle everywhere, and only then do the interactions follow, so
-   a trait can never drift to another person, a pronoun can never point at
-   the wrong one and no person can be added.
+   a trait can never drift to another person and no person can be added.
+   Code writes only the sentences it owns (the introduction and "She wears
+   ..."); every other sentence is the model's, whole, so the renderer never
+   has to guess how to join a fragment to a subject.
 
 :func:`check` lists what a reply got wrong in a form the model can act on
-(hedges, a pose that involves another person, a person in the camera
-sentence ...); the runner asks once more with that list and keeps the better
-reply. A reply that cannot be parsed, or that names a person the cast does
+(words of the caption it lost, hedges, a person in the camera sentence ...);
+the runner asks once more with that list and keeps the better reply. A reply that cannot be parsed, or that names a person the cast does
 not have, raises :class:`StructuredError` and the runner writes prose
 instead.
 
@@ -33,7 +35,8 @@ import json
 import re
 from datetime import datetime
 from difflib import get_close_matches
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from functools import lru_cache
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from metascan.core.prompt_store import PromptStore, get_prompt_store
 from metascan.core.t2i_characters import CastMember, MarkedCaption
@@ -44,6 +47,7 @@ from metascan.core.t2i_prompt import (
     strip_parentheses,
 )
 from metascan.core.t2i_models import T2iModelProfile
+from metascan.utils.app_paths import get_data_dir
 
 SYSTEM_KEY = "T2I_STRUCTURED_SYSTEM"
 # Enough for four people with long clothing lists and the free sentences.
@@ -70,6 +74,7 @@ _HEDGE_RE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER_RE = re.compile(r"\{([A-Z][A-Z0-9]*)\}")
+_STRAY_BRACES_RE = re.compile(r"\{([^{}]*)\}")
 # A possessive in the scene, the background or an interaction ("a man on his
 # bed", "{ALICE} wraps her right arm around {BELLA}") is clear; what can point
 # at the wrong person is a subject or object pronoun: she, he, him, hers, and
@@ -89,8 +94,134 @@ _RECALL_SKIP = frozenset(
     when also very some each other both another about around near next
     across along against toward towards upon within without through
     being been have having does doing slightly gently softly wear wears
-    wearing worn dressed""".split()
+    continue continues continued continuing keep keeps keeping
+    wearing worn dressed
+    includes include including consists consist consisting remains remain
+    remaining serves serve serving adding adds leaving leaves creating
+    creates giving gives suggesting suggests indicating indicates evoking
+    evokes conveying conveys emphasizing emphasize highlighting highlights
+    capturing captures framing frames details detail objects object elements
+    element structure perspective figures figure subjects subject individuals
+    individual people person pair duo trio group foreground background
+    midground further same overall entire whole partially partly various
+    several multiple numerous additional another environmental""".split()
 )
+# Adverbs ("casually", "lightly") carry tone, not a fact a reply must keep.
+_ADVERB_MIN = 6
+
+# Only a lost word that names something visible counts (a captioner's prose
+# is full of words that do not: "anchoring", "moment", "illuminates"; round 1
+# of the evaluation found four in five hits were such words). The lexicon is
+# the single-word Open Images and ImageNet class names from data/vocabulary/
+# (garments, objects, body parts, animals ...), plus these colours, materials
+# and visible states, plus the action groups below.
+_VISUAL_EXTRA = frozenset(
+    """red orange yellow green blue purple violet pink magenta teal turquoise
+    brown black white grey gray silver gold golden beige cream ivory navy
+    maroon burgundy crimson scarlet emerald olive tan khaki colorful striped
+    floral checkered plaid polka patterned lace leather silk satin denim
+    velvet wool cotton linen mesh sheer fishnet latex knit sequined metallic
+    painted tattooed pierced nude naked topless bottomless bare barefoot wet
+    shirtless hoop""".split()
+)
+# Common scene actions, by meaning: a paraphrase inside a group keeps the
+# fact ("sits" is kept by "seated", "watching" by "gazes"). No body-part
+# nouns in a group ("eye", "hand"): the cast's own traits would keep the action.
+ACTION_GROUPS: Tuple[Tuple[str, ...], ...] = (
+    ("sit", "seat", "perch", "straddle"),
+    ("lie", "lying", "lay", "recline", "sprawl"),
+    ("stand", "standing"),
+    ("kneel", "knelt", "crouch", "squat"),
+    ("lean", "rest", "recline"),
+    ("watch", "look", "gaze", "stare", "glance", "observe", "peer"),
+    ("touch", "caress", "stroke", "rest", "brush", "graze"),
+    ("hold", "grip", "grasp", "clutch", "grab", "cradle", "carry"),
+    ("hug", "embrace", "cuddle", "wrap"),
+    ("kiss",),
+    ("reach", "extend", "stretch"),
+    ("pour",),
+    ("pass", "give", "offer"),
+    ("smile", "grin", "beam"),
+    ("laugh", "giggle", "chuckle"),
+    ("read", "book"),
+    ("write", "pen"),
+    ("walk", "stroll"),
+    ("run", "jog", "sprint"),
+    ("dance",),
+    ("wash", "rinse", "scrub", "clean"),
+    ("massage", "rub", "knead"),
+    ("bathe", "bath", "shower"),
+    ("swim",),
+    ("sleep", "doze", "nap"),
+    ("eat", "bite", "chew"),
+    ("drink", "sip"),
+    ("cry", "weep", "tear"),
+    ("point",),
+    ("wave",),
+    ("pull", "tug"),
+    ("push", "press"),
+    ("ride",),
+)
+# Single class names that say nothing about one particular picture.
+_NOT_VISUAL = frozenset(
+    """body light shadow scene view space front back left right top bottom side
+    interaction atmosphere sense base balance palette color colour share
+    sharing spread fall sporting works bears grounding anchoring bathed room
+    clothing clothes angle area level surface nature shade shades matching
+    landscape environment setting style pattern tone texture""".split()
+)
+_ACTION_OF: Dict[str, int] = {}
+
+
+@lru_cache(maxsize=1)
+def visual_lexicon() -> FrozenSet[str]:
+    """Stems of the words a lost word must be one of to count (see above).
+    Without data/vocabulary/ it is the colours, materials, states and
+    actions alone."""
+    words: Set[str] = set(_VISUAL_EXTRA)
+    for group in ACTION_GROUPS:
+        words.update(group)
+    try:
+        from metascan.core import vocabulary
+
+        vocab_dir = get_data_dir() / "vocabulary"
+        terms = list(
+            vocabulary._read_open_images(vocab_dir / vocabulary.OPEN_IMAGES_FILENAME)
+        ) + list(vocabulary._read_lines(vocab_dir / vocabulary.IMAGENET_FILENAME))
+    except Exception:
+        terms = []
+    for term in terms:
+        for part in term.lower().split(","):
+            part = part.strip()
+            if re.fullmatch(r"[a-z]+", part):
+                words.add(part)
+    not_visual = {f for w in _NOT_VISUAL for f in _form_stems(w)}
+    return (
+        frozenset(f for w in words if len(w) >= 3 for f in _form_stems(w)) - not_visual
+    )
+
+
+def _form_stems(word: str) -> Set[str]:
+    """The stems of a word's common inflections, so a caption's "gazing"
+    and a reply's "gazes" both land on a stem the word registered."""
+    forms = {word, word + "s", word + "es", word + "ed", word + "ing"}
+    if word.endswith("e"):
+        forms |= {word[:-1] + "ing", word + "d"}
+    if re.fullmatch(r"[a-z]*[^aeiou][aeiou][^aeiouwxy]", word) and len(word) <= 4:
+        # sit -> sitting, hug -> hugging, grab -> grabbed
+        forms |= {word + word[-1] + "ing", word + word[-1] + "ed"}
+    return {_stem(f) for f in forms}
+
+
+def _action_group(stem: str) -> Optional[int]:
+    if not _ACTION_OF:
+        for i, group in enumerate(ACTION_GROUPS):
+            for word in group:
+                for form in _form_stems(word):
+                    _ACTION_OF.setdefault(form, i)
+    return _ACTION_OF.get(stem)
+
+
 RECALL_MAX = 8
 # How close a reply's word must be to a caption word to count as it (difflib).
 RECALL_TYPO_CUTOFF = 0.85
@@ -221,8 +352,7 @@ def grammar(cast: Sequence[CastMember]) -> str:
             _field("features", "strlist"),
             _field("clothing", "strlist"),
             _field("garment_label", "string"),
-            _field("pose", "string"),
-            _field("expression", "string"),
+            _field("sentences", "strlist"),
         ]
         lines.append(f'{rule} ::= "{{" ws {sep.join(fields)} ws "}}"')
     subjects = '"[" ws ' + sep.join(subject_rules) + ' ws "]"'
@@ -252,6 +382,22 @@ def _texts(value: Any) -> List[str]:
     return [t for t in (_text(v) for v in value) if t]
 
 
+# A sentence ends at . ! or ? followed by a space and a capital or a {NAME},
+# so "f/2.8" stays whole; "Dr. Smith" splits, harmlessly, since the pieces
+# are written back one after the other.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z{])")
+
+
+def _sentences(value: Any) -> List[str]:
+    """Like :func:`_texts`, one sentence per entry: the model sometimes packs
+    two into one ("... on the white sheet. A small tattoo ..."), which hid
+    the first from the duplicate check."""
+    out: List[str] = []
+    for text in _texts(value):
+        out += [t for t in _SENTENCE_SPLIT_RE.split(text) if t.strip()]
+    return out
+
+
 def parse(raw: str, cast: Sequence[CastMember]) -> Dict[str, Any]:
     """The reply as a clean dict (strings collapsed, lists of non-empty
     strings). Raises :class:`StructuredError` when it is not usable."""
@@ -278,15 +424,14 @@ def parse(raw: str, cast: Sequence[CastMember]) -> Dict[str, Any]:
                 "features": _texts(subject.get("features")),
                 "clothing": _texts(subject.get("clothing")),
                 "garment_label": _text(subject.get("garment_label")),
-                "pose": _text(subject.get("pose")),
-                "expression": _text(subject.get("expression")),
+                "sentences": _sentences(subject.get("sentences")),
             }
         )
     clean: Dict[str, Any] = {
         "scene": _text(data.get("scene")),
         "subjects": clean_subjects,
-        "interactions": _texts(data.get("interactions")),
-        "background": _texts(data.get("background")),
+        "interactions": _sentences(data.get("interactions")),
+        "background": _sentences(data.get("background")),
         "negative_extra": _texts(data.get("negative_extra")),
         "unresolved": _texts(data.get("unresolved")),
     }
@@ -294,6 +439,7 @@ def parse(raw: str, cast: Sequence[CastMember]) -> Dict[str, Any]:
         clean[name] = _text(data.get(name))
     if not clean["scene"]:
         raise StructuredError("the reply has no scene")
+    lift_dress_states(clean)
     unknown = sorted(
         {
             m.group(1)
@@ -314,16 +460,51 @@ def _all_text(data: Dict[str, Any]) -> List[Tuple[str, str]]:
         out.append((f"the hair of {who}", s["hair"]))
         out += [(f"the features of {who}", t) for t in s["features"]]
         out += [(f"the clothing of {who}", t) for t in s["clothing"]]
-        out.append((f"the pose of {who}", s["pose"]))
-        out.append((f"the expression of {who}", s["expression"]))
+        out += [(f"a sentence of {who}", t) for t in s["sentences"]]
     out += [("interactions", t) for t in data["interactions"]]
     out += [("background", t) for t in data["background"]]
     out += [(name, data[name]) for name in FREE_FIELDS]
     return out
 
 
+def _stem(word: str) -> str:
+    """A crude stem, enough to match a word's forms: looking / looks /
+    looked -> look, touches -> touch, concentrate / concentrating ->
+    concentrat."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    return word[:-1] if word.endswith("e") and len(word) > 4 else word
+
+
+def leftover_warning(
+    data: Dict[str, Any],
+    cast: Sequence[CastMember],
+    description: str,
+    problems: Sequence[str],
+) -> Optional[str]:
+    """The step warning for what is still wrong after the retry, or None:
+    the description words the prompt may have lost, by name (the owner can
+    judge "may have lost 'concentrate'" at a glance; a count said nothing),
+    and how many other checks still fail."""
+    if not problems:
+        return None
+    lost = missing_words(data, cast, description)
+    others = [p for p in problems if "the JSON has nothing for" not in p]
+    parts = []
+    if lost:
+        parts.append("may have lost " + ", ".join(repr(w) for w in lost))
+    if others:
+        parts.append(f"{len(others)} check(s) still failing")
+    return "structured prompt: " + "; ".join(parts) if parts else None
+
+
 def missing_words(
-    data: Dict[str, Any], cast: Sequence[CastMember], description: str
+    data: Dict[str, Any],
+    cast: Sequence[CastMember],
+    description: str,
+    lexicon: Optional[FrozenSet[str]] = None,
 ) -> List[str]:
     """Content words of ``description`` (the marked caption) that appear
     nowhere in the reply or in what code adds itself (the cast's draws), at
@@ -331,18 +512,44 @@ def missing_words(
     when the reply holds a word sharing its first five letters ("watching"
     is kept by "watches") or a close spelling of it (a caption typo:
     "vwatching" is kept by "watching"), so a dropped fact shows and a
-    rephrasing mostly does not."""
+    rephrasing mostly does not. Only a word of :func:`visual_lexicon`
+    (``lexicon`` overrides it) can be lost, and an action is kept by any
+    word of its :data:`ACTION_GROUPS` group."""
+    lex = visual_lexicon() if lexicon is None else lexicon
     kept_text = " ".join(t for _, t in _all_text(data))
     kept_text += " " + " ".join(
         " ".join([m.identity, *m.traits, m.hair or ""]) for m in cast
     )
     kept_words = set(re.findall(r"[a-z]+", kept_text.lower()))
     kept = {w[:5] for w in kept_words}
-    words = re.findall(r"[a-z]+", _PLACEHOLDER_RE.sub(" ", description).lower())
+    kept_stems = {_stem(w) for w in kept_words}
+    words: List[Tuple[str, bool]] = []
+    for raw in _SENTENCE_RE.findall(description):
+        # Whether the sentence is about a person: an action word counts only
+        # then ("a coffee table sits in the foreground" loses no fact).
+        personal = bool(_PLACEHOLDER_RE.search(raw) or _PERSON_REF_RE.search(raw))
+        bare = _PLACEHOLDER_RE.sub(" ", raw).lower()
+        words += [(w, personal) for w in re.findall(r"[a-z]+", bare)]
     missing: List[str] = []
-    for word in words:
+    for word, personal in words:
         if len(word) < 4 or word in _RECALL_SKIP or word[:5] in kept:
             continue
+        if word in _BODY_PARTS or _stem(word) in _BODY_PART_STEMS:
+            continue  # framing ("from the chest up"), not a fact of its own
+        if len(word) >= _ADVERB_MIN and word.endswith("ly"):
+            continue  # tone, not a fact
+        if _HEDGE_RE.fullmatch(word):
+            continue  # dropping a hedge is what the form is told to do
+        stem = _stem(word)
+        if stem not in lex:
+            continue  # not something visible ("anchoring", "moment")
+        if stem in kept_stems:  # "looking" is kept by "looks"
+            continue
+        group = _action_group(stem)
+        if group is not None and not personal:
+            continue  # an object that "sits", "holds" or "circles"
+        if group is not None and any(_action_group(k) == group for k in kept_stems):
+            continue  # "sits" is kept by "seated"
         if get_close_matches(word, kept_words, n=1, cutoff=RECALL_TYPO_CUTOFF):
             continue  # a typo in the caption ("vwatching") the reply spelled right
         if word not in missing:
@@ -350,6 +557,62 @@ def missing_words(
         if len(missing) == RECALL_MAX:
             break
     return missing
+
+
+_SENTENCE_RE = re.compile(r"[^.!?]+[.!?]?")
+_PERSON_REF_RE = re.compile(
+    r"\b(she|he|her|his|him|they|them|their|both|all|each|woman|women|man|men|"
+    r"couple|trio|figures?|subjects?)\b",
+    re.IGNORECASE,
+)
+_BODY_PARTS = frozenset(
+    """head face hair skin neck chest breast breasts torso back shoulder
+    shoulders arm arms elbow hand hands wrist finger fingers hip hips waist
+    belly stomach abdomen thigh thighs leg legs knee knees lap foot feet toe
+    toes ankle calf calves buttock buttocks body bodies form forms figure
+    figures lips mouth eye eyes ear ears nose cheek cheeks chin forehead""".split()
+)
+_ANY_PRONOUN_RE = re.compile(
+    r"\b(she|he|her|his|him|hers|they|them|their)\b", re.IGNORECASE
+)
+LOST_SENTENCES_MAX = 3
+_BODY_PART_STEMS = frozenset(_stem(w) for w in _BODY_PARTS)
+
+
+def _lost_sentence_problems(description: str, lost: Sequence[str]) -> List[str]:
+    """One problem per description sentence that holds a lost word, quoting
+    the sentence (a lone word, often a typo, gave the model nothing to act
+    on, and it sent its JSON back unchanged), naming the lost words and
+    where they belong: interactions when the sentence names two or more
+    people, else that person's own fields."""
+    out: List[str] = []
+    left = set(lost)
+    for raw in _SENTENCE_RE.findall(description):
+        sentence = " ".join(raw.split())
+        words = set(re.findall(r"[a-z]+", sentence.lower()))
+        here = [w for w in lost if w in left and w in words]
+        if not sentence or not here:
+            continue
+        left -= set(here)
+        names = list(dict.fromkeys(_PLACEHOLDER_RE.findall(sentence)))
+        if len(names) >= 2 or (not names and _ANY_PRONOUN_RE.search(sentence)):
+            # Two people, or people the caption calls "she" and "his".
+            where = (
+                "if it is something one person does to or with another, add "
+                "it to interactions using their names"
+            )
+        elif names:
+            where = f"add a sentence about it to the sentences of {{{names[0]}}}"
+        else:
+            where = "add it to background or the scene"
+        out.append(
+            f'the description says "{sentence}", but the JSON has nothing for '
+            + ", ".join(repr(w) for w in here)
+            + f": {where}, and keep everything else"
+        )
+        if len(out) == LOST_SENTENCES_MAX:
+            break
+    return out
 
 
 def check(
@@ -366,22 +629,13 @@ def check(
     if description is not None:
         lost = missing_words(data, cast, description)
         if lost:
-            problems.append(
-                "these words of the description are missing, put what they "
-                "say in the right field: " + ", ".join(repr(w) for w in lost)
-            )
+            problems.extend(_lost_sentence_problems(description, lost))
     for where, text in _all_text(data):
         hedges = sorted({m.group(0).lower() for m in _HEDGE_RE.finditer(text)})
         if hedges:
             problems.append(
                 f"{where} hedges with {', '.join(repr(h) for h in hedges)}: "
                 "say what is there"
-            )
-    for s in data["subjects"]:
-        if _PLACEHOLDER_RE.search(s["pose"]):
-            problems.append(
-                f"the pose of {{{s['id']}}} involves another person: "
-                "move that part to interactions"
             )
     # The scene may not name anyone, so a pronoun is the only way it can
     # refer back ("a woman watching him"); the other two can use the names.
@@ -392,22 +646,18 @@ def check(
                 f"{where} uses she, he, her or his for a person: "
                 "use the names in braces"
             )
-    for name in FREE_FIELDS:
-        if _PLACEHOLDER_RE.search(data[name]):
-            problems.append(f"{name} mentions a person: leave people out of it")
     if _PLACEHOLDER_RE.search(data["scene"]):
         problems.append("scene names a person: describe the people only as a group")
-    positions = [s["position"] for s in data["subjects"]]
-    if len(set(positions)) != len(positions):
-        problems.append("two people have the same position: give each their own")
-    if _needs_garment_handles(cast) and all(s["clothing"] for s in data["subjects"]):
-        # Only when everyone has clothing: a description without any cannot
-        # give a label, and the handles then fall back to position.
-        labels = [s["garment_label"].lower() for s in data["subjects"]]
-        if any(not label for label in labels) or len(set(labels)) != len(labels):
-            problems.append(
-                "garment_label must be filled and different for each person"
-            )
+    # Not checked, because the renderer handles them and a retry for them
+    # cannot help: another person's drawn hair in a hair field (the model
+    # follows the caption text, which is where it came from; render puts
+    # the person's own hair back).
+    # Also not checked, for the same reason
+    # was a wasted round trip (evaluation round 1): two people in one
+    # position (four people on a bed often are; the handles stay distinct),
+    # a person named in the lighting or colour sentence (the name is filled
+    # in like anywhere else), a missing or shared garment_label (the handles
+    # fall back to position, then an ordinal).
     return problems
 
 
@@ -511,32 +761,120 @@ def _sentence(text: str) -> str:
 
 
 _PRONOUNS: Dict[str, Tuple[str, str]] = {"woman": ("She", "her"), "man": ("He", "his")}
-# Bare verbs that end in -ing, which a participle check must not touch.
+# Bare verbs that end in -ing, which the participle repair must not touch.
 _ING_VERBS = frozenset(
-    {
-        "bring",
-        "cling",
-        "fling",
-        "ring",
-        "sing",
-        "sling",
-        "spring",
-        "sting",
-        "string",
-        "swing",
-        "wring",
-    }
+    "bring cling fling ring sing sling spring sting string swing wring".split()
 )
 
 
-def _finite(pose: str) -> str:
-    """A pose the model wrote as a participle ("sitting on his bed") made
-    to follow "She" / "He": "is sitting on his bed". A finite verb
-    ("sits") is left alone."""
-    first = pose.split(" ", 1)[0].lower()
+def _foreign_hair(hair: str, member: CastMember, cast: Sequence[CastMember]) -> bool:
+    """True when a person's hair phrase holds another cast member's drawn
+    hair value and not their own (evaluation: the 8B once gave one woman's
+    "platinum blonde hair" to the other)."""
+    text = hair.lower()
+    if not text or (member.hair and member.hair.lower() in text):
+        return False
+    return any(
+        m.name != member.name and m.hair and m.hair.lower() in text for m in cast
+    )
+
+
+def _repair_participle(text: str, name: str) -> str:
+    """A person sentence the model left without its verb ("{ALICE} fanning
+    her hair out") gets one: "{ALICE} is fanning her hair out"."""
+    mine = "{" + name + "}"
+    stripped = text.lstrip()
+    if not stripped.startswith(mine + " "):
+        return text
+    rest = stripped[len(mine) + 1 :]
+    first = rest.split(" ", 1)[0].lower()
     if first.endswith("ing") and first not in _ING_VERBS:
-        return "is " + pose
-    return pose
+        return f"{mine} is {rest}"
+    return text
+
+
+# Share of a person sentence's content words found in one interaction above
+# which the sentence only repeats it and is left out of the prompt.
+REPEAT_SHARE = 0.6
+# Garment phrases sometimes arrive as "wearing a red coat"; "She wears" is
+# written by code, so the verb is dropped from the phrase.
+_WEAR_LEAD_RE = re.compile(r"^(?:is\s+)?(?:wearing|wears|dressed in)\s+", re.IGNORECASE)
+
+
+def _content(text: str) -> set:
+    words = re.findall(r"[a-z]+", _PLACEHOLDER_RE.sub(" ", text).lower())
+    return {_stem(w) for w in words if len(w) >= 4 and w not in _RECALL_SKIP}
+
+
+def _repeats(sentence: str, interactions: Sequence[str]) -> bool:
+    """True when a person sentence names another person and most of its
+    content words are in one interaction (the model said the same thing in
+    both places)."""
+    if not _PLACEHOLDER_RE.search(sentence):
+        return False
+    words = _content(sentence)
+    if not words:
+        return False
+    return any(
+        len(words & _content(i)) / len(words) >= REPEAT_SHARE for i in interactions
+    )
+
+
+def _opens_with(sentence: str) -> Optional[str]:
+    """The id a sentence opens with ("{BELLA} smiles."), else None."""
+    match = re.match(r"\s*\{([A-Z][A-Z0-9]*)\}", sentence)
+    return match.group(1) if match else None
+
+
+# A state of dress listed as a garment or a feature ("nude", "nude skin")
+# would read "She wears nude." / "with ... nude skin"; it is a sentence.
+_DRESS_STATE_RE = re.compile(
+    r"^(?:completely |fully |partially |mostly )?"
+    r"(nude|naked|topless|shirtless|bare-chested|barefoot|bottomless)"
+    r"(?: skin| body| figure)?$",
+    re.IGNORECASE,
+)
+
+
+def lift_dress_states(data: Dict[str, Any]) -> None:
+    """Move each state of dress out of a person's clothing and features into
+    that person's sentences, "{ALICE} is nude.", once (in place)."""
+    for s in data["subjects"]:
+        states: List[str] = []
+        for key in ("clothing", "features"):
+            kept = []
+            for item in s[key]:
+                m = _DRESS_STATE_RE.match(item.strip().rstrip("."))
+                if m:
+                    states.append(m.group(1).lower())
+                else:
+                    kept.append(item)
+            s[key] = kept
+        said = " ".join(s["sentences"]).lower()
+        for state in dict.fromkeys(states):
+            if not re.search(rf"\b{re.escape(state)}\b", said):
+                s["sentences"].append("{" + s["id"] + "} is " + state + ".")
+
+
+def file_sentences(data: Dict[str, Any]) -> Tuple[Dict[str, List[str]], List[str]]:
+    """``(sentences per person, interactions)`` as they are rendered: a
+    sentence filed under one person that opens with another person's name
+    is about that other person, so it moves to the interactions; a person
+    sentence that only repeats an interaction is dropped."""
+    interactions = list(data["interactions"])
+    own: Dict[str, List[str]] = {}
+    for s in data["subjects"]:
+        kept: List[str] = []
+        for sentence in s["sentences"]:
+            opener = _opens_with(sentence)
+            if opener is not None and opener != s["id"]:
+                interactions.append(sentence)
+            else:
+                kept.append(sentence)
+        own[s["id"]] = kept
+    for sid, sentences in own.items():
+        own[sid] = [t for t in sentences if not _repeats(t, interactions)]
+    return own, interactions
 
 
 def render(
@@ -547,28 +885,77 @@ def render(
 ) -> Tuple[str, Optional[str]]:
     """``(prompt, negative)`` from a parsed reply: the scene sentence, then
     each person in cast order -- position, handle, the resolver's identity
-    and traits, the hair, clothing, pose and expression -- then the
-    interactions, the background and the free sentences. A pose that
-    involves another person is left out when there are interactions (they
-    say it, and the pose would repeat it)."""
+    and traits, the hair, the clothing, then that person's own sentences --
+    then the interactions, the background and the free sentences. Every
+    field gets the handles put in for its ``{NAME}``s; a person sentence
+    that opens with the person's own name opens with "She" / "He" instead,
+    since the introduction just named them. Sentences are filed by
+    :func:`file_sentences`."""
     names = handles(data, cast)
 
     def fill(text: str) -> str:
-        return _PLACEHOLDER_RE.sub(lambda m: names.get(m.group(1), m.group(0)), text)
+        text = _PLACEHOLDER_RE.sub(lambda m: names.get(m.group(1), m.group(0)), text)
+        # A brace pair that is no id ("{Bob}", a person the caption names in
+        # plain text) loses its braces: braces never reach the prompt.
+        return _STRAY_BRACES_RE.sub(lambda m: m.group(1), text)
+
+    seen: Set[str] = set()
+
+    def once(sentence: str) -> str:
+        """``sentence``, or "" when the prompt already says it word for word
+        (the model wrote the lighting into the background too)."""
+        key = " ".join(sentence.lower().split())
+        if not key or key in seen:
+            return ""
+        seen.add(key)
+        return sentence
+
+    def own_sentence(member: CastMember, text: str) -> str:
+        text = _repair_participle(text, member.name)
+        subject, possessive = _PRONOUNS.get(member.noun, ("", ""))
+        named = _sentence(fill(text))
+        if subject:
+            mine = "{" + member.name + "}"
+            stripped = text.lstrip()
+            short = text
+            if stripped.startswith(mine + "'s "):
+                short = possessive.capitalize() + stripped[len(mine) + 2 :]
+            elif stripped.startswith(mine):
+                short = subject + stripped[len(mine) :]
+            pronoun = _sentence(fill(short))
+            # Two people who do the same thing must not read as one person
+            # doing it twice ("She bends forward." twice): the second keeps
+            # its handle.
+            if " ".join(pronoun.lower().split()) not in seen:
+                return once(pronoun)
+        return once(named)
 
     by_id = {s["id"]: s for s in data["subjects"]}
-    parts: List[str] = [_sentence(data["scene"])]
+    own, interactions = file_sentences(data)
+    # The scene goes first and its sentences count as said: a scene that also
+    # says "All three are barefoot." keeps the background from saying it again.
+    parts: List[str] = [
+        once(_sentence(" ".join(raw.split())))
+        for raw in _SENTENCE_RE.findall(fill(data["scene"]))
+    ]
     for member in cast:
         s = by_id[member.name]
         subject, _ = _PRONOUNS.get(member.noun, ("They", "their"))
         withs = list(member.traits)
+        if _foreign_hair(s["hair"], member, cast):
+            # Another person's drawn hair: the reply gave it to the wrong
+            # person, and the caption engine knows whose hair this is: say
+            # their own instead.
+            s = {**s, "hair": ""}
+            if member.hair and member.hair not in withs:
+                withs.append(member.hair)
         if s["hair"] and member.hair and s["hair"] != member.hair:
             # The caption spelled the hair out with its style; the drawn
             # value says only the colour, so keep the fuller phrase alone.
             withs = [t for t in withs if t != member.hair]
-        withs += s["features"]
+        withs += [fill(t) for t in s["features"]]
         if s["hair"]:
-            withs.append(s["hair"])
+            withs.append(fill(s["hair"]))
         handle = names[member.name]
         if handle.endswith(_POSITION_PHRASE[s["position"]]):
             # "The woman in the center is ..." already says where she is.
@@ -579,16 +966,17 @@ def render(
             intro += " with " + _join_and(withs)
         person = [intro + "."]
         if s["clothing"]:
-            person.append(f"{subject} wears {_join_and(s['clothing'])}.")
-        pose = s["pose"]
-        if pose and not (_PLACEHOLDER_RE.search(pose) and data["interactions"]):
-            person.append(f"{subject} {_finite(fill(pose)).rstrip('.')}.")
-        if s["expression"]:
-            person.append(f"{subject} has {s['expression'].rstrip('.')}.")
-        parts.append(" ".join(person))
-    parts += [_sentence(fill(t)) for t in data["interactions"]]
-    parts += [_sentence(fill(t)) for t in data["background"]]
-    parts += [_sentence(fill(data[name])) for name in FREE_FIELDS]
+            garments = [_WEAR_LEAD_RE.sub("", fill(t)) for t in s["clothing"]]
+            wears = f"{subject} wears {_join_and(garments)}."
+            if " ".join(wears.lower().split()) in seen:
+                # A matching outfit: the second person keeps their handle.
+                wears = _sentence(f"{handle} wears {_join_and(garments)}")
+            person.append(once(wears))
+        person += [own_sentence(member, t) for t in own[member.name]]
+        parts.append(" ".join(p for p in person if p))
+    parts += [once(_sentence(fill(t))) for t in interactions]
+    parts += [once(_sentence(fill(t))) for t in data["background"]]
+    parts += [once(_sentence(fill(data[name]))) for name in FREE_FIELDS]
     prompt = strip_parentheses(" ".join(p for p in parts if p))
     negative = stock_negative(profile, store)
     if negative is not None:

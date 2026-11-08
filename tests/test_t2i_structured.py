@@ -74,8 +74,10 @@ def subject(sid: str, **over: Any) -> Dict[str, Any]:
         "features": [],
         "clothing": [f"a {'red' if sid == 'ALICE' else 'blue'} coat"],
         "garment_label": f"{'red' if sid == 'ALICE' else 'blue'} coat",
-        "pose": "sits on the bench",
-        "expression": "a soft smile",
+        "sentences": [
+            "{" + sid + "} sits on the bench.",
+            "{" + sid + "} has a soft smile.",
+        ],
     }
     out.update(over)
     return out
@@ -255,25 +257,11 @@ class TestCheck(unittest.TestCase):
                     subject("BELLA"),
                 ],
             ),
-            "involves another person": reply(
-                [],
-                subjects=[
-                    subject("ALICE", pose="holds {BELLA}'s hand"),
-                    subject("BELLA"),
-                ],
-            ),
             "uses she, he": reply(
                 ["ALICE", "BELLA"], interactions=["She hands {BELLA} a cup."]
             ),
-            "lighting mentions a person": reply(
-                ["ALICE", "BELLA"], lighting="Sun on {ALICE}."
-            ),
-            "same position": reply(
-                [],
-                subjects=[
-                    subject("ALICE", position="left"),
-                    subject("BELLA", position="left"),
-                ],
+            "scene names a person": reply(
+                ["ALICE", "BELLA"], scene="A photograph of {ALICE} on a bench."
             ),
         }
         for needle, raw in cases.items():
@@ -306,8 +294,13 @@ class TestCheck(unittest.TestCase):
         problems = t2i_structured.check(
             t2i_structured.parse(lost, CAST), CAST, description
         )
-        (missing,) = [p for p in problems if "missing" in p]
+        (missing,) = [p for p in problems if "has nothing for" in p]
         self.assertIn("'watching'", missing)
+        # The retry quotes the sentence that lost it, and says where it goes:
+        # a sentence naming two people means interactions.
+        self.assertIn('"{ALICE} sits on a park bench, watching {BELLA}."', missing)
+        self.assertIn("interactions", missing)
+        self.assertNotIn("red coat", missing)
         for kept in ("'park'", "'bench'", "'wears'", "'coat'"):
             self.assertNotIn(kept, missing)
         # A word kept in another form ("watches") counts as kept.
@@ -330,20 +323,159 @@ class TestCheck(unittest.TestCase):
             t2i_structured.missing_words(data, CAST, "{ALICE} has grey eyes."), []
         )
 
-    def test_garment_labels_are_checked_only_when_handles_need_them(self) -> None:
-        same = reply(
+    def test_a_lost_word_points_to_its_own_person_or_the_background(self) -> None:
+        data = t2i_structured.parse(reply(["ALICE", "BELLA"]), CAST)
+        one = t2i_structured.check(data, CAST, "{ALICE} is barefoot.")
+        self.assertTrue(any("the sentences of {ALICE}" in p for p in one), one)
+        none = t2i_structured.check(
+            data, CAST, "A teal velvet curtain covers the window."
+        )
+        self.assertTrue(any("background or the scene" in p for p in none), none)
+        # One problem per sentence, at most three.
+        many = " ".join(
+            f"{{ALICE}} holds a {w}."
+            for w in ("lace", "denim", "velvet", "satin", "leather")
+        )
+        lost = [p for p in t2i_structured.check(data, CAST, many) if "nothing" in p]
+        self.assertEqual(len(lost), t2i_structured.LOST_SENTENCES_MAX)
+
+    def test_only_visible_things_can_be_lost(self) -> None:
+        data = t2i_structured.parse(reply(["ALICE", "BELLA"]), CAST)
+        prose = "The light illuminates {ALICE}, anchoring the moment in a backdrop."
+        self.assertEqual(t2i_structured.missing_words(data, CAST, prose), [])
+        self.assertEqual(
+            t2i_structured.missing_words(
+                data, CAST, "{ALICE} is topless and barefoot."
+            ),
+            ["topless", "barefoot"],
+        )
+        # An injected lexicon is what decides.
+        self.assertEqual(
+            t2i_structured.missing_words(
+                data, CAST, "{ALICE} holds a violin.", frozenset({"violin"})
+            ),
+            ["violin"],
+        )
+
+    def test_a_paraphrased_action_is_kept(self) -> None:
+        data = t2i_structured.parse(
+            reply(
+                [],
+                subjects=[
+                    subject("ALICE", sentences=["{ALICE} is seated on the bench."]),
+                    subject("BELLA", sentences=["{BELLA} gazes at {ALICE}."]),
+                ],
+            ),
+            CAST,
+        )
+        for description in ("{ALICE} sits on a bench.", "{BELLA} is watching {ALICE}."):
+            with self.subTest(description):
+                self.assertEqual(
+                    t2i_structured.missing_words(data, CAST, description), []
+                )
+        # Grey eyes in the traits never keep "watching".
+        plain = t2i_structured.parse(reply(["ALICE", "BELLA"], interactions=[]), CAST)
+        self.assertEqual(
+            t2i_structured.missing_words(plain, CAST, "{BELLA} is watching {ALICE}."),
+            ["watching"],
+        )
+
+    def test_objects_that_sit_and_body_framing_lose_nothing(self) -> None:
+        data = t2i_structured.parse(reply(["ALICE", "BELLA"]), CAST)
+        for description in (
+            "A glass coffee table sits in the foreground.",
+            "A plate holds cookies.",
+            "The shot frames them from the chest up.",
+        ):
+            with self.subTest(description):
+                self.assertEqual(
+                    t2i_structured.missing_words(data, CAST, description), []
+                )
+        # A person who sits is still a fact.
+        self.assertEqual(
+            t2i_structured.missing_words(data, CAST, "{BELLA} kneels."), ["kneels"]
+        )
+
+    def test_word_forms_count_as_kept(self) -> None:
+        data = t2i_structured.parse(
+            reply(["ALICE", "BELLA"], interactions=["{ALICE} looks up at {BELLA}."]),
+            CAST,
+        )
+        for description in (
+            "{ALICE} is looking up at {BELLA}.",
+            "{ALICE} looked up at {BELLA}.",
+            "{ALICE} continues to look at {BELLA}.",
+        ):
+            with self.subTest(description):
+                self.assertEqual(
+                    t2i_structured.missing_words(data, CAST, description), []
+                )
+
+    def test_the_leftover_warning_names_the_lost_words(self) -> None:
+        data = t2i_structured.parse(reply(["ALICE", "BELLA"]), CAST)
+        description = "{ALICE} has painted nails and a red coat."
+        problems = t2i_structured.check(data, CAST, description)
+        self.assertEqual(
+            t2i_structured.leftover_warning(data, CAST, description, problems),
+            "structured prompt: may have lost 'painted'",
+        )
+        hedged = reply(["ALICE", "BELLA"], mood="It seems calm.")
+        data = t2i_structured.parse(hedged, CAST)
+        problems = t2i_structured.check(data, CAST, description)
+        self.assertEqual(
+            t2i_structured.leftover_warning(data, CAST, description, problems),
+            "structured prompt: may have lost 'painted'; 1 check(s) still failing",
+        )
+        self.assertIsNone(t2i_structured.leftover_warning(data, CAST, description, []))
+
+    def test_a_pose_that_names_another_person_is_not_a_problem(self) -> None:
+        # "kneeling next to {BELLA}" says where she is; the renderer keeps it.
+        raw = reply(
             [],
             subjects=[
-                subject("ALICE", garment_label="coat"),
-                subject("BELLA", garment_label="coat"),
+                subject("ALICE", sentences=["{ALICE} kneels next to {BELLA}."]),
+                subject("BELLA"),
             ],
         )
-        self.assertEqual(self.problems(same), [])
+        self.assertEqual(self.problems(raw), [])
+
+    def test_a_pronoun_sentence_points_to_interactions(self) -> None:
+        data = t2i_structured.parse(reply(["ALICE", "BELLA"]), CAST)
+        problems = t2i_structured.check(
+            data, CAST, "She is reaching out and touching his arm."
+        )
+        (lost,) = [p for p in problems if "nothing for" in p]
+        self.assertIn("'reaching'", lost)
+        self.assertIn("interactions", lost)
+        self.assertNotIn("background", lost)
+
+    def test_what_the_renderer_handles_is_not_a_problem(self) -> None:
         blondes = (
             member("ALICE", "honey blonde hair"),
             member("BELLA", "platinum blonde hair"),
         )
-        self.assertTrue(any("garment_label" in p for p in self.problems(same, blondes)))
+        cases = {
+            "a shared garment label": reply(
+                [],
+                subjects=[
+                    subject("ALICE", garment_label="coat"),
+                    subject("BELLA", garment_label="coat"),
+                ],
+            ),
+            "a person in the lighting": reply(
+                ["ALICE", "BELLA"], lighting="Sun on {ALICE}."
+            ),
+            "a shared position": reply(
+                [],
+                subjects=[
+                    subject("ALICE", position="left"),
+                    subject("BELLA", position="left"),
+                ],
+            ),
+        }
+        for label, raw in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.problems(raw, blondes), [])
 
 
 class TestRender(unittest.TestCase):
@@ -372,19 +504,196 @@ class TestRender(unittest.TestCase):
         self.assertIn("She has a soft smile.", prompt)
         self.assertNotIn("{", prompt)
 
-    def test_a_pose_that_repeats_an_interaction_is_left_out(self) -> None:
+    def test_a_sentence_that_repeats_an_interaction_is_left_out(self) -> None:
         raw = reply(
             [],
-            subjects=[subject("ALICE", pose="hands {BELLA} a cup"), subject("BELLA")],
+            subjects=[
+                subject("ALICE", sentences=["{ALICE} hands {BELLA} a cup."]),
+                subject("BELLA"),
+            ],
         )
         prompt = self.render(raw)
         self.assertNotIn("She hands", prompt)
         alone = reply(
             [],
-            subjects=[subject("ALICE", pose="hands {BELLA} a cup"), subject("BELLA")],
+            subjects=[
+                subject("ALICE", sentences=["{ALICE} hands {BELLA} a cup."]),
+                subject("BELLA"),
+            ],
             interactions=[],
         )
         self.assertIn("She hands the jet-black-haired woman a cup.", self.render(alone))
+
+    def test_a_positional_sentence_stays_beside_the_interactions(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", sentences=["{ALICE} is kneeling next to {BELLA}."]),
+                subject("BELLA"),
+            ],
+        )
+        prompt = self.render(raw)
+        self.assertIn("She is kneeling next to the jet-black-haired woman.", prompt)
+        self.assertIn(
+            "The auburn-haired woman hands the jet-black-haired woman", prompt
+        )
+
+    def test_every_field_gets_its_names(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject(
+                    "ALICE",
+                    sentences=[
+                        "{ALICE} looks up at {BELLA}'s face with a questioning look."
+                    ],
+                    features=["a ring like {BELLA}'s"],
+                    clothing=["a scarf {BELLA} gave her"],
+                ),
+                subject("BELLA"),
+            ],
+        )
+        prompt = self.render(raw)
+        self.assertNotIn("{", prompt)
+        self.assertIn(
+            "She looks up at the jet-black-haired woman's face with a "
+            "questioning look.",
+            prompt,
+        )
+        self.assertIn("She has a soft smile.", prompt)
+        self.assertIn("a ring like the jet-black-haired woman's", prompt)
+        self.assertIn("a scarf the jet-black-haired woman gave her", prompt)
+
+    def test_a_sentence_about_another_person_moves_to_the_interactions(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", sentences=["{BELLA} smiles at {ALICE}."]),
+                subject("BELLA", sentences=[]),
+            ],
+            interactions=[],
+        )
+        prompt = self.render(raw)
+        self.assertIn(
+            "The jet-black-haired woman smiles at the auburn-haired woman.", prompt
+        )
+        self.assertNotIn("She smiles", prompt)
+
+    def test_two_people_doing_the_same_thing_stay_two_people(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", sentences=["{ALICE} bends forward."]),
+                subject("BELLA", sentences=["{BELLA} bends forward."]),
+            ],
+        )
+        prompt = self.render(raw)
+        self.assertEqual(prompt.count("She bends forward."), 1)
+        self.assertIn("The jet-black-haired woman bends forward.", prompt)
+
+    def test_two_sentences_in_one_entry_are_two_sentences(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", sentences=["{ALICE} lies on the sheet."]),
+                subject(
+                    "BELLA",
+                    sentences=["{BELLA} lies on the sheet. A tattoo marks her ankle."],
+                ),
+            ],
+        )
+        prompt = self.render(raw)
+        self.assertEqual(prompt.count("She lies on the sheet."), 1)
+        self.assertIn("The jet-black-haired woman lies on the sheet.", prompt)
+        self.assertIn("A tattoo marks her ankle.", prompt)
+
+    def test_a_brace_that_is_no_id_never_reaches_the_prompt(self) -> None:
+        raw = reply(["ALICE", "BELLA"], interactions=["{Bob} waves at {ALICE}."])
+        prompt = self.render(raw)
+        self.assertIn("Bob waves at the auburn-haired woman.", prompt)
+        self.assertNotIn("{", prompt)
+
+    def test_a_sentence_without_its_verb_gets_one(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", sentences=["{ALICE} fanning her hair out."]),
+                subject("BELLA", sentences=["{BELLA} sings softly."]),
+            ],
+        )
+        prompt = self.render(raw)
+        self.assertIn("She is fanning her hair out.", prompt)
+        self.assertIn("She sings softly.", prompt)
+
+    def test_a_state_of_dress_is_a_sentence_not_a_garment(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", clothing=["nude"], features=["nude skin", "freckles"]),
+                subject("BELLA", clothing=["a red coat", "barefoot"]),
+            ],
+        )
+        prompt = self.render(raw)
+        self.assertNotIn("wears nude", prompt)
+        self.assertNotIn("nude skin", prompt)
+        self.assertEqual(prompt.count("is nude."), 1)
+        self.assertIn("freckles", prompt)
+        self.assertIn("She wears a red coat.", prompt)
+        self.assertIn("is barefoot.", prompt)
+        # Already said in a sentence: not said again.
+        said = reply(
+            [],
+            subjects=[
+                subject(
+                    "ALICE", clothing=["topless"], sentences=["{ALICE} is topless."]
+                ),
+                subject("BELLA"),
+            ],
+        )
+        self.assertEqual(self.render(said).count("topless"), 1)
+
+    def test_another_persons_drawn_hair_never_reaches_the_wrong_person(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject("ALICE", hair="long jet-black hair"),
+                subject("BELLA"),
+            ],
+        )
+        data = t2i_structured.parse(raw, CAST)
+        # Not a problem to retry (the model follows the caption's text); the
+        # renderer puts the person's own hair back.
+        self.assertEqual(t2i_structured.check(data, CAST), [])
+        prompt, _ = t2i_structured.render(data, CAST, MOSS)
+        alice = prompt.split("On the right")[0]
+        self.assertNotIn("jet-black hair", alice)
+        self.assertIn("auburn hair", alice)
+
+    def test_a_sentence_said_twice_is_written_once(self) -> None:
+        raw = reply(
+            ["ALICE", "BELLA"],
+            background=["Soft afternoon sun from the left."],
+        )
+        self.assertEqual(self.render(raw).count("Soft afternoon sun from the left."), 1)
+
+    def test_own_name_at_the_start_reads_as_a_pronoun(self) -> None:
+        raw = reply(
+            [],
+            subjects=[
+                subject(
+                    "ALICE",
+                    sentences=[
+                        "{ALICE}'s hands rest on her knees.",
+                        "Her gaze is on {BELLA}.",
+                    ],
+                    clothing=["wearing a red coat"],
+                ),
+                subject("BELLA"),
+            ],
+        )
+        prompt = self.render(raw)
+        self.assertIn("She wears a red coat. Her hands rest on her knees.", prompt)
+        self.assertIn("Her gaze is on the jet-black-haired woman.", prompt)
 
     def test_the_spelled_hair_replaces_the_drawn_value(self) -> None:
         cast = (
@@ -450,14 +759,14 @@ class TestRender(unittest.TestCase):
                     position="center",
                     clothing=[],
                     garment_label="",
-                    pose="sitting on his bed",
+                    sentences=["{ADAM} sits on his bed."],
                 ),
                 subject(
                     "ALICE",
                     position="back",
                     clothing=[],
                     garment_label="",
-                    pose="stands in the doorway",
+                    sentences=["{ALICE} stands in the doorway."],
                 ),
             ],
             interactions=["{ALICE} watches {ADAM}."],
@@ -467,7 +776,7 @@ class TestRender(unittest.TestCase):
         prompt, _ = t2i_structured.render(data, cast, MOSS)
         self.assertIn("In the center, the man is a 30-year-old man", prompt)
         self.assertIn("At the back, the woman is a 30-year-old woman", prompt)
-        self.assertIn("He is sitting on his bed.", prompt)
+        self.assertIn("He sits on his bed.", prompt)
         self.assertIn("She stands in the doorway.", prompt)
         self.assertIn("The woman watches the man.", prompt)
 

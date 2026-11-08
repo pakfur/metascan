@@ -651,14 +651,13 @@ T2I_STRUCTURED_SYSTEM: |-
 
   # People
   - The description names its people {ALICE}, {BELLA}, {ADAM} and so on. The JSON already has one entry per name, in order: fill each with what the description says about that person.
-  - Inside any text, refer to a person only by their name in braces, such as {ALICE}, never by "she", "her", "the woman" or a description. Inside a person's own pose, "her", "his" and "their" for that person are fine.
+  - Inside any text, refer to a person by their name in braces, such as {ALICE}, never by "the woman" or a description. In a person's own sentences, "she", "he", "her" and "his" may refer to that person.
   - position: where the person is in the frame, one of left, right, center, front, back. Use what the description says; if it says nothing, choose one consistent with the arrangement. Give two people the same position only when the description does.
   - hair: the person's hair as a noun phrase with its style and colour, in the description's words: "long, straight ash blonde hair falling over her shoulders". Empty when the description says nothing about the hair.
   - features: other physical traits the description gives that person, each a short noun phrase. Empty when there are none.
-  - clothing: each garment or accessory of that person, each a noun phrase: "a fitted navy blue long-sleeved dress with a subtle sheen".
+  - clothing: each garment or accessory of that person, each a noun phrase: "a fitted navy blue long-sleeved dress with a subtle sheen". A state of dress is not a garment: when the description says a person is nude, naked, topless, shirtless, bare-chested or barefoot, write it as one of that person's sentences, "{ALICE} is topless.", never in clothing or features, and never leave it out.
   - garment_label: the person's most distinctive garment in two or three words with its colour or pattern, such as "navy dress" or "floral sundress"; a different label for each person. Empty only when the description gives no clothing.
-  - pose: what the person does on their own, as a verb phrase in the present tense without a subject: "sits with her legs slightly crossed". Anything that involves another person, such as touching, holding, handing or looking at them, goes in interactions, never in pose.
-  - expression: the person's expression as a noun phrase, such as "a soft, warm smile". Empty when not given.
+  - sentences: complete sentences in the present tense about this person: their pose, where they are relative to things and people, gestures, gaze and expression. Start each with the person's name in braces: "{ALICE} kneels next to {ADAM}.", "{ALICE} looks up with a questioning look." Everything the description says about the person goes here unless it is hair, a feature or clothing. Something the person does to or with another person, such as touching, holding or handing them something, goes in interactions instead.
 
   # Rules for every field
   - Use only what the description says about a person. Never invent a garment, an age, a hairstyle or a colour.

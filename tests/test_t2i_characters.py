@@ -798,6 +798,74 @@ class CharacteristicTokenTests(unittest.TestCase):
         self.assertEqual(res.text.count(bella), 1)
         self.assertEqual(res.text.count(alice), 1)
 
+    def test_hair_goes_to_the_sentence_subject_not_the_nearest_name(self) -> None:
+        # Seen in the caption file: "her __HAIR__" after a sentence object went
+        # to the object (the nearest name) and the prompt then described the
+        # subject with the other woman's hair colour.
+        cases = [
+            (
+                "__ALICE__ rests on her back, legs raised toward __BELLA__, "
+                "with __HAIR__ styled in loose waves.",
+                "ALICE",
+            ),
+            (
+                "In the foreground, __BELLA__ leans over __ALICE__'s lap, her "
+                "long straight __HAIR__ falling forward.",
+                "BELLA",
+            ),
+            (
+                "__BELLA__ leans forward near __ALICE__'s head; she has "
+                "shoulder-length __HAIR__.",
+                "BELLA",
+            ),
+            (
+                "To __CLARA__'s left, __ALICE__ leans in, her long __HAIR__ "
+                "falling forward.",
+                "ALICE",
+            ),
+        ]
+        for caption, owner in cases:
+            with self.subTest(caption=caption):
+                res = resolve(caption, style="noun")
+                # The words after the token follow the owner's hair (the
+                # others' hair is still said, in their own descriptions).
+                rest = caption.split("__HAIR__", 1)[1]
+                after = rest.split()[0].rstrip(".,") if rest.split() else ""
+                following = f" {after}" if after else rest[:1]
+                self.assertIn(res.characters[owner]["hair"] + following, res.text)
+
+    def test_a_sentence_naming_no_one_speaks_of_the_last_subject(self) -> None:
+        res = resolve(
+            "__ALICE__ lies beside __BELLA__. Her __HAIR__ falls over her shoulders.",
+            style="noun",
+        )
+        self.assertIn(res.characters["ALICE"]["hair"] + " falls", res.text)
+
+    def test_an_all_possessive_sentence_belongs_to_its_first_name(self) -> None:
+        res = resolve(
+            "__BELLA__'s arm wraps around __ALICE__'s waist, her __HAIR__ loose.",
+            style="noun",
+        )
+        self.assertIn(res.characters["BELLA"]["hair"] + " loose", res.text)
+
+    def test_a_who_clause_belongs_to_the_name_it_follows(self) -> None:
+        res = resolve(
+            "__ALICE__ leans in to kiss __BELLA__, who sits upright with her "
+            "__HAIR__ tied back.",
+            style="noun",
+        )
+        self.assertIn(res.characters["BELLA"]["hair"] + " tied back", res.text)
+
+    def test_a_possessive_right_before_the_token_names_the_owner(self) -> None:
+        res = resolve("__ALICE__ kisses __BELLA__'s __HAIR__.", style="noun")
+        self.assertIn(res.characters["BELLA"]["hair"], res.text)
+
+    def test_a_new_sentence_has_a_new_subject(self) -> None:
+        res = resolve(
+            "__ALICE__ waves. __BELLA__ smiles, her __HAIR__ in a bun.", style="noun"
+        )
+        self.assertIn(res.characters["BELLA"]["hair"] + " in a bun", res.text)
+
     def test_feminine_pronoun_beats_proximity(self) -> None:
         res = resolve(
             "__ALICE__ watches __ADAM__ while she brushes her __HAIR__. __ADAM__ nods.",
