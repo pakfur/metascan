@@ -1,0 +1,308 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "MS_SOURCE_IMAGE"
+    }
+  },
+  "2": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 2.0
+    },
+    "_meta": {
+      "title": "MS_SCALE"
+    }
+  },
+  "3": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 0.3
+    },
+    "_meta": {
+      "title": "MS_DENOISE"
+    }
+  },
+  "4": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "min(a, 2)",
+      "values.a": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Refine scale: the dialog's scale, at most x2"
+    }
+  },
+  "5": {
+    "class_type": "GetImageSize",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "GetImageSize"
+    }
+  },
+  "6": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "floor(min(min(b, c) * a, sqrt(16000000 * min(b, c) / max(b, c))) / 2) * 2",
+      "values.a": [
+        "2",
+        0
+      ],
+      "values.b": [
+        "5",
+        0
+      ],
+      "values.c": [
+        "5",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Final short edge: scale of the original, at most 16 MP"
+    }
+  },
+  "10": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "moss\\moss_image_sft_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "MS_MODEL"
+    }
+  },
+  "11": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3.5_9b_bf16.safetensors",
+      "type": "moss_image",
+      "device": "default"
+    },
+    "_meta": {
+      "title": "CLIP Loader - Qwen3.5 9B (MOSS-Image)"
+    }
+  },
+  "12": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "_meta": {
+      "title": "VAE Loader - Flux2"
+    }
+  },
+  "13": {
+    "class_type": "Power Lora Loader (rgthree)",
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "10",
+        0
+      ],
+      "clip": [
+        "11",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "MS_LORA_STACK"
+    }
+  },
+  "14": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "a photograph",
+      "clip": [
+        "13",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "MS_POSITIVE"
+    }
+  },
+  "15": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "worst quality, bad anatomy, watermark, jpeg artifact",
+      "clip": [
+        "13",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "MS_NEGATIVE"
+    }
+  },
+  "16": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "4x_foolhardy_Remacri.safetensors"
+    },
+    "_meta": {
+      "title": "Pixel upscaler (only enlarges the tiles before they are redrawn)"
+    }
+  },
+  "20": {
+    "class_type": "UltimateSDUpscale",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "model": [
+        "13",
+        0
+      ],
+      "positive": [
+        "14",
+        0
+      ],
+      "negative": [
+        "15",
+        0
+      ],
+      "vae": [
+        "12",
+        0
+      ],
+      "upscale_by": [
+        "4",
+        0
+      ],
+      "seed": 0,
+      "steps": 30,
+      "cfg": 3.0,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": [
+        "3",
+        0
+      ],
+      "upscale_model": [
+        "16",
+        0
+      ],
+      "mode_type": "Linear",
+      "tile_width": 1024,
+      "tile_height": 1024,
+      "mask_blur": 16,
+      "tile_padding": 64,
+      "seam_fix_mode": "Band Pass",
+      "seam_fix_denoise": 0.3,
+      "seam_fix_width": 64,
+      "seam_fix_mask_blur": 8,
+      "seam_fix_padding": 16,
+      "force_uniform_tiles": true,
+      "tiled_decode": false,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "MS_SEED"
+    }
+  },
+  "21": {
+    "class_type": "UnloadAllModels",
+    "inputs": {
+      "value": [
+        "20",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Free the GPU for SeedVR2 (Moss and its text encoder leave VRAM)"
+    }
+  },
+  "22": {
+    "class_type": "SeedVR2LoadDiTModel",
+    "inputs": {
+      "model": "seedvr2_ema_7b_fp16.safetensors",
+      "device": "cuda:0",
+      "offload_device": "cpu",
+      "cache_model": false
+    },
+    "_meta": {
+      "title": "SeedVR2 model"
+    }
+  },
+  "23": {
+    "class_type": "SeedVR2LoadVAEModel",
+    "inputs": {
+      "model": "ema_vae_fp16.safetensors",
+      "device": "cuda:0",
+      "offload_device": "cpu",
+      "cache_model": false,
+      "encode_tiled": true,
+      "encode_tile_size": 1024,
+      "encode_tile_overlap": 128,
+      "decode_tiled": true,
+      "decode_tile_size": 1024,
+      "decode_tile_overlap": 128
+    },
+    "_meta": {
+      "title": "SeedVR2 VAE (tiled: no effect on quality)"
+    }
+  },
+  "24": {
+    "class_type": "SeedVR2VideoUpscaler",
+    "inputs": {
+      "image": [
+        "21",
+        0
+      ],
+      "dit": [
+        "22",
+        0
+      ],
+      "vae": [
+        "23",
+        0
+      ],
+      "seed": 42,
+      "resolution": [
+        "6",
+        1
+      ],
+      "max_resolution": 0,
+      "batch_size": 1,
+      "uniform_batch_size": false,
+      "color_correction": "wavelet",
+      "temporal_overlap": 0,
+      "prepend_frames": 0,
+      "input_noise_scale": 0.0,
+      "latent_noise_scale": 0.0,
+      "offload_device": "cpu",
+      "enable_debug": false
+    },
+    "_meta": {
+      "title": "SeedVR2 final pass (fixed seed: Moss's seed is MS_SEED)"
+    }
+  },
+  "30": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "24",
+        0
+      ],
+      "filename_prefix": "upscale/moss_refine_seedvr2"
+    },
+    "_meta": {
+      "title": "MS_SAVE"
+    }
+  }
+}

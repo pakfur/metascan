@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ApiError, streamUrl, thumbnailUrl } from '../../api/client'
+import { promptFromImage } from '../../api/upscale'
 import CompareViewer from '../generation/CompareViewer.vue'
 import JobTile from '../generation/JobTile.vue'
 import SeedControls from '../generation/SeedControls.vue'
@@ -13,8 +14,10 @@ import { randomSeed, type SeedPolicy } from '../../types/t2i'
 import {
   candidateLabel,
   defaultWorkflowId,
+  sameModelFamily,
   workflowsFor,
   type UpscaleCandidate,
+  type UpscaleLora,
   type UpscaleWorkflow,
 } from '../../types/upscale'
 
@@ -33,6 +36,20 @@ const count = ref(1)
 const seed = ref(randomSeed())
 const seedPolicy = ref<SeedPolicy>('random')
 const prompt = ref('')
+const negative = ref('')
+const loras = ref<UpscaleLora[]>([])
+const model = ref('')
+const denoise = ref<number | null>(null)
+// The image's model and LoRAs were left out (another model family) and the
+// owner asked for them anyway.
+const forceImageModel = ref(false)
+// "Write a prompt from the image": the caption it was written from, its
+// warnings, and whether a request is out.
+const writingPrompt = ref(false)
+const writtenCaption = ref<string | null>(null)
+const writtenWarnings = ref<string[]>([])
+// Drops a reply the owner no longer waits for (Reset, another workflow).
+let writeSeq = 0
 const scale = ref<number | null>(null)
 const starting = ref(false)
 const swapping = ref(false)
@@ -68,6 +85,44 @@ const paused = computed(() => {
   return state === 'paused' || state === 'held'
 })
 const runLabel = computed(() => (store.record ? 'Upscale again' : 'Upscale'))
+const generation = computed(() => store.generation)
+const imageModel = computed(() => generation.value?.model ?? null)
+// Does this workflow take the image's own model and LoRAs? Only a graph
+// that loads a model (MS_MODEL) from the same family can: a Krea LoRA in
+// a Moss graph fails or draws nonsense.
+const modelFits = computed(
+  () =>
+    workflow.value?.has_model === true &&
+    sameModelFamily(imageModel.value, workflow.value.model),
+)
+const modelMismatch = computed(
+  () =>
+    workflow.value !== null &&
+    (workflow.value.has_model || workflow.value.has_loras) &&
+    imageModel.value !== null &&
+    !modelFits.value,
+)
+// Why the image's own prompt is a poor start for this workflow, or null:
+// none at all, or one written for another model family (SDXL or Pony tags
+// read poorly in Moss). Unknown when the image names no model: not flagged.
+const promptProblem = computed<string | null>(() => {
+  const w = workflow.value
+  if (!w?.has_prompt || !w.prompt_model) return null
+  const g = generation.value
+  if (g?.blind) return null
+  if (!g?.prompt) return 'This image has no prompt.'
+  if (imageModel.value && !sameModelFamily(imageModel.value, w.model)) {
+    return `Its prompt was written for ${imageModel.value}, which reads poorly in ${w.prompt_model_label}.`
+  }
+  return null
+})
+const hasGeneration = computed(() => {
+  const g = generation.value
+  return (
+    g !== null &&
+    (g.prompt !== null || g.negative !== null || g.seed !== null || g.loras.length > 0)
+  )
+})
 const fromOriginal = computed(() =>
   store.record ? 'Runs on the original, not on the current upscaled file.' : '',
 )
@@ -83,6 +138,85 @@ watch(
   },
 )
 
+// The image's model and LoRAs, when this workflow takes them; else the
+// workflow's own (empty model = the graph's, no LoRAs).
+function applyModel() {
+  const g = generation.value
+  if (g && (modelFits.value || forceImageModel.value)) {
+    model.value = workflow.value?.has_model ? (g.model ?? '') : ''
+    loras.value = g.loras.map((l) => ({ ...l }))
+  } else {
+    model.value = ''
+    loras.value = []
+  }
+}
+
+// Everything the item was generated with, as the starting point.
+function applyGeneration() {
+  writeSeq += 1
+  writingPrompt.value = false
+  writtenCaption.value = null
+  writtenWarnings.value = []
+  const g = generation.value
+  prompt.value = g?.prompt ?? ''
+  negative.value = g?.negative ?? ''
+  if (g?.seed != null) seed.value = g.seed
+  forceImageModel.value = false
+  applyModel()
+}
+
+function useImageModelAnyway() {
+  forceImageModel.value = true
+  applyModel()
+}
+
+watch(workflowId, () => {
+  forceImageModel.value = false
+  applyModel()
+  writeSeq += 1
+  writingPrompt.value = false
+})
+
+async function onWritePrompt() {
+  const w = workflow.value
+  if (!w?.prompt_model || writingPrompt.value) return
+  const seq = ++writeSeq
+  writingPrompt.value = true
+  try {
+    const r = await promptFromImage(sourcePath.value, w.prompt_model)
+    if (seq !== writeSeq) return
+    prompt.value = r.prompt
+    if (w.has_negative && r.negative) negative.value = r.negative
+    writtenCaption.value = r.caption
+    writtenWarnings.value = r.warnings
+  } catch (e) {
+    if (seq === writeSeq) toast.show(errorText(e), 'warn', 6000)
+  } finally {
+    if (seq === writeSeq) writingPrompt.value = false
+  }
+}
+
+// What a strength is for, in a word: the owner picks by purpose.
+function denoiseHint(d: number): string {
+  if (d <= 0.2) return ' (clean up)'
+  if (d <= 0.35) return ' (add detail)'
+  if (d <= 0.45) return ' (redraw)'
+  return ' (strong redraw)'
+}
+
+function addLora() {
+  loras.value = [...loras.value, { name: '', strength: 1 }]
+}
+
+function removeLora(i: number) {
+  loras.value = loras.value.filter((_, j) => j !== i)
+}
+
+function onStrengthInput(i: number, e: Event) {
+  const n = Number((e.target as HTMLInputElement).value)
+  if (Number.isFinite(n)) loras.value[i].strength = n
+}
+
 function errorText(e: unknown): string {
   return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
 }
@@ -93,7 +227,9 @@ onMounted(async () => {
     if (store.config) {
       workflowId.value = defaultWorkflowId(store.config, props.media)
       scale.value = store.config.default_scale
+      denoise.value = store.config.default_denoise
     }
+    applyGeneration()
     if (store.candidates.length) selectedId.value = store.candidates[0].id
     ready.value = true
   } catch (e) {
@@ -115,6 +251,15 @@ async function onRun() {
       seed_policy: seedPolicy.value,
       prompt: workflow.value?.has_prompt && prompt.value.trim() ? prompt.value : null,
       scale: workflow.value?.has_scale ? scale.value : null,
+      negative:
+        workflow.value?.has_negative && negative.value.trim() ? negative.value : null,
+      loras: workflow.value?.has_loras
+        ? loras.value
+            .map((l) => ({ name: l.name.trim(), strength: l.strength }))
+            .filter((l) => l.name)
+        : null,
+      denoise: workflow.value?.has_denoise ? denoise.value : null,
+      model: workflow.value?.has_model && model.value.trim() ? model.value.trim() : null,
     })
     if (next !== null) seed.value = next
   } catch (e) {
@@ -245,9 +390,100 @@ function onCountInput(e: Event) {
             Add one in Configuration, Upscale.
           </p>
 
+          <div v-if="hasGeneration && workflow" class="gen-row">
+            <span class="hint">Filled in from how this image was made.</span>
+            <button
+              class="btn small"
+              title="Put back the image's own values"
+              @click="applyGeneration"
+            >Reset</button>
+          </div>
+          <p v-if="generation?.blind && workflow?.has_prompt" class="hint">
+            A scorecard image keeps its prompt hidden until it is graded.
+          </p>
+
           <label v-if="workflow?.has_prompt" class="fld">
             <span>Prompt</span>
-            <textarea v-model="prompt" rows="3" placeholder="Optional" />
+            <textarea v-model="prompt" rows="4" placeholder="Optional" />
+          </label>
+
+          <div v-if="workflow?.has_prompt && workflow.prompt_model" class="write-prompt">
+            <p v-if="promptProblem" class="hint warn">{{ promptProblem }}</p>
+            <button
+              class="btn small"
+              :class="{ primary: promptProblem !== null }"
+              :disabled="writingPrompt || !ready"
+              title="Caption the image, then write a prompt from the caption"
+              @click="onWritePrompt"
+            >
+              {{
+                writingPrompt
+                  ? 'Writing…'
+                  : `Write a ${workflow.prompt_model_label} prompt from the image`
+              }}
+            </button>
+            <details v-if="writtenCaption" class="caption-used">
+              <summary class="hint">Written from this caption</summary>
+              <p class="hint">{{ writtenCaption }}</p>
+            </details>
+            <p v-for="note in writtenWarnings" :key="note" class="hint warn">{{ note }}</p>
+          </div>
+
+          <label v-if="workflow?.has_negative" class="fld">
+            <span>Negative prompt</span>
+            <textarea v-model="negative" rows="2" placeholder="Empty: the workflow's own" />
+          </label>
+
+          <p v-if="modelMismatch && !forceImageModel" class="hint warn">
+            This image was made with {{ imageModel }}<template v-if="workflow?.model">,
+              and this workflow loads {{ workflow.model }}</template>. Its model and
+            LoRAs are left out.
+            <button class="btn small" @click="useImageModelAnyway">Use them anyway</button>
+          </p>
+
+          <label v-if="workflow?.has_model" class="fld">
+            <span>Model</span>
+            <input
+              v-model="model"
+              type="text"
+              :placeholder="workflow.model ?? 'Empty: the workflow\'s own'"
+              :title="model || workflow.model || ''"
+            />
+          </label>
+
+          <div v-if="workflow?.has_loras" class="fld">
+            <span>LoRAs</span>
+            <div v-for="(l, i) in loras" :key="i" class="lora-row">
+              <input
+                v-model="l.name"
+                type="text"
+                placeholder="folder\name.safetensors"
+                :title="l.name"
+              />
+              <input
+                type="number"
+                step="0.05"
+                min="-10"
+                max="10"
+                :value="l.strength"
+                class="lora-strength"
+                title="Strength"
+                @input="onStrengthInput(i, $event)"
+              />
+              <button class="icon-btn" title="Remove this LoRA" @click="removeLora(i)">
+                ✕
+              </button>
+            </div>
+            <button class="btn small" @click="addLora">Add LoRA</button>
+          </div>
+
+          <label v-if="workflow?.has_denoise && store.config" class="fld">
+            <span>Denoise</span>
+            <select v-model.number="denoise">
+              <option v-for="d in store.config.denoise_levels" :key="d" :value="d">
+                {{ d }}{{ denoiseHint(d) }}
+              </option>
+            </select>
           </label>
 
           <label v-if="workflow?.has_scale && store.config" class="fld">
@@ -438,6 +674,19 @@ function onCountInput(e: Event) {
   box-sizing: border-box;
 }
 .hint { margin: 0; font-size: 12px; color: var(--text-color-secondary); }
+.gen-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.lora-row { display: flex; gap: 4px; align-items: center; }
+.lora-row input[type='text'] { flex: 1 1 auto; min-width: 0; }
+.lora-row .lora-strength { width: 64px; flex: none; }
+.btn.small { padding: 2px 8px; font-size: 12px; align-self: flex-start; }
+.write-prompt { display: flex; flex-direction: column; gap: 6px; }
+.caption-used summary { cursor: pointer; }
+.caption-used p { margin-top: 4px; white-space: pre-wrap; }
 .hint.warn { color: #c33; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .decide {

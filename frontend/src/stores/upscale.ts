@@ -4,6 +4,7 @@ import type { Media } from '../types/media'
 import type {
   UpscaleCandidate,
   UpscaleConfig,
+  UpscaleGeneration,
   UpscaleRecord,
   UpscaleRun,
   UpscaleRunBody,
@@ -32,6 +33,8 @@ export const useUpscaleStore = defineStore('upscale', () => {
   const config = ref<UpscaleConfig | null>(null)
   const record = ref<UpscaleRecord | null>(null)
   const candidates = ref<UpscaleCandidate[]>([])
+  // What the item was generated with: the dialog's pre-fill.
+  const generation = ref<UpscaleGeneration | null>(null)
   const runs = ref<UpscaleRun[]>([])
   const note = ref<string | null>(null)
 
@@ -57,6 +60,7 @@ export const useUpscaleStore = defineStore('upscale', () => {
     if (seq !== stateSeq) return // a newer refresh, or another item
     record.value = state.record
     candidates.value = state.candidates
+    generation.value = state.generation ?? null
   }
 
   let runsSeq = 0
@@ -70,6 +74,7 @@ export const useUpscaleStore = defineStore('upscale', () => {
     sourcePath.value = media.file_path
     record.value = null
     candidates.value = []
+    generation.value = null
     runs.value = []
     note.value = null
     tracker.reset()
@@ -153,6 +158,7 @@ export const useUpscaleStore = defineStore('upscale', () => {
     config,
     record,
     candidates,
+    generation,
     runs,
     sourceRuns,
     note,

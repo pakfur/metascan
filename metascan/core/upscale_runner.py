@@ -1,7 +1,8 @@
 """Runs of a ComfyUI upscale workflow over one media item.
 
 Mirrors ``I2vRunner``'s run: a server-owned task, a window of unfinished jobs,
-one terminal ``batch_*`` frame. There is no prompt to write, so a run is one
+one terminal ``batch_*`` frame. Nothing is written by a VLM: a prompt, negative,
+LoRAs, model and denoise come from the dialog as they are, so a run is one
 upload and ``count`` submissions.
 
 **The source is always the original.** A file that has been upscaled is read
@@ -84,6 +85,11 @@ class UpscaleRunRequest:
     seed_policy: str = "random"
     prompt: Optional[str] = None
     scale: Optional[float] = None
+    negative: Optional[str] = None
+    # Metascan owns an MS_LORA_STACK node: None and [] both leave it empty.
+    loras: Optional[List[Dict[str, Any]]] = None
+    denoise: Optional[float] = None
+    model: Optional[str] = None
 
 
 @dataclass
@@ -200,6 +206,17 @@ class UpscaleRunner:
             raise UpscaleRequestError("This workflow takes no prompt")
         if req.scale is not None and bindings.scale is None:
             raise UpscaleRequestError("This workflow takes no scale")
+        if req.negative and bindings.negative is None:
+            raise UpscaleRequestError("This workflow takes no negative prompt")
+        if req.loras and bindings.lora_stack is None:
+            raise UpscaleRequestError("This workflow takes no LoRAs")
+        if req.denoise is not None:
+            if bindings.denoise is None:
+                raise UpscaleRequestError("This workflow takes no denoise strength")
+            if not 0.0 <= req.denoise <= 1.0:
+                raise UpscaleRequestError("Denoise must be between 0 and 1")
+        if req.model and bindings.model is None:
+            raise UpscaleRequestError("This workflow takes no model")
         seeds, next_seed = self._plan_seeds(req, bindings.seed is not None)
         if self.purge_stale is not None:
             await asyncio.to_thread(self.purge_stale, req.source_path)
@@ -294,6 +311,10 @@ class UpscaleRunner:
             source_image=None if video else uploaded,
             source_video=uploaded if video else None,
             scale=req.scale,
+            negative=req.negative or None,
+            loras=list(req.loras or []),
+            denoise=req.denoise,
+            model=req.model or None,
         )
         output_dir = self.staging_root() / uuid.uuid4().hex
         # Shielded: submit writes the job row and only then queues it, so a
@@ -477,6 +498,7 @@ class UpscaleRunner:
                 seed=params.get("seed"),
                 prompt=params.get("positive"),
                 scale=params.get("scale"),
+                denoise=params.get("denoise"),
                 width=facts["width"],
                 height=facts["height"],
                 duration_s=facts.get("duration"),

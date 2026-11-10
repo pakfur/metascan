@@ -296,3 +296,72 @@ async def test_a_lost_soundtrack_is_flagged(env, monkeypatch):
 async def test_unknown_audio_is_not_lost(env, monkeypatch):
     monkeypatch.setattr(runner_mod, "_has_audio", lambda path: None)
     assert env.runner._audio_lost("/x/a.mp4", Path("/x/b.mp4")) is False
+
+
+def refine_workflow() -> dict:
+    return {
+        "1": node("LoadImage", "MS_SOURCE_IMAGE", image="baked.png"),
+        "2": node("PrimitiveFloat", "MS_DENOISE", value=0.3),
+        "3": node("UNETLoader", "MS_MODEL", unet_name="moss/sft.safetensors"),
+        "4": node("Power Lora Loader (rgthree)", "MS_LORA_STACK", model=["3", 0]),
+        "5": node("CLIPTextEncode", "MS_POSITIVE", text=""),
+        "6": node("CLIPTextEncode", "MS_NEGATIVE", text="baked negative"),
+        "7": node("UltimateSDUpscale", "MS_SEED", seed=0, denoise=["2", 0]),
+        "8": node("SaveImage", "MS_SAVE", images=["7", 0], filename_prefix="up"),
+    }
+
+
+async def test_a_refine_run_sends_the_dialogs_values(env, fake_comfy):  # noqa: F811
+    pid = await env.comfy.register_preset("refine", "upscale_image", refine_workflow())
+    await env.runner.start_run(
+        env.request(
+            pid,
+            seed_policy="fixed",
+            prompt="a lake",
+            negative="blurry",
+            loras=[{"name": "moss/film.safetensors", "strength": 0.7}],
+            denoise=0.4,
+            model="moss/dirty.safetensors",
+        )
+    )
+    await finished(env)
+    graph = fake_comfy.submitted[-1]["body"]["prompt"]
+    assert graph["2"]["inputs"]["value"] == 0.4
+    assert graph["3"]["inputs"]["unet_name"] == "moss/dirty.safetensors"
+    assert graph["4"]["inputs"]["lora_1"] == {
+        "on": True,
+        "lora": "moss/film.safetensors",
+        "strength": 0.7,
+    }
+    assert graph["5"]["inputs"]["text"] == "a lake"
+    assert graph["6"]["inputs"]["text"] == "blurry"
+    rows = env.db.list_upscale_candidates(env.posix)
+    assert [(r["denoise"], r["seed"], r["prompt"]) for r in rows] == [
+        (0.4, 5, "a lake")
+    ]
+
+
+async def test_none_keeps_the_refine_graphs_own_values(env, fake_comfy):  # noqa: F811
+    pid = await env.comfy.register_preset("refine", "upscale_image", refine_workflow())
+    await env.runner.start_run(env.request(pid, seed_policy="fixed"))
+    await finished(env)
+    graph = fake_comfy.submitted[-1]["body"]["prompt"]
+    assert graph["2"]["inputs"]["value"] == 0.3
+    assert graph["3"]["inputs"]["unet_name"] == "moss/sft.safetensors"
+    assert graph["6"]["inputs"]["text"] == "baked negative"
+    assert env.db.list_upscale_candidates(env.posix)[0]["denoise"] is None
+
+
+async def test_values_a_workflow_cannot_take_are_refused(env):
+    pid = await env.comfy.register_preset("up", "upscale_image", image_workflow())
+    for kw, word in (
+        ({"negative": "blurry"}, "negative"),
+        ({"loras": [{"name": "a.safetensors", "strength": 1.0}]}, "LoRA"),
+        ({"denoise": 0.3}, "denoise"),
+        ({"model": "m.safetensors"}, "model"),
+    ):
+        with pytest.raises(UpscaleRequestError, match=word):
+            await env.runner.start_run(env.request(pid, **kw))
+    refine = await env.comfy.register_preset("r", "upscale_image", refine_workflow())
+    with pytest.raises(UpscaleRequestError, match="between 0 and 1"):
+        await env.runner.start_run(env.request(refine, denoise=1.5))

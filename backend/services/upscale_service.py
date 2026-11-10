@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from metascan.core.phash_utils import compute_phash_for_file
+from metascan.core.upscale_defaults import generation_defaults
 from metascan.core.upscale_store import UpscaleError, UpscaleStore
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -70,7 +71,19 @@ class UpscaleService:
             "candidates": [
                 _candidate_dict(c) for c in self.db.list_upscale_candidates(posix)
             ],
+            "generation": self.generation(posix),
         }
+
+    def generation(self, posix: str) -> Dict[str, Any]:
+        """What the item was generated with (``upscale_defaults``). The
+        media record of an upscaled item carries its original's metadata
+        (``Scanner._process_media_file``), so this is the original's too."""
+        scorecard = self.db.scorecard_for_path(posix)
+        return generation_defaults(
+            self.db.get_media(Path(to_native_path(posix))),
+            self.db.t2i_loras_for_path(posix),
+            blind=bool(scorecard and scorecard["blind"]),
+        )
 
     # ---- swaps ------------------------------------------------------------
     async def accept(self, candidate_id: int) -> str:

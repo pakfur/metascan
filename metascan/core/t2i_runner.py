@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import random
+import re
 import sqlite3
 import time
 import uuid
@@ -108,6 +109,7 @@ from metascan.core.t2i_prompt import (
     compose_guided_t2i_prompts,
     fallback_prompt,
     parse_t2i_output,
+    strip_parentheses,
 )
 from metascan.core.taste_examples import variant_angles
 from metascan.core.t2i_wildcards import LibraryCache
@@ -165,6 +167,28 @@ MAX_VARIANTS = 4
 REQUEST_WRITERS: Tuple[str, ...] = (WRITER_BASE, WRITER_BASE_TASTE)
 
 _VLM_TEMPERATURE = 0.6
+
+# caption_image: a description, not a creative rewrite, so a cooler sampler;
+# eight sentences of plain prose fit well inside the budget.
+CAPTION_USER_PROMPT = "Describe this image."
+CAPTION_TEMPERATURE = 0.3
+CAPTION_MAX_TOKENS = 400
+_CAPTION_BRACES_RE = re.compile(r"[{}]")
+_CAPTION_UNDERSCORES_RE = re.compile(r"__+")
+
+
+def plain_caption(raw: str) -> str:
+    """A VLM's description as plain caption text: no parentheses, braces or
+    ``__`` runs (the caption engine's markup: a ``{NAME}`` keeps its name and
+    a ``__WORD__`` its word), no wrapping quotes, the whitespace of each line
+    collapsed and blank lines dropped."""
+    text = _CAPTION_BRACES_RE.sub("", raw or "")
+    text = strip_parentheses(_CAPTION_UNDERSCORES_RE.sub(" ", text))
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    text = " ".join(line for line in lines if line).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
 
 
 def _no_hold(by: str) -> ContextManager[None]:
@@ -869,6 +893,54 @@ class T2iRunner:
         if check is not None and not await asyncio.to_thread(check, model_id):
             return None, f"{writer_missing_hint(model_id)} - used the resolved caption"
         return model_id, WARN_VLM_UNAVAILABLE
+
+    async def caption_image(self, path: Path) -> Tuple[str, str]:
+        """``(caption, writer_model)``: the prompt-writer VLM looks at the
+        image at ``path`` and describes it (``IMAGE_CAPTION_SYSTEM``), for
+        :meth:`generate_prompt` to rewrite like a typed caption. The Upscale
+        dialog uses it for an image with no prompt, or one written for
+        another model family.
+
+        The caption is made plain text for the caption engine: no
+        parentheses (ComfyUI weights), no ``{NAME}`` braces or ``__TOKEN__``
+        markers, which ``resolve_caption`` would read as characters and
+        wildcards. Raises ``T2iUnavailableError`` (503) when there is no
+        writer to ask, ``T2iRequestError`` (400) for a file the VLM cannot
+        read, and ``VlmError`` (502) when it fails or says nothing. The
+        caption is never logged: it describes the user's image."""
+        vlm = self.get_vlm()
+        if vlm is None:
+            raise T2iUnavailableError("The prompt writer is not running")
+        if not vlm.is_image_path(path):
+            raise T2iRequestError("Only an image can be captioned")
+        if not await asyncio.to_thread(path.is_file):
+            raise T2iRequestError("The image is missing")
+        model_id, unavailable = await self._usable_model(vlm)
+        if model_id is None:
+            # The warning ends with what generate_prompt does instead; here
+            # nothing is done instead.
+            raise T2iUnavailableError(
+                unavailable.split(" - used the resolved caption")[0]
+            )
+        try:
+            with self._vlm_hold("Prompt writer"):
+                await vlm.ensure_started(model_id)
+                raw = await vlm.generate_text(
+                    system_prompt=get_prompt_store().get("IMAGE_CAPTION_SYSTEM"),
+                    user_prompt=CAPTION_USER_PROMPT,
+                    image_path=path,
+                    temperature=CAPTION_TEMPERATURE,
+                    max_tokens=CAPTION_MAX_TOKENS,
+                    timeout=_VLM_TIMEOUT_S,
+                )
+        except TimeoutError:
+            raise
+        except OSError as exc:
+            raise VlmError(f"the VLM could not be used: {exc}") from exc
+        caption = plain_caption(raw)
+        if not caption:
+            raise VlmError("the VLM returned an empty caption")
+        return caption, model_id
 
     async def _adapter_lora(self, writer: str) -> Optional[Path]:
         """The GGUF to apply for ``writer``: None for the base writers; for

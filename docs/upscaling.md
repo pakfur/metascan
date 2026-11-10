@@ -50,20 +50,62 @@ Metascan finds nodes by title, so give these titles to the nodes in ComfyUI:
 | `MS_SAVE` | The save node whose output is the result | Always |
 | `MS_SEED` | The node holding the seed | Optional: without it, every run gives the same result, so Count is fixed at 1 |
 | `MS_POSITIVE` | A text node (`text` input) | Optional: adds a Prompt box |
-| `MS_NEGATIVE` | A text node (`text` input) | Optional |
+| `MS_NEGATIVE` | A text node (`text` input) | Optional: adds a Negative prompt box |
 | `MS_SCALE` | A number node with a `value` input, wired into the scale | Optional: adds a Scale menu, with the choices from **Config → Upscale** |
+| `MS_DENOISE` | The sampler (`denoise` input), or a number node (`value`) wired into it | Optional: adds a Denoise menu |
+| `MS_MODEL` | The model loader (`unet_name` of Load Diffusion Model, or `ckpt_name` of Load Checkpoint) | Optional: adds a Model box |
+| `MS_LORA_STACK` | A Power Lora Loader (rgthree) | Optional: adds a LoRA list |
+
+A node carries one title. When the sampler is already `MS_SEED`, as Ultimate SD Upscale is, give `MS_DENOISE` to a number node wired into its `denoise` input.
+
+### Filled in from the image
+
+For a generated image, the window starts with what the image was made with: its prompt, negative prompt, seed, model and LoRAs. Change any of them, or press **Reset** to put them back. For a T2I image the LoRAs are the exact stack it was made with; for others they come from the file's metadata.
+
+The model and LoRAs are filled in only when the workflow's model is in the same model folder as the image's (`moss\dirtyMoss_bf16.safetensors` and `moss\moss_image_sft_bf16.safetensors` are both `moss`). A Krea LoRA in a Moss workflow fails or draws nonsense, so for an image from another model the window says so and leaves them out; **Use them anyway** puts them in. An empty Model box keeps the workflow's own model, and an empty Negative prompt keeps the workflow's own.
+
+A scorecard image that is not graded yet keeps its prompt hidden here too, as it does everywhere else.
+
+### A prompt from the image
+
+An image with no prompt, or one written for another model, makes a poor start: SDXL and Pony prompts are tag lists, and Moss reads them badly. For a workflow whose model has a T2I prompt style (the Moss workflows), the window offers **Write a MOSS-Image prompt from the image**. It says when the image's own prompt is missing or was written for another model, and highlights the button then.
+
+It works in two steps. The prompt writer (the VLM you use for T2I) looks at the image and describes it in a few plain sentences. That description then goes through the same caption-to-prompt step as a caption typed in the T2I window: the MOSS-Image guideline, its stock negative and your content mode from **Config → T2I**. The prompt and negative boxes are filled in; open **Written from this caption** to read the description it used. Edit the prompt as you like, or press **Reset** to go back to the image's own.
+
+An upscaled item is described from its original. Nothing is saved until you run the upscale, and the description is not logged. It needs a prompt-writer model downloaded in **Config → Models**; without one the window says so.
 
 **Keep the soundtrack.** A video workflow must wire the audio through to its save node, or the upscaled video is silent. Metascan warns when you register a workflow that doesn't, and marks any result that lost its audio. The frame rate is also up to the workflow.
 
 ## Ready-made workflows
 
-`data/workflows/` holds workflows you can register as they are. Two use [SeedVR2](https://github.com/ByteDance-Seed/SeedVR), the strongest open upscaler in ComfyUI at the time of writing: it restores detail rather than sharpening what is there, and it works on video frames in groups, so it doesn't flicker.
+`data/workflows/` holds workflows you can register as they are. Three use [SeedVR2](https://github.com/ByteDance-Seed/SeedVR), the strongest open upscaler in ComfyUI at the time of writing: it restores detail rather than sharpening what is there, and it works on video frames in groups, so it doesn't flicker.
 
 | File | For | Needs |
 |---|---|---|
 | `upscale_image_seedvr2_7b_api.json` | Images, best quality | SeedVR2 pack and 7B model |
 | `upscale_image_fast_api.json` | Images, a result in seconds | `4x_foolhardy_Remacri.safetensors` in `models/upscale_models` |
 | `upscale_video_seedvr2_7b_api.json` | Videos, best quality | SeedVR2 pack and 7B model |
+| `upscale_image_moss_refine_api.json` | Moss images: redraws detail and fixes generation flaws | Moss models, Ultimate SD Upscale pack, Remacri |
+| `upscale_image_moss_refine_seedvr2_api.json` | Moss images at large sizes: the refine, then SeedVR2 | All of the above, and the comfyui-unload-model pack |
+
+### Refining generated images
+
+SeedVR2 restores real-world damage: blur, noise, compression, low resolution. It takes no prompt and stays faithful to what it is given, so on a generated image it keeps a malformed hand or a smeared texture and only makes it bigger.
+
+The two Moss workflows redraw instead. [Ultimate SD Upscale](https://github.com/ssitu/ComfyUI_UltimateSDUpscale) enlarges the image, then Moss redraws it in 1024-pixel tiles at a low denoise, with the image's own prompt, model and LoRAs, so it adds the detail the model would have drawn at that size. **Denoise** sets how much it may change:
+
+| Denoise | Use it to |
+|---|---|
+| 0.2 | Clean up: sharper texture, nothing moves |
+| 0.3 | Add detail (the default) |
+| 0.4 | Redraw small flaws: fingers, eyes, smeared fabric |
+| 0.5 | Redraw more; the composition can start to change |
+
+Run two strengths, or two seeds, and compare the results before accepting one. The refine works best at ×2 or less.
+
+**Refine + SeedVR2** refines at up to ×2, where Moss still draws well, then frees the GPU and runs one SeedVR2 pass to the chosen scale of the original, at most 16 megapixels. Use it for a large final size.
+
+**Setup.** Install `comfyui_ultimatesdupscale` and, for the second workflow, `comfyui-unload-model` with the ComfyUI Manager. The workflows load `moss\moss_image_sft_bf16.safetensors`, `qwen3.5_9b_bf16.safetensors` and `flux2-vae.safetensors`, as the Moss T2I workflows do; the window replaces the model with the image's own. Refining another model family needs its own copy of the workflow with that family's loaders.
 
 **Setup.** Install [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) with the ComfyUI Manager. Its models go in `ComfyUI/models/SEEDVR2/` (`seedvr2_ema_7b_fp16.safetensors`, `ema_vae_fp16.safetensors`) and download on first use if they are missing. They were tested on a 32 GB card. On a smaller card, change the model and lower the size limits.
 

@@ -180,6 +180,8 @@ def get_upscale_config(config: dict) -> dict:
             "window": 2,                     # unfinished jobs of one run
             "scales": [2, 4],                # offered when a workflow has MS_SCALE
             "default_scale": 2,
+            "denoise_levels": [0.2, 0.3, 0.4, 0.5],  # offered with MS_DENOISE
+            "default_denoise": 0.3,
         }
     """
     raw = config.get("upscale", {}) or {}
@@ -202,6 +204,22 @@ def get_upscale_config(config: dict) -> dict:
     default_scale = raw.get("default_scale")
     if not isinstance(default_scale, (int, float)) or default_scale <= 0:
         default_scale = scales[0]
+    levels = raw.get("denoise_levels")
+    if not isinstance(levels, list):
+        levels = [0.2, 0.3, 0.4, 0.5]
+    levels = [
+        float(v)
+        for v in levels
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= 1
+    ]
+    levels = levels or [0.2, 0.3, 0.4, 0.5]
+    default_denoise = raw.get("default_denoise")
+    if (
+        not isinstance(default_denoise, (int, float))
+        or isinstance(default_denoise, bool)
+        or not 0 < default_denoise <= 1
+    ):
+        default_denoise = 0.3 if 0.3 in levels else levels[0]
     original_root = raw.get("original_root")
     original_root = original_root.strip() if isinstance(original_root, str) else ""
     return {
@@ -212,6 +230,8 @@ def get_upscale_config(config: dict) -> dict:
         "window": limit("window", 2),
         "scales": scales,
         "default_scale": float(default_scale),
+        "denoise_levels": levels,
+        "default_denoise": float(default_denoise),
     }
 
 

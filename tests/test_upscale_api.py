@@ -360,3 +360,319 @@ def test_a_range_request_still_works_and_carries_the_etag(stream):
     r = stream.client.get(url(stream.path), headers={"Range": "bytes=2-4"})
     assert r.status_code == 206 and r.content == b"234"
     assert r.headers["etag"] and r.headers["cache-control"] == "no-cache"
+
+
+def _generated(env: Any, path: Path) -> None:
+    """Give the ingested file the metadata a generated image carries."""
+    from metascan.core.media import LoRA
+
+    media = env.db.get_media(path)
+    media.prompt = "a lake at dusk"
+    media.negative_prompt = "blurry"
+    media.seed = 42
+    media.model = ["moss/dirtyMoss_bf16.safetensors"]
+    media.loras = [LoRA(lora_name="moss/film", lora_weight=0.8)]
+    assert env.db.save_media(media)
+
+
+def test_state_carries_what_the_image_was_made_with(env):
+    path = env.media()
+    _generated(env, path)
+    body = env.client.get("/api/upscale/state", params={"path": str(path)}).json()
+    assert body["generation"] == {
+        "prompt": "a lake at dusk",
+        "negative": "blurry",
+        "seed": 42,
+        "model": "moss/dirtyMoss_bf16.safetensors",
+        "loras": [{"name": "moss/film.safetensors", "strength": 0.8}],
+        "blind": False,
+    }
+
+
+def test_a_t2i_images_own_lora_stack_wins(env):
+    path = env.media()
+    _generated(env, path)
+    with env.db._get_connection() as conn:
+        conn.execute(
+            "INSERT INTO t2i_images (file_path, loras) VALUES (?, ?)",
+            (
+                to_posix_path(path),
+                '[{"name": "moss/film.ckpt", "strength": 0.5}, {"bad": 1}]',
+            ),
+        )
+        conn.commit()
+    assert env.db.t2i_loras_for_path(to_posix_path(path)) == [
+        {"name": "moss/film.ckpt", "strength": 0.5}
+    ]
+    body = env.client.get("/api/upscale/state", params={"path": str(path)}).json()
+    assert body["generation"]["loras"] == [{"name": "moss/film.ckpt", "strength": 0.5}]
+    assert env.db.t2i_loras_for_path("not/a/t2i.png") is None
+
+
+def test_a_blind_scorecard_image_keeps_its_prompt_hidden(env, monkeypatch):
+    path = env.media()
+    _generated(env, path)
+    monkeypatch.setattr(
+        env.db,
+        "scorecard_for_path",
+        lambda p: {"scorecard_id": "s", "adapter_id": 1, "blind": True},
+    )
+    gen = env.client.get("/api/upscale/state", params={"path": str(path)}).json()[
+        "generation"
+    ]
+    assert gen["prompt"] is None and gen["negative"] is None and gen["blind"] is True
+
+
+def test_config_says_which_refine_values_a_workflow_takes(config_env):
+    import json as _json
+
+    graph = {
+        "1": {
+            "class_type": "LoadImage",
+            "_meta": {"title": "MS_SOURCE_IMAGE"},
+            "inputs": {"image": "x.png"},
+        },
+        "2": {
+            "class_type": "UNETLoader",
+            "_meta": {"title": "MS_MODEL"},
+            "inputs": {"unet_name": "moss/sft.safetensors"},
+        },
+        "3": {"class_type": "SaveImage", "_meta": {"title": "MS_SAVE"}, "inputs": {}},
+    }
+    bindings = _json.dumps(
+        {
+            "negative": "4",
+            "lora_stack": "5",
+            "denoise": "6",
+            "denoise_widget": "value",
+            "model": "2",
+            "model_widget": "unet_name",
+            "save": "3",
+        }
+    )
+    with config_env.db._get_connection() as conn:
+        conn.execute(
+            "INSERT INTO workflow_presets (name, kind, workflow_json, bindings) "
+            "VALUES ('refine', 'upscale_image', ?, ?)",
+            (_json.dumps(graph), bindings),
+        )
+        conn.commit()
+    preset(config_env.db, "plain", "upscale_image", '{"seed": "3"}')
+    body = config_env.client.get("/api/upscale/config").json()
+    refine, plain = body["image_workflows"]
+    assert (
+        refine["has_negative"],
+        refine["has_loras"],
+        refine["has_denoise"],
+        refine["has_model"],
+        refine["model"],
+    ) == (True, True, True, True, "moss/sft.safetensors")
+    assert (plain["has_denoise"], plain["has_model"], plain["model"]) == (
+        False,
+        False,
+        None,
+    )
+    assert body["denoise_levels"] == [0.2, 0.3, 0.4, 0.5]
+    assert body["default_denoise"] == 0.3
+
+
+def test_a_run_passes_the_refine_values_on(tmp_path, monkeypatch):
+    from backend.api import upscale
+
+    seen: List[Any] = []
+
+    class Runner:
+        async def start_run(self, req: Any, window: int = 2) -> Any:
+            seen.append(req)
+            return SimpleNamespace(batch_id="b", total=1, next_seed=None)
+
+        def active_batches(self) -> List[Any]:
+            return []
+
+    monkeypatch.setattr(upscale, "load_app_config", lambda: {})
+    monkeypatch.setattr(upscale.upscale_folders, "staging_conflict", lambda c: None)
+    monkeypatch.setattr(upscale, "get_generation_process", lambda name: None)
+    upscale.install(Runner(), None, None)
+    app = FastAPI()
+    app.include_router(upscale.router)
+    client = TestClient(app)
+    try:
+        body = {
+            "source_path": str(tmp_path / "a.png"),
+            "preset_id": 1,
+            "negative": "blurry",
+            "loras": [{"name": "moss/film.safetensors", "strength": 0.7}],
+            "denoise": 0.35,
+            "model": "moss/dirty.safetensors",
+        }
+        assert client.post("/api/upscale/runs", json=body).status_code == 200
+        req = seen[-1]
+        assert (req.negative, req.denoise, req.model) == (
+            "blurry",
+            0.35,
+            "moss/dirty.safetensors",
+        )
+        assert req.loras == [{"name": "moss/film.safetensors", "strength": 0.7}]
+        # No loras key is no list (the stack node is then left empty).
+        del body["loras"]
+        client.post("/api/upscale/runs", json=body)
+        assert seen[-1].loras is None
+        for bad in ({"denoise": 1.5}, {"loras": [{"name": "", "strength": 1}]}):
+            r = client.post("/api/upscale/runs", json={**body, **bad})
+            assert r.status_code == 422
+    finally:
+        upscale.install(None, None, None)
+
+
+class _CaptionRunner:
+    """Stands in for T2iRunner: records what the route asked for."""
+
+    def __init__(self, error: Any = None) -> None:
+        self.captioned: List[Path] = []
+        self.asked: List[Dict[str, Any]] = []
+        self.error = error
+
+    async def caption_image(self, path: Path) -> Any:
+        if self.error is not None:
+            raise self.error
+        self.captioned.append(path)
+        return "A lake at dusk.", "qwen3vl-8b"
+
+    async def generate_prompt(self, **kw: Any) -> Any:
+        self.asked.append(kw)
+        draft = SimpleNamespace(writer_id="base", writer_model="qwen3vl-8b")
+        return SimpleNamespace(
+            prompt="A photograph of a lake at dusk.",
+            negative="worst quality",
+            warnings=["a note"],
+            drafts=[draft],
+        )
+
+
+@pytest.fixture
+def caption_env(env, monkeypatch):
+    from backend.api import t2i as t2i_api
+
+    runner = _CaptionRunner()
+    monkeypatch.setattr(t2i_api, "get_t2i_runner", lambda: runner)
+    monkeypatch.setattr(upscale_api, "get_db", lambda: env.db)
+    env.caption_runner = runner
+    return env
+
+
+def test_a_prompt_is_written_from_the_images_caption(caption_env):
+    path = caption_env.media()
+    r = caption_env.client.post(
+        "/api/upscale/prompt-from-image",
+        json={"source_path": str(path), "model": "moss"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {
+        "caption": "A lake at dusk.",
+        "caption_model": "qwen3vl-8b",
+        "prompt": "A photograph of a lake at dusk.",
+        "negative": "worst quality",
+        "warnings": ["a note"],
+        "writer_id": "base",
+        "writer_model": "qwen3vl-8b",
+    }
+    runner = caption_env.caption_runner
+    assert runner.captioned == [Path(to_native_path(to_posix_path(path)))]
+    assert runner.asked == [
+        {
+            "caption": "A lake at dusk.",
+            "seed": 0,
+            "model": "moss",
+            "directions": False,
+            "variants": 1,
+            "writer": "base",
+        }
+    ]
+
+
+def test_an_upscaled_item_is_captioned_from_its_original(caption_env, monkeypatch):
+    path = caption_env.media()
+    original = caption_env.tmp / "originals" / "kept.png"
+    monkeypatch.setattr(
+        caption_env.db,
+        "upscale_record",
+        lambda p: {"original_path": to_posix_path(original)},
+    )
+    caption_env.client.post(
+        "/api/upscale/prompt-from-image",
+        json={"source_path": str(path), "model": "moss"},
+    )
+    assert caption_env.caption_runner.captioned == [
+        Path(to_native_path(to_posix_path(original)))
+    ]
+
+
+def test_an_unknown_model_or_no_runner_is_refused(caption_env, monkeypatch):
+    from backend.api import t2i as t2i_api
+
+    path = str(caption_env.media())
+    r = caption_env.client.post(
+        "/api/upscale/prompt-from-image", json={"source_path": path, "model": "nope"}
+    )
+    assert r.status_code == 400
+    monkeypatch.setattr(t2i_api, "get_t2i_runner", lambda: None)
+    r = caption_env.client.post(
+        "/api/upscale/prompt-from-image", json={"source_path": path, "model": "moss"}
+    )
+    assert r.status_code == 503
+
+
+def test_runner_errors_keep_their_meaning(caption_env, monkeypatch):
+    from backend.api import t2i as t2i_api
+    from metascan.core.t2i_runner import T2iRequestError, T2iUnavailableError
+    from metascan.core.vlm_client import VlmError
+
+    path = str(caption_env.media())
+    for error, status in (
+        (T2iUnavailableError("no writer"), 503),
+        (T2iRequestError("not an image"), 400),
+        (VlmError("it failed"), 502),
+    ):
+        monkeypatch.setattr(t2i_api, "get_t2i_runner", lambda: _CaptionRunner(error))
+        r = caption_env.client.post(
+            "/api/upscale/prompt-from-image",
+            json={"source_path": path, "model": "moss"},
+        )
+        assert r.status_code == status, (error, r.status_code)
+
+
+def test_config_names_the_prompt_style_of_each_workflow(config_env):
+    import json as _json
+
+    def add(name: str, unet: str, positive: bool) -> None:
+        graph = {
+            "2": {
+                "class_type": "UNETLoader",
+                "_meta": {"title": "MS_MODEL"},
+                "inputs": {"unet_name": unet},
+            }
+        }
+        bindings = {"model": "2", "model_widget": "unet_name", "save": "3"}
+        if positive:
+            bindings["positive"] = "4"
+        with config_env.db._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO workflow_presets (name, kind, workflow_json, bindings) "
+                "VALUES (?, 'upscale_image', ?, ?)",
+                (name, _json.dumps(graph), _json.dumps(bindings)),
+            )
+            conn.commit()
+
+    add("moss", "moss/sft.safetensors", True)
+    add("moss-no-prompt", "moss/sft.safetensors", False)
+    add("other", "flux/f.safetensors", True)
+    rows = {
+        w["name"]: w
+        for w in config_env.client.get("/api/upscale/config").json()["image_workflows"]
+    }
+    assert (rows["moss"]["prompt_model"], rows["moss"]["prompt_model_label"]) == (
+        "moss",
+        "MOSS-Image",
+    )
+    assert rows["moss-no-prompt"]["prompt_model"] is None
+    assert rows["other"]["prompt_model"] is None

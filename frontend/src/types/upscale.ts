@@ -7,6 +7,44 @@ export interface UpscaleWorkflow {
   has_seed: boolean
   has_prompt: boolean
   has_scale: boolean
+  has_negative: boolean
+  has_loras: boolean
+  has_denoise: boolean
+  has_model: boolean
+  // The model the graph loads (MS_MODEL), null when it has none.
+  model: string | null
+  // The T2I model profile a prompt for this graph is written in ('moss'),
+  // and its label; null when the dialog cannot write one from the image.
+  prompt_model: string | null
+  prompt_model_label: string | null
+}
+
+// POST /upscale/prompt-from-image: the image captioned, then rewritten in
+// the workflow's prompt style.
+export interface PromptFromImage {
+  caption: string
+  caption_model: string
+  prompt: string
+  negative: string | null
+  warnings: string[]
+  writer_id: string | null
+  writer_model: string | null
+}
+
+export interface UpscaleLora {
+  name: string
+  strength: number
+}
+
+// What the item was generated with (GET /upscale/state), the dialog's
+// pre-fill. A blind scorecard image (no grade yet) gives no prompt.
+export interface UpscaleGeneration {
+  prompt: string | null
+  negative: string | null
+  seed: number | null
+  model: string | null
+  loras: UpscaleLora[]
+  blind: boolean
 }
 
 export interface UpscaleConfig {
@@ -18,6 +56,8 @@ export interface UpscaleConfig {
   window: number
   scales: number[]
   default_scale: number
+  denoise_levels: number[]
+  default_denoise: number
   image_workflows: UpscaleWorkflow[]
   video_workflows: UpscaleWorkflow[]
 }
@@ -39,6 +79,7 @@ export interface UpscaleCandidate {
   seed: number | null
   prompt: string | null
   scale: number | null
+  denoise: number | null
   width: number | null
   height: number | null
   duration_s: number | null
@@ -52,6 +93,7 @@ export interface UpscaleCandidate {
 export interface UpscaleState {
   record: UpscaleRecord | null
   candidates: UpscaleCandidate[]
+  generation?: UpscaleGeneration | null
 }
 
 export interface UpscaleRun {
@@ -72,11 +114,43 @@ export interface UpscaleRunBody {
   seed_policy: 'fixed' | 'increment' | 'decrement' | 'random'
   prompt: string | null
   scale: number | null
+  negative: string | null
+  // An MS_LORA_STACK node gets exactly this list; null leaves it empty.
+  loras: UpscaleLora[] | null
+  denoise: number | null
+  model: string | null
 }
 
 export function candidateLabel(c: UpscaleCandidate): string {
   const size = c.width && c.height ? `${c.width}×${c.height}` : ''
-  return [size, c.scale ? `×${c.scale}` : ''].filter(Boolean).join(' · ')
+  return [
+    size,
+    c.scale ? `×${c.scale}` : '',
+    c.denoise != null ? `d ${c.denoise}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function family(name: string | null): string | null {
+  if (!name) return null
+  const parts = name.replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts.length > 1 ? parts[0].toLowerCase() : null
+}
+
+// True when a refine graph that loads `workflowModel` can take an image made
+// with `imageModel`: the same file, or one from the same model folder (same
+// text encoder, VAE and LoRAs). Mirrors upscale_defaults.same_family.
+export function sameModelFamily(
+  imageModel: string | null,
+  workflowModel: string | null,
+): boolean {
+  if (!imageModel || !workflowModel) return false
+  const a = imageModel.replace(/\\/g, '/').toLowerCase()
+  const b = workflowModel.replace(/\\/g, '/').toLowerCase()
+  if (a === b) return true
+  const fa = family(imageModel)
+  return fa !== null && fa === family(workflowModel)
 }
 
 export function workflowsFor(config: UpscaleConfig, media: Media): UpscaleWorkflow[] {

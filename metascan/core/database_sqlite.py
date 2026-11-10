@@ -2488,6 +2488,16 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_upscale_candidates_source "
                 "ON upscale_candidates(source_path)"
             )
+            candidate_columns = {
+                r[1] for r in conn.execute("PRAGMA table_info(upscale_candidates)")
+            }
+            if "denoise" not in candidate_columns:
+                _idempotent_add_column(
+                    conn,
+                    "upscale_candidates",
+                    "denoise",
+                    "ALTER TABLE upscale_candidates ADD COLUMN denoise REAL",
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS upscale_journal (
@@ -3754,6 +3764,37 @@ class DatabaseManager:
                 (source_path,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def t2i_loras_for_path(self, file_path: str) -> Optional[List[Dict[str, Any]]]:
+        """The LoRA stack a T2I image was generated with, exactly as it was
+        sent (``[{name, strength}]``, file names with their extension), or
+        None when the path is no T2I image. Metadata parsing drops the
+        extension, so the upscale dialog prefers this."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT loras FROM t2i_images WHERE file_path = ? LIMIT 1",
+                (file_path,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            raw = json.loads(row["loras"] or "[]")
+        except (TypeError, ValueError):
+            return []
+        out: List[Dict[str, Any]] = []
+        for entry in raw if isinstance(raw, list) else []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            strength = entry.get("strength")
+            out.append(
+                {
+                    "name": entry["name"],
+                    "strength": (
+                        float(strength) if isinstance(strength, (int, float)) else 1.0
+                    ),
+                }
+            )
+        return out
 
     def list_all_upscale_candidate_files(self) -> List[str]:
         with self._get_connection() as conn:

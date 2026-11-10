@@ -1,5 +1,6 @@
 import { del, get, post } from './client'
 import type {
+  PromptFromImage,
   UpscaleConfig,
   UpscaleRun,
   UpscaleRunBody,
@@ -18,6 +19,13 @@ export function startUpscaleRun(
   body: UpscaleRunBody,
 ): Promise<{ batch_id: string; total: number; next_seed: number | null }> {
   return post('/upscale/runs', body)
+}
+
+export function promptFromImage(
+  sourcePath: string,
+  model: string,
+): Promise<PromptFromImage> {
+  return post('/upscale/prompt-from-image', { source_path: sourcePath, model })
 }
 
 export function listUpscaleRuns(): Promise<UpscaleRun[]> {

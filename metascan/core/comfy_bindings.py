@@ -40,6 +40,11 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
     "MS_STEPS": ("steps",),
     "MS_SOURCE_IMAGE": ("image",),
     "MS_SCALE": ("value",),
+    # MS_DENOISE is special-cased: a sampler's "denoise" (KSampler, Ultimate SD
+    # Upscale) or a primitive's "value" feeding one. A node has one title, so
+    # a sampler already titled MS_SEED takes its denoise from a primitive.
+    # MS_MODEL is special-cased like MS_SEED: the loader's "unet_name"
+    # (UNETLoader) or "ckpt_name" (CheckpointLoaderSimple).
     # MS_SEED is special-cased: either "seed" or "noise_seed".
     # MS_SOURCE_VIDEO likewise: "video" (VHS_LoadVideo) or "file" (LoadVideo).
     # MS_SAVE is an output node; metascan only needs its id.
@@ -94,6 +99,10 @@ class Bindings:
     source_video: Optional[str] = None
     source_video_widget: Optional[str] = None
     scale: Optional[str] = None
+    denoise: Optional[str] = None
+    denoise_widget: Optional[str] = None
+    model: Optional[str] = None
+    model_widget: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -167,6 +176,40 @@ def _source_video_widget(workflow: Dict[str, Any], node_id: str) -> str:
     )
 
 
+MODEL_WIDGETS: Tuple[str, ...] = ("unet_name", "ckpt_name")
+DENOISE_WIDGETS: Tuple[str, ...] = ("denoise", "value")
+
+
+def _denoise_widget(workflow: Dict[str, Any], node_id: str) -> str:
+    inputs = _inputs(workflow, node_id)
+    for candidate in DENOISE_WIDGETS:
+        if candidate in inputs and not isinstance(inputs[candidate], list):
+            return candidate
+    raise BindingError(
+        f"Node {node_id} titled MS_DENOISE exposes neither a 'denoise' nor a "
+        "'value' widget (a linked input is not a widget)."
+    )
+
+
+def _model_widget(workflow: Dict[str, Any], node_id: str) -> str:
+    inputs = _inputs(workflow, node_id)
+    for candidate in MODEL_WIDGETS:
+        if candidate in inputs:
+            return candidate
+    raise BindingError(
+        f"Node {node_id} titled MS_MODEL exposes neither a 'unet_name' nor a "
+        "'ckpt_name' widget."
+    )
+
+
+def baked_model(workflow: Dict[str, Any], bindings: "Bindings") -> Optional[str]:
+    """The model name the MS_MODEL node holds, or None."""
+    if bindings.model is None or bindings.model_widget is None:
+        return None
+    value = _inputs(workflow, bindings.model).get(bindings.model_widget)
+    return value if isinstance(value, str) else None
+
+
 def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
     """Resolve MS_* titles in ``workflow`` into a Bindings record.
 
@@ -194,6 +237,8 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
 
     seed = found.get("MS_SEED")
     source_video = found.get("MS_SOURCE_VIDEO")
+    model = found.get("MS_MODEL")
+    denoise = found.get("MS_DENOISE")
     return Bindings(
         positive=found.get("MS_POSITIVE"),
         seed=seed,
@@ -219,6 +264,10 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
             _source_video_widget(workflow, source_video) if source_video else None
         ),
         scale=found.get("MS_SCALE"),
+        denoise=denoise,
+        denoise_widget=_denoise_widget(workflow, denoise) if denoise else None,
+        model=model,
+        model_widget=_model_widget(workflow, model) if model else None,
     )
 
 
@@ -252,6 +301,8 @@ class GenerationParams:
     source_image: Optional[str] = None
     source_video: Optional[str] = None
     scale: Optional[float] = None
+    denoise: Optional[float] = None
+    model: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True)
@@ -444,6 +495,23 @@ def apply_overrides(
             )
         write(bindings.scale, "value", float(params.scale))
 
+    if params.denoise is not None:
+        if bindings.denoise is None or bindings.denoise_widget is None:
+            raise BindingError(
+                "A denoise strength was supplied but this workflow has no "
+                "MS_DENOISE node."
+            )
+        if not 0.0 <= float(params.denoise) <= 1.0:
+            raise BindingError(f"Denoise {params.denoise} is outside 0..1")
+        write(bindings.denoise, bindings.denoise_widget, float(params.denoise))
+
+    if params.model is not None:
+        if bindings.model is None or bindings.model_widget is None:
+            raise BindingError(
+                "A model was supplied but this workflow has no MS_MODEL node."
+            )
+        write(bindings.model, bindings.model_widget, params.model)
+
     return graph
 
 
@@ -452,6 +520,9 @@ __all__ = [
     "Bindings",
     "GenerationParams",
     "KINDS",
+    "DENOISE_WIDGETS",
+    "MODEL_WIDGETS",
     "apply_overrides",
+    "baked_model",
     "resolve_bindings",
 ]

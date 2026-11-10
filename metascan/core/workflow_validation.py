@@ -29,7 +29,12 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from metascan.core.comfy_bindings import _REQUIRED_TITLES, _REQUIRED_WIDGETS
+from metascan.core.comfy_bindings import (
+    _REQUIRED_TITLES,
+    _REQUIRED_WIDGETS,
+    DENOISE_WIDGETS,
+    MODEL_WIDGETS,
+)
 
 # Canonical axes for the association stored on workflow_presets
 # (video_target / video_mode, both nullable). Extend these tuples as new
@@ -43,7 +48,14 @@ VIDEO_MODES: Tuple[str, ...] = ("t2va", "i2va", "fl2va", "ref2va")
 KNOWN_TITLES: Tuple[str, ...] = tuple(
     sorted(
         set(_REQUIRED_WIDGETS)
-        | {"MS_SEED", "MS_SAVE", "MS_LORA_STACK", "MS_SOURCE_VIDEO"}
+        | {
+            "MS_SEED",
+            "MS_SAVE",
+            "MS_LORA_STACK",
+            "MS_SOURCE_VIDEO",
+            "MS_MODEL",
+            "MS_DENOISE",
+        }
     )
 )
 
@@ -212,6 +224,34 @@ def _generic_findings(
                     f"Node {found['MS_SEED']} titled MS_SEED exposes neither a "
                     "'seed' nor a 'noise_seed' widget.",
                     node_id=found["MS_SEED"],
+                )
+            )
+
+    if "MS_MODEL" in found:
+        inputs = _inputs(workflow, found["MS_MODEL"])
+        if not any(w in inputs for w in MODEL_WIDGETS):
+            findings.append(
+                Finding(
+                    "error",
+                    "missing_widget",
+                    f"Node {found['MS_MODEL']} titled MS_MODEL exposes neither a "
+                    "'unet_name' nor a 'ckpt_name' widget.",
+                    node_id=found["MS_MODEL"],
+                )
+            )
+
+    if "MS_DENOISE" in found:
+        inputs = _inputs(workflow, found["MS_DENOISE"])
+        if not any(
+            w in inputs and not isinstance(inputs[w], list) for w in DENOISE_WIDGETS
+        ):
+            findings.append(
+                Finding(
+                    "error",
+                    "missing_widget",
+                    f"Node {found['MS_DENOISE']} titled MS_DENOISE exposes neither "
+                    "a 'denoise' nor a 'value' widget.",
+                    node_id=found["MS_DENOISE"],
                 )
             )
 
