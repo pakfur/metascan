@@ -9,10 +9,12 @@ const props = withDefaults(
     seed: number
     policy: SeedPolicy
     disabled?: boolean
+    /** The number stays selectable for copying; nothing can change it. */
+    readonly?: boolean
     max?: number
     label?: string
   }>(),
-  { disabled: false, max: SEED_MAX, label: 'Seed' },
+  { disabled: false, readonly: false, max: SEED_MAX, label: 'Seed' },
 )
 
 const emit = defineEmits<{
@@ -65,6 +67,7 @@ function onPolicyChange(e: Event) {
         :max="max"
         :value="seed"
         :disabled="disabled"
+        :readonly="readonly"
         @input="onInput"
         @change="onChange"
       />
@@ -72,13 +75,13 @@ function onPolicyChange(e: Event) {
         type="button"
         class="sc-dice"
         title="Random seed"
-        :disabled="disabled"
+        :disabled="disabled || readonly"
         @click="emit('update:seed', randomSeed(max))"
       >🎲</button>
       <select
         class="sc-policy"
         title="What happens to the seed after each generated image"
-        :disabled="disabled"
+        :disabled="disabled || readonly"
         @change="onPolicyChange"
       >
         <option

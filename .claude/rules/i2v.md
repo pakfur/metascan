@@ -372,9 +372,15 @@ the root CLAUDE.md still applies.
   on Windows and the left list showed no placeholder. A job tile is
   selectable like T2I's (`GET /api/i2v/jobs/{id}` →
   `I2vRunner.pending_job_info`; caption and form are in-memory `_job_meta`,
-  null after a restart): the read-only details replace the form
-  (`PendingJobDetails`, the form hidden with `v-show`, never written); a clip
-  click or the tile leaving ends it.
+  null after a restart): its values load into the dialog's own form, read-only
+  (text boxes `readonly` so they stay selectable, selects and buttons
+  disabled, Generate / Generate Prompt / Apply fixes off; `readonly` props on
+  `I2vPromptEditor`, `SeedControls` and `LoraListEditor`). There is no second
+  form (T2I does the same). Selecting puts the form aside
+  first (`stash`: its values, the clip it was editing, the held music, the
+  writer's draft) and lets the clip go, so nothing autosaves while a job is
+  shown; `leaveJobView` puts it all back on **Back to the form**, a clip click,
+  the ✕ (before the unsaved-changes check) or the tile leaving.
 - **The dialog's names follow T2I's:** Caption (the `idea` field, which keeps
   its name in `form_state` and the API), Prompt, Generate Prompt, and the run
   counts Prompts × Videos (`batch_size` / `count_per_batch` on the wire). The

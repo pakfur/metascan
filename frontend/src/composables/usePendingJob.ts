@@ -3,10 +3,9 @@ import type { JobChip } from '../types/jobs'
 
 /**
  * The placeholder tile the user selected and what its job was submitted with
- * (GET /api/{t2i,i2v}/jobs/{id}), for the dialog's read-only view. Selecting
- * never touches the form: the dialog shows the details in its place and the
- * form comes back as it was. The selection ends by itself when the tile goes
- * (the job finished, was cancelled or was dismissed).
+ * (GET /api/{t2i,i2v}/jobs/{id}), which the dialog shows read-only in its own
+ * form. The selection ends by itself when the tile goes (the job finished,
+ * was cancelled or was dismissed); the dialog then shows its form as it was.
  */
 export function usePendingJob<T>(
   jobs: () => Map<number, JobChip>,

@@ -58,14 +58,6 @@ export interface ThumbItem {
   blind?: boolean
 }
 
-/** One read-only field of a selected placeholder tile (PendingJobDetails). */
-export interface PendingJobRow {
-  label: string
-  // null / '' shows as "—" (unknown, e.g. the server restarted since).
-  value: string | null
-  multiline?: boolean
-}
-
 /** "queued", "running 42%", "failed": a job tile's state for a heading. */
 export function jobStateText(chip: JobChip | undefined): string {
   if (!chip) return 'finished'

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Media } from '../../types/media'
 import {
   cadenceChips,
@@ -47,10 +47,9 @@ import MediaViewer from '../viewer/MediaViewer.vue'
 import I2vClipList from '../generation/I2vClipList.vue'
 import I2vPromptEditor from '../generation/I2vPromptEditor.vue'
 import JobTile from '../generation/JobTile.vue'
-import PendingJobDetails from '../generation/PendingJobDetails.vue'
 import TextEditPopup from '../storyboard/TextEditPopup.vue'
 import { usePendingJob } from '../../composables/usePendingJob'
-import { jobStateText, type PendingJobRow } from '../../types/jobs'
+import { jobStateText } from '../../types/jobs'
 import { musicOf, NO_MUSIC, withMusic, withoutMusic } from '../../utils/i2vPromptSections'
 import SeedControls from '../generation/SeedControls.vue'
 import CategorySelect from '../generation/CategorySelect.vue'
@@ -225,6 +224,7 @@ function mayLeave(kind: LeaveKind): boolean {
 }
 
 function close() {
+  leaveJobView() // the form as the user left it is what may hold changes
   if (ready.value && !mayLeave('close')) return
   flushFormState() // before store.close() empties the clip list
   store.close()
@@ -637,7 +637,7 @@ let switching = false
 // A click on a clip in either list. The tile waits out the double-click
 // window (useDelayedClick), so a double-click never reaches here.
 async function onSelectClip(v: I2vVideo) {
-  pending.clear() // a clip click goes back to the form
+  leaveJobView() // a clip click goes back to the form first
   if (v.id === selectedId.value) return
   if (!ready.value) {
     toast.show('Still loading', 'info', 3000)
@@ -723,49 +723,131 @@ const runStatus = computed(() =>
   ),
 )
 
-// ---- a placeholder tile, read-only ---------------------------------------------
-// A click on a job tile shows what that video was submitted with in place of
-// the form; the form is left as it was and comes back with "Back to the form".
+// ---- a placeholder tile, shown in the form -----------------------------------
+// A click on a job tile puts what that video was submitted with into the form
+// itself, read-only. What the form held (and the clip it was editing) is put
+// aside first and comes back with "Back to the form", a clip click, the ✕, or
+// the tile leaving. Nothing is saved while a job is shown: the clip being
+// edited is let go (selectedId null) so the autosave has no target.
 const pending = usePendingJob(() => store.jobs, getI2vPendingJob)
+const viewingJob = computed(() => pending.selectedJobId.value !== null)
 
-function fmt(n: number | null | undefined, unit = ''): string | null {
-  return n === null || n === undefined ? null : `${n}${unit}`
+interface FormStash {
+  form: I2vFormState
+  clipId: number | null
+  saved: string
+  heldMusic: string | null
+  templateNote: string
+  warnings: string[]
+  draft: typeof store.draft
+}
+let stash: FormStash | null = null
+
+function setForm(f: I2vFormState) {
+  idea.value = f.idea ?? ''
+  prompt.value = f.prompt ?? ''
+  if (f.duration_s != null) durationS.value = f.duration_s
+  if (f.quality != null) quality.value = f.quality
+  if (f.megapixels != null) megapixels.value = f.megapixels
+  if (f.steps != null) steps.value = f.steps
+  if (f.seed != null) seed.value = f.seed
+  loras.value = (f.loras ?? []).map((l) => ({ name: l.name, strength: l.strength }))
+  templateId.value = f.template_id ?? ''
 }
 
-const pendingRows = computed<PendingJobRow[]>(() => {
-  const j: I2vPendingJob | null = pending.info.value
-  if (!j) return []
-  const cadence = j.template_id
-    ? (store.templates.find((t) => t.id === j.template_id)?.name ?? j.template_id)
-    : 'Single take'
-  return [
-    { label: 'Caption', value: j.caption, multiline: true },
-    { label: 'Prompt', value: j.prompt, multiline: true },
-    { label: 'Cadence', value: j.caption === null && j.template_id === null ? null : cadence },
-    { label: 'Duration', value: fmt(j.duration_s, ' s') },
-    {
-      label: 'Quality',
-      value: j.quality === 'quality' ? 'High quality' : j.quality === 'fast' ? 'Fast (turbo)' : null,
-    },
-    { label: 'Steps', value: fmt(j.steps) },
-    {
-      label: 'Size',
-      value: j.width && j.height
-        ? `${j.megapixels != null ? `${j.megapixels} MP · ` : ''}${j.width}×${j.height}`
-        : fmt(j.megapixels, ' MP'),
-    },
-    { label: 'Seed', value: fmt(j.seed) },
-    {
-      label: 'LoRAs',
-      value: j.loras.length ? j.loras.map((l) => `${l.name} × ${l.strength}`).join('\n') : 'none',
-      multiline: j.loras.length > 1,
-    },
-    { label: 'Writer', value: j.writer_id ? `${j.writer_id}${j.writer_model ? ` (${j.writer_model})` : ''}` : null },
-    { label: 'Queued at', value: j.created_at ? formatI2vTimestamp(j.created_at) : null },
-  ]
-})
+function onSelectJob(jobId: number) {
+  if (pending.selectedJobId.value === jobId) {
+    leaveJobView()
+    return
+  }
+  if (!ready.value) {
+    toast.show('Still loading', 'info', 3000)
+    return
+  }
+  if (!stash) {
+    flushFormState() // edits belong to the clip being left
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    stash = {
+      form: currentForm(),
+      clipId: selectedId.value,
+      saved: savedSnapshot,
+      heldMusic: heldMusic.value,
+      templateNote: missingTemplateNote.value,
+      warnings: warnings.value,
+      draft: store.draft,
+    }
+    selectedId.value = null
+  }
+  pending.toggle(jobId)
+}
 
-const pendingStatus = computed(() => `Queued video · ${jobStateText(pending.chip.value)}`)
+// The job's values, once they arrive. A field the job does not know (its
+// in-memory details were lost to a restart) is shown empty.
+watch(
+  () => pending.info.value,
+  (j: I2vPendingJob | null) => {
+    if (!j || !stash) return
+    setForm({
+      idea: j.caption ?? '',
+      prompt: j.prompt ?? '',
+      duration_s: j.duration_s,
+      quality: j.quality,
+      megapixels: j.megapixels,
+      steps: j.steps,
+      seed: j.seed,
+      loras: j.loras,
+      template_id: j.template_id,
+    })
+    const tid = j.template_id ?? ''
+    missingTemplateNote.value =
+      tid && !store.templates.some((t) => t.id === tid)
+        ? `This video uses cadence "${tid}", which is no longer in the library.`
+        : ''
+    if (missingTemplateNote.value) templateId.value = ''
+    warnings.value = []
+    promptEditor.value?.resetView()
+  },
+)
+
+/** Put the form back as it was before a job tile was selected. */
+function leaveJobView() {
+  const s = stash
+  stash = null
+  pending.clear()
+  if (!s) return
+  setForm(s.form)
+  heldMusic.value = s.heldMusic
+  missingTemplateNote.value = s.templateNote
+  warnings.value = s.warnings
+  const clipLives =
+    s.clipId !== null &&
+    (store.videos.some((v) => v.id === s.clipId) || store.allVideos.some((v) => v.id === s.clipId))
+  selectedId.value = clipLives ? s.clipId : null
+  savedSnapshot = s.saved
+  promptEditor.value?.resetView()
+  // The caption / cadence watcher clears the draft after this tick; the
+  // restored box is still the writer's draft, so it goes back after that.
+  void nextTick(() => store.setDraft(s.draft))
+}
+
+// The tile left (the job finished, was cancelled or dismissed).
+watch(
+  () => pending.selectedJobId.value,
+  (id) => {
+    if (id === null && stash) leaveJobView()
+  },
+)
+
+const jobViewText = computed(() => {
+  if (pending.error.value) return pending.error.value
+  if (pending.loading.value) return 'Loading the queued video…'
+  const j: I2vPendingJob | null = pending.info.value
+  const state = jobStateText(pending.chip.value)
+  const at = j?.created_at ? ` · queued ${formatI2vTimestamp(j.created_at)}` : ''
+  const lost = j && j.caption === null ? ' · caption not kept (server restarted)' : ''
+  return `Queued video · ${state}${at}${lost} · read-only`
+})
 
 const SOURCE_DELETED_NOTE =
   "This clip's source image was deleted, so it can't be generated again."
@@ -996,7 +1078,7 @@ const viewerMedia = computed<Media[]>(() => {
                 :key="'job-' + jobId"
                 :chip="chip"
                 :selected="pending.selectedJobId.value === jobId"
-                @select="pending.toggle(jobId)"
+                @select="onSelectJob(jobId)"
                 @cancel="onCancelJob(jobId)"
                 @dismiss="store.dismissJob(jobId)"
               />
@@ -1008,21 +1090,21 @@ const viewerMedia = computed<Media[]>(() => {
              gutter. The editing bar sticks to its top and the run row to its
              bottom. -->
         <div class="i2v-main">
-          <!-- A selected placeholder tile: what its video was submitted with,
-               read-only, in place of the form (which keeps its values). -->
-          <PendingJobDetails
-            v-if="pending.selectedJobId.value !== null"
-            :status="pendingStatus"
-            :rows="pendingRows"
-            :loading="pending.loading.value"
-            :error="pending.error.value"
-            @close="pending.clear()"
-          />
-          <!-- Hidden, not unmounted: the boxes keep their state (undo, scroll). -->
-          <div v-show="pending.selectedJobId.value === null" class="form-wrap">
+          <!-- A selected placeholder tile: the form shows what its video was
+               submitted with, read-only. -->
+          <div v-if="viewingJob" class="i2v-top">
+            <div class="editing-bar viewing" :class="{ failed: pending.error.value }" role="status">
+              <span>{{ jobViewText }}</span>
+              <button
+                class="link-btn"
+                title="Put back what the form held before this job was selected"
+                @click="leaveJobView"
+              >Back to the form</button>
+            </div>
+          </div>
           <!-- Shown only while a clip is selected: says where edits are going.
                With no clip selected the form is an unsaved scratch area. -->
-          <div v-if="selectedVideo" class="i2v-top">
+          <div v-else-if="selectedVideo" class="i2v-top">
             <div class="editing-bar" :class="{ failed: saveFailed }">
               <span v-if="saveFailed">
                 Couldn't save your changes to this clip — they'll be retried on the next edit.
@@ -1044,6 +1126,7 @@ const viewerMedia = computed<Media[]>(() => {
               <span>Cadence</span>
               <select
                 :value="templateId"
+                :disabled="viewingJob"
                 @change="onCadenceChange(($event.target as HTMLSelectElement).value)"
               >
                 <option value="">Single take</option>
@@ -1080,6 +1163,7 @@ const viewerMedia = computed<Media[]>(() => {
               <input
                 type="checkbox"
                 :checked="addMusic"
+                :disabled="viewingJob"
                 @change="setAddMusic(($event.target as HTMLInputElement).checked)"
               />
               Add non-diegetic music
@@ -1091,6 +1175,7 @@ const viewerMedia = computed<Media[]>(() => {
             width="700px"
             :rows="12"
             multiline
+            :disabled="viewingJob"
             :value="idea"
             @save="idea = $event"
           >
@@ -1098,6 +1183,7 @@ const viewerMedia = computed<Media[]>(() => {
               id="i2v-caption"
               v-model="idea"
               class="area"
+              :readonly="viewingJob"
               rows="3"
               placeholder="Describe the video (optional): the writer turns it into the prompt"
             />
@@ -1107,6 +1193,7 @@ const viewerMedia = computed<Media[]>(() => {
               <span>Writer</span>
               <select
                 :value="writer"
+                :disabled="viewingJob"
                 @change="setWriter(($event.target as HTMLSelectElement).value)"
               >
                 <option v-for="w in I2V_WRITERS" :key="w.id" :value="w.id">{{ w.label }}</option>
@@ -1121,7 +1208,7 @@ const viewerMedia = computed<Media[]>(() => {
             </label>
             <button
               class="btn"
-              :disabled="expanding || !ready || !sourceMedia"
+              :disabled="expanding || !ready || !sourceMedia || viewingJob"
               :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
               @click="onExpandPrompt"
             >
@@ -1129,11 +1216,11 @@ const viewerMedia = computed<Media[]>(() => {
             </button>
           </div>
 
-          <I2vPromptEditor ref="promptEditor" v-model="prompt" />
+          <I2vPromptEditor ref="promptEditor" v-model="prompt" :readonly="viewingJob" />
           <div class="lint-bar">
             <button
               class="btn"
-              :disabled="!canApplyFixes"
+              :disabled="!canApplyFixes || viewingJob"
               :title="fixes.length
                 ? 'Rewrite the fixable findings below into MiniMax guide phrasing'
                 : 'Nothing the linter can fix automatically'"
@@ -1163,28 +1250,28 @@ const viewerMedia = computed<Media[]>(() => {
               :title="durationLocked ? 'Set by the cadence' : ''"
             >
               <span>Duration</span>
-              <select v-model.number="durationS" :disabled="durationLocked">
+              <select v-model.number="durationS" :disabled="durationLocked || viewingJob">
                 <option v-for="d in durations" :key="d" :value="d">{{ d }}s</option>
               </select>
               <small v-if="durationLocked" class="dims-hint">set by the cadence</small>
             </label>
             <label class="fld">
               <span>Quality</span>
-              <select v-model="quality">
+              <select v-model="quality" :disabled="viewingJob">
                 <option value="fast">Fast (turbo)</option>
                 <option value="quality">High quality</option>
               </select>
             </label>
             <label class="fld" :class="{ 'fld-off': !stepsEnabled }" :title="stepsHint">
               <span>Steps</span>
-              <select v-model.number="steps" :disabled="!stepsEnabled">
+              <select v-model.number="steps" :disabled="!stepsEnabled || viewingJob">
                 <option v-for="n in stepOptions" :key="n" :value="n">{{ n }}</option>
               </select>
               <small v-if="stepsHint" class="dims-hint">{{ stepsHint }}</small>
             </label>
             <label class="fld">
               <span>Size</span>
-              <select v-model.number="megapixels">
+              <select v-model.number="megapixels" :disabled="viewingJob">
                 <option v-for="m in megapixelOptions" :key="m" :value="m">
                   {{ m }} MP
                 </option>
@@ -1198,14 +1285,16 @@ const viewerMedia = computed<Media[]>(() => {
               :seed="seed"
               :policy="seedPolicy"
               :max="SEED_MAX"
+              :readonly="viewingJob"
               @update:seed="seed = $event"
               @update:policy="seedPolicy = $event"
             />
           </div>
-          <CategorySelect v-model="categoryIds" class="i2v-categories" />
+          <CategorySelect v-model="categoryIds" class="i2v-categories" :disabled="viewingJob" />
           <LoraListEditor
             label="LoRAs"
             :entries="loras"
+            :readonly="viewingJob"
             @change="loras = $event"
           />
 
@@ -1259,8 +1348,10 @@ const viewerMedia = computed<Media[]>(() => {
                 </button>
                 <button
                   class="btn primary"
-                  :disabled="submitting || !ready || !sourceMedia"
-                  :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
+                  :disabled="submitting || !ready || !sourceMedia || viewingJob"
+                  :title="viewingJob
+                    ? 'Showing a queued video: go back to the form to generate'
+                    : (sourceMedia ? '' : SOURCE_DELETED_NOTE)"
                   @click="onGenerate"
                 >
                   {{ submitting
@@ -1276,7 +1367,6 @@ const viewerMedia = computed<Media[]>(() => {
               <li v-for="w in store.warnings" :key="w">⚠ {{ w }}</li>
             </ul>
           </footer>
-          </div>
         </div>
 
         <!-- Right: every I2V video in the library, newest first. -->
@@ -1615,5 +1705,4 @@ const viewerMedia = computed<Media[]>(() => {
 
 /* The form's wrapper takes no box of its own: its sticky rows stay children of
    the scrolling column as far as layout is concerned. */
-.form-wrap { display: contents; }
 </style>
