@@ -166,7 +166,10 @@ Defaults to OpenFreeMap liberty if absent. Override to point MapLibre GL at any 
     "max_count": 8,
     "window": 2,
     "scales": [2, 4],
-    "default_scale": 2
+    "default_scale": 2,
+    "denoise_levels": [0.2, 0.3, 0.4, 0.5],
+    "default_denoise": 0.3,
+    "refine_prompt_max_denoise": 0.3      // at or below: the dialog starts on a detail prompt
   }
 }
 ```

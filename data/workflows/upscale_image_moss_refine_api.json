@@ -169,11 +169,32 @@
       "title": "MS_SEED"
     }
   },
+  "25": {
+    "class_type": "easy imageDetailTransfer",
+    "inputs": {
+      "target": [
+        "1",
+        0
+      ],
+      "source": [
+        "20",
+        0
+      ],
+      "mode": "add",
+      "blur_sigma": 4.0,
+      "blend_factor": 1.0,
+      "image_output": "Hide",
+      "save_prefix": "ComfyUI"
+    },
+    "_meta": {
+      "title": "Tile tone fix: colour from the original, fine detail from the refine (blur_sigma = where they meet)"
+    }
+  },
   "30": {
     "class_type": "SaveImage",
     "inputs": {
       "images": [
-        "20",
+        "25",
         0
       ],
       "filename_prefix": "upscale/moss_refine"

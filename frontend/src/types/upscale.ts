@@ -45,6 +45,42 @@ export interface UpscaleGeneration {
   model: string | null
   loras: UpscaleLora[]
   blind: boolean
+  // The refine prompt for the image's subject, guessed from its tags.
+  refine_prompt: string | null
+}
+
+// A short prompt about the detail to add, for a refine workflow at a low
+// denoise (data/upscale_refine_prompts.yml, else built in).
+export interface RefinePrompt {
+  id: string
+  label: string
+  prompt: string
+  negative: string
+  subject: 'people' | 'scene' | 'illustration' | null
+}
+
+// Where the Prompt box's text came from: the image's own prompt, one
+// written from the image, or a refine prompt's id.
+export type PromptSource = 'image' | 'written' | string
+
+// The source a refine-capable dialog starts on: a refine prompt at or below
+// the configured denoise (a workflow without MS_DENOISE never), else the
+// image's own prompt; a refine prompt too when the image has none.
+export function defaultPromptSource(opts: {
+  refinePrompts: RefinePrompt[]
+  suggested: string | null
+  imagePrompt: string | null
+  hasDenoise: boolean
+  denoise: number | null
+  maxDenoise: number
+}): PromptSource {
+  const { refinePrompts, suggested, imagePrompt, hasDenoise, denoise, maxDenoise } = opts
+  const refine =
+    refinePrompts.find((p) => p.id === suggested)?.id ?? refinePrompts[0]?.id ?? null
+  if (refine === null) return 'image'
+  const low = hasDenoise && denoise !== null && denoise <= maxDenoise + 1e-9
+  if (low || !imagePrompt) return refine
+  return 'image'
 }
 
 export interface UpscaleConfig {
@@ -58,8 +94,11 @@ export interface UpscaleConfig {
   default_scale: number
   denoise_levels: number[]
   default_denoise: number
+  // At or below this denoise the dialog starts on a refine prompt.
+  refine_prompt_max_denoise: number
   image_workflows: UpscaleWorkflow[]
   video_workflows: UpscaleWorkflow[]
+  refine_prompts: RefinePrompt[]
 }
 
 export interface UpscaleRecord {

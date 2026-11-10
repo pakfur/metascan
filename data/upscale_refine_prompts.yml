@@ -1,0 +1,71 @@
+# Refine prompts for the Upscale window (metascan/core/upscale_refine_prompts.py).
+#
+# A refine workflow (Moss + Ultimate SD Upscale) redraws the image in tiles,
+# and every tile gets the whole prompt. At a low denoise (0.2-0.3) a short
+# prompt about the detail to add works better than the image's own scene
+# prompt, so the window starts on one of these at or below
+# upscale.refine_prompt_max_denoise (config.json, default 0.3).
+#
+# Edit freely: the window reads this file again the next time it opens.
+#   id        unique, never shown
+#   label     the name in the window's Prompt menu
+#   prompt    the positive prompt (name surfaces and textures, not the scene)
+#   negative  the negative prompt, used when the workflow has MS_NEGATIVE
+#   for       optional: people, scene or illustration. The window picks the
+#             first entry for the image's subject, guessed from its tags.
+# Avoid parentheses: ComfyUI reads them as weights.
+# A file with no valid entry falls back to the built-in prompts.
+
+prompts:
+  - id: photo_people
+    label: Photo, people
+    for: people
+    prompt: >-
+      A high-resolution photograph with natural, true-to-life detail. Skin
+      shows realistic texture: fine pores, subtle variation in tone, faint
+      vellus hair and soft natural highlights, never smooth or airbrushed.
+      Hair has distinct individual strands. Eyes are clear and sharp, with
+      crisp eyelashes and natural catchlights. Fabric shows its weave and
+      stitching, and surfaces keep their material texture. Sharp focus,
+      accurate colour, consistent lighting, clean photographic detail.
+    negative: >-
+      airbrushed skin, plastic skin, waxy skin, oversaturated, painting,
+      illustration, cartoon, CGI, blurry, soft focus, jpeg artifacts, noise,
+      oversharpened, halo, watermark, text, deformed eyes, extra fingers
+
+  - id: photo_scene
+    label: Photo, scene
+    for: scene
+    prompt: >-
+      A high-resolution photograph with natural, true-to-life detail. Foliage
+      shows individual leaves and blades of grass, bark and stone keep their
+      grain and texture, water has crisp reflections, and wood, brick and
+      fabric show their material surface. Edges are clean and sharp, distant
+      detail stays crisp, with fine natural film grain. Accurate colour,
+      consistent lighting, clean photographic detail.
+    negative: >-
+      blurry, soft focus, smeared texture, oversaturated, painting,
+      illustration, cartoon, CGI, jpeg artifacts, noise, oversharpened, halo,
+      watermark, text
+
+  - id: illustration
+    label: Illustration
+    for: illustration
+    prompt: >-
+      A high-resolution illustration with clean, deliberate detail. Lines are
+      crisp and confident, brushwork and shading are intentional, gradients
+      are smooth and colours stay true to the original palette. Edges are
+      sharp, small details are clearly defined, and the style stays
+      consistent across the whole image.
+    negative: >-
+      photograph, photorealistic, film grain, noise, skin pores, blurry, muddy
+      colours, smeared lines, jpeg artifacts, oversharpened, halo, watermark,
+      text
+
+  - id: gentle
+    label: Gentle
+    prompt: >-
+      Sharp, clean, natural detail. Accurate colour, consistent lighting, true
+      to the original image.
+    negative: >-
+      blurry, jpeg artifacts, noise, oversharpened, halo, watermark, text

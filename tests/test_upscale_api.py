@@ -386,7 +386,37 @@ def test_state_carries_what_the_image_was_made_with(env):
         "model": "moss/dirtyMoss_bf16.safetensors",
         "loras": [{"name": "moss/film.safetensors", "strength": 0.8}],
         "blind": False,
+        # "a lake at dusk": no people, no illustration tag.
+        "refine_prompt": "photo_scene",
     }
+
+
+def test_state_guesses_the_refine_prompt_from_the_tags(env):
+    people = env.media("p.png")
+    env.db.add_tag_indices(people, ["woman"], source="clip")
+    art = env.media("i.png")
+    # A medium from VLM / CLIP tags wins over people.
+    env.db.add_tag_indices(art, ["woman", "digital art"], source="clip")
+    got = {
+        p.name: env.client.get("/api/upscale/state", params={"path": str(p)}).json()[
+            "generation"
+        ]["refine_prompt"]
+        for p in (people, art)
+    }
+    assert got == {"p.png": "photo_people", "i.png": "illustration"}
+
+
+def test_config_carries_the_refine_prompts(config_env):
+    body = config_env.client.get("/api/upscale/config").json()
+    assert [p["id"] for p in body["refine_prompts"]] == [
+        "photo_people",
+        "photo_scene",
+        "illustration",
+        "gentle",
+    ]
+    first = body["refine_prompts"][0]
+    assert set(first) == {"id", "label", "prompt", "negative", "subject"}
+    assert body["refine_prompt_max_denoise"] == 0.3
 
 
 def test_a_t2i_images_own_lora_stack_wins(env):

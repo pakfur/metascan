@@ -13,9 +13,12 @@ import type { Media } from '../../types/media'
 import { randomSeed, type SeedPolicy } from '../../types/t2i'
 import {
   candidateLabel,
+  defaultPromptSource,
   defaultWorkflowId,
   sameModelFamily,
   workflowsFor,
+  type PromptSource,
+  type RefinePrompt,
   type UpscaleCandidate,
   type UpscaleLora,
   type UpscaleWorkflow,
@@ -48,6 +51,12 @@ const forceImageModel = ref(false)
 const writingPrompt = ref(false)
 const writtenCaption = ref<string | null>(null)
 const writtenWarnings = ref<string[]>([])
+// What "Write a prompt from the image" gave, so the Prompt menu can go back
+// to it.
+const writtenPrompt = ref<string | null>(null)
+const writtenNegative = ref('')
+// Where the Prompt box's text came from (the Prompt menu).
+const promptSource = ref<PromptSource>('image')
 // Drops a reply the owner no longer waits for (Reset, another workflow).
 let writeSeq = 0
 const scale = ref<number | null>(null)
@@ -108,6 +117,7 @@ const modelMismatch = computed(
 const promptProblem = computed<string | null>(() => {
   const w = workflow.value
   if (!w?.has_prompt || !w.prompt_model) return null
+  if (promptSource.value !== 'image') return null
   const g = generation.value
   if (g?.blind) return null
   if (!g?.prompt) return 'This image has no prompt.'
@@ -116,6 +126,61 @@ const promptProblem = computed<string | null>(() => {
   }
   return null
 })
+const refinePrompts = computed<RefinePrompt[]>(() => store.config?.refine_prompts ?? [])
+const imagePrompt = computed(() => generation.value?.prompt ?? null)
+const refineSource = computed(
+  () => refinePrompts.value.find((p) => p.id === promptSource.value) ?? null,
+)
+// The prompt and negative a source gives, or null when it gives none.
+function sourceText(src: PromptSource): { prompt: string; negative: string } | null {
+  if (src === 'image') {
+    if (!imagePrompt.value && !generation.value?.negative) return null
+    return { prompt: imagePrompt.value ?? '', negative: generation.value?.negative ?? '' }
+  }
+  if (src === 'written') {
+    return writtenPrompt.value === null
+      ? null
+      : { prompt: writtenPrompt.value, negative: writtenNegative.value }
+  }
+  const p = refinePrompts.value.find((r) => r.id === src)
+  return p ? { prompt: p.prompt, negative: p.negative } : null
+}
+// The owner changed the text since it came from its source: no automatic
+// switch may replace it.
+const promptEdited = computed(() => {
+  const t = sourceText(promptSource.value)
+  if (t === null) return prompt.value.trim() !== ''
+  if (prompt.value !== t.prompt) return true
+  return workflow.value?.has_negative === true && negative.value !== t.negative
+})
+function startSource(): PromptSource {
+  return defaultPromptSource({
+    refinePrompts: refinePrompts.value,
+    suggested: generation.value?.refine_prompt ?? null,
+    imagePrompt: imagePrompt.value,
+    hasDenoise: workflow.value?.has_denoise === true,
+    denoise: denoise.value,
+    maxDenoise: store.config?.refine_prompt_max_denoise ?? 0.3,
+  })
+}
+function applySource(src: PromptSource) {
+  const t = sourceText(src) ?? { prompt: '', negative: '' }
+  promptSource.value = src
+  prompt.value = t.prompt
+  negative.value = t.negative
+}
+function onSourceChange(e: Event) {
+  applySource((e.target as HTMLSelectElement).value)
+}
+// A denoise or workflow change moves an untouched prompt to the source that
+// fits it: a detail prompt at a low denoise, the image's own above. Text the
+// owner edited, or wrote from the image, stays.
+function followDenoise() {
+  if (!ready.value || !workflow.value?.has_prompt) return
+  if (promptEdited.value || promptSource.value === 'written') return
+  const next = startSource()
+  if (next !== promptSource.value) applySource(next)
+}
 const hasGeneration = computed(() => {
   const g = generation.value
   return (
@@ -157,9 +222,10 @@ function applyGeneration() {
   writingPrompt.value = false
   writtenCaption.value = null
   writtenWarnings.value = []
+  writtenPrompt.value = null
+  writtenNegative.value = ''
   const g = generation.value
-  prompt.value = g?.prompt ?? ''
-  negative.value = g?.negative ?? ''
+  applySource(startSource())
   if (g?.seed != null) seed.value = g.seed
   forceImageModel.value = false
   applyModel()
@@ -175,7 +241,10 @@ watch(workflowId, () => {
   applyModel()
   writeSeq += 1
   writingPrompt.value = false
+  followDenoise()
 })
+
+watch(denoise, followDenoise)
 
 async function onWritePrompt() {
   const w = workflow.value
@@ -185,8 +254,9 @@ async function onWritePrompt() {
   try {
     const r = await promptFromImage(sourcePath.value, w.prompt_model)
     if (seq !== writeSeq) return
-    prompt.value = r.prompt
-    if (w.has_negative && r.negative) negative.value = r.negative
+    writtenPrompt.value = r.prompt
+    writtenNegative.value = w.has_negative && r.negative ? r.negative : negative.value
+    applySource('written')
     writtenCaption.value = r.caption
     writtenWarnings.value = r.warnings
   } catch (e) {
@@ -394,7 +464,7 @@ function onCountInput(e: Event) {
             <span class="hint">Filled in from how this image was made.</span>
             <button
               class="btn small"
-              title="Put back the image's own values"
+              title="Put back the starting values: how the image was made, and the prompt for this denoise"
               @click="applyGeneration"
             >Reset</button>
           </div>
@@ -402,9 +472,36 @@ function onCountInput(e: Event) {
             A scorecard image keeps its prompt hidden until it is graded.
           </p>
 
+          <label v-if="workflow?.has_prompt && refinePrompts.length" class="fld">
+            <span>
+              Prompt
+              <span v-if="promptEdited" class="hint">(edited)</span>
+            </span>
+            <select :value="promptSource" @change="onSourceChange">
+              <option value="image" :disabled="!imagePrompt">
+                {{ imagePrompt ? "Image's own prompt" : "Image's own prompt (none)" }}
+              </option>
+              <option v-if="writtenPrompt !== null" value="written">
+                Written from the image
+              </option>
+              <option v-for="p in refinePrompts" :key="p.id" :value="p.id">
+                Detail: {{ p.label }}
+              </option>
+            </select>
+          </label>
+          <p v-if="refineSource && workflow?.has_prompt" class="hint">
+            A prompt about the detail to add: every tile is redrawn with it, so at a
+            low denoise it works better than the image's own scene prompt.
+          </p>
+
           <label v-if="workflow?.has_prompt" class="fld">
-            <span>Prompt</span>
-            <textarea v-model="prompt" rows="4" placeholder="Optional" />
+            <span v-if="!refinePrompts.length">Prompt</span>
+            <textarea
+              v-model="prompt"
+              rows="4"
+              placeholder="Optional"
+              :aria-label="refinePrompts.length ? 'Prompt text' : undefined"
+            />
           </label>
 
           <div v-if="workflow?.has_prompt && workflow.prompt_model" class="write-prompt">

@@ -10,6 +10,8 @@
 data/*
 !data/vocabulary/
 !data/meta_prompt.yml
+# The Upscale window's refine prompts (built in too; this copy is for editing).
+!data/upscale_refine_prompts.yml
 !data/prompt_guides/
 !data/workflows/
 !data/templates/

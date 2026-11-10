@@ -66,6 +66,21 @@ The model and LoRAs are filled in only when the workflow's model is in the same 
 
 A scorecard image that is not graded yet keeps its prompt hidden here too, as it does everywhere else.
 
+### Detail prompts
+
+At a low denoise a refine works better with a short prompt about the detail to add than with the image's own scene prompt (see [Refining generated images](#refining-generated-images)). For a workflow with a prompt, the **Prompt** menu offers the image's own prompt, a prompt written from the image once you have written one, and four detail prompts:
+
+| Detail prompt | For |
+|---|---|
+| Photo, people | Portraits and any photo where skin fills much of the image |
+| Photo, scene | Landscapes, nature, architecture, interiors, products |
+| Illustration | Digital art, paintings, anime, 3D renders: stops photo texture being added |
+| Gentle | Anything; when the others add too much |
+
+At a denoise of 0.3 or lower the window starts on the detail prompt for the image: Illustration when its VLM or CLIP tags name an illustration medium, Photo, people when any tag names a person, else Photo, scene. Above 0.3 it starts on the image's own prompt, and on a detail prompt when the image has none. Changing the denoise or the workflow switches between them while you have not edited the text; an edited prompt, marked **(edited)**, stays until you pick another entry or press **Reset**. Picking an entry replaces both the prompt and the negative.
+
+The prompts live in `data/upscale_refine_prompts.yml`. Edit them, add your own or remove some: the window reads the file again the next time it opens. Each entry has an `id`, a `label`, a `prompt`, an optional `negative` and an optional `for` (`people`, `scene` or `illustration`), which the guess uses. Leave out parentheses: ComfyUI reads them as weights. A missing or broken file gives the built-in prompts, and the server log says why. The denoise limit is `upscale.refine_prompt_max_denoise` in `config.json` (0.3).
+
 ### A prompt from the image
 
 An image with no prompt, or one written for another model, makes a poor start: SDXL and Pony prompts are tag lists, and Moss reads them badly. For a workflow whose model has a T2I prompt style (the Moss workflows), the window offers **Write a MOSS-Image prompt from the image**. It says when the image's own prompt is missing or was written for another model, and highlights the button then.
@@ -103,9 +118,13 @@ The two Moss workflows redraw instead. [Ultimate SD Upscale](https://github.com/
 
 Run two strengths, or two seeds, and compare the results before accepting one. The refine works best at ×2 or less.
 
+**The prompt.** Every tile is redrawn with the same prompt, so a prompt that describes the whole scene pushes a tile showing only a cheek or a wall toward that scene. At 0.2–0.3 a short prompt about the detail you want works better, which is why the window starts on a [detail prompt](#detail-prompts) there. The image's own prompt matters again at 0.4 and above, where Moss redraws content.
+
+**No tile grid.** Each tile is redrawn on its own and drifts a little in colour, which showed as a faint grid on smooth skin. Both workflows end the refine with `easy imageDetailTransfer` (from [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use)): it keeps the original's colour and tone and takes only the fine detail from the refine. Its `blur_sigma` (4) is where the two meet: lower takes more from the original, higher keeps more of the refine's tone and with it more of the grid. On two refined images the seams measured no stronger than the rest of the image at 4, with 99 % of the fine detail kept. It also undoes any broad colour change the refine made, which at these strengths is the drift itself.
+
 **Refine + SeedVR2** refines at up to ×2, where Moss still draws well, then frees the GPU and runs one SeedVR2 pass to the chosen scale of the original, at most 16 megapixels. Use it for a large final size.
 
-**Setup.** Install `comfyui_ultimatesdupscale` and, for the second workflow, `comfyui-unload-model` with the ComfyUI Manager. The workflows load `moss\moss_image_sft_bf16.safetensors`, `qwen3.5_9b_bf16.safetensors` and `flux2-vae.safetensors`, as the Moss T2I workflows do; the window replaces the model with the image's own. Refining another model family needs its own copy of the workflow with that family's loaders.
+**Setup.** Install `comfyui_ultimatesdupscale`, `comfyui-easy-use` and, for the second workflow, `comfyui-unload-model` with the ComfyUI Manager. The workflows load `moss\moss_image_sft_bf16.safetensors`, `qwen3.5_9b_bf16.safetensors` and `flux2-vae.safetensors`, as the Moss T2I workflows do; the window replaces the model with the image's own. Refining another model family needs its own copy of the workflow with that family's loaders.
 
 **Setup.** Install [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) with the ComfyUI Manager. Its models go in `ComfyUI/models/SEEDVR2/` (`seedvr2_ema_7b_fp16.safetensors`, `ema_vae_fp16.safetensors`) and download on first use if they are missing. They were tested on a 32 GB card. On a smaller card, change the model and lower the size limits.
 

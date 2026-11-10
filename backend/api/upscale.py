@@ -20,6 +20,7 @@ from metascan.core.comfy_bindings import BindingError
 from metascan.core.comfy_client import GpuBusyError, PresetNotFoundError
 from metascan.core.t2i_models import MODEL_PROFILES
 from metascan.core.upscale_defaults import model_family
+from metascan.core.upscale_refine_prompts import default_store
 from metascan.core.upscale_runner import (
     UpscaleNotFoundError,
     UpscaleRequestError,
@@ -135,6 +136,9 @@ def _config_payload() -> Dict[str, Any]:
         "video_workflows": [
             _workflow(p, db) for p in presets if p["kind"] == "upscale_video"
         ],
+        # The detail prompts a refine workflow starts on at a low denoise
+        # (data/upscale_refine_prompts.yml, else built in).
+        "refine_prompts": [p.to_dict() for p in default_store().prompts()],
     }
 
 

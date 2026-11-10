@@ -182,6 +182,9 @@ def get_upscale_config(config: dict) -> dict:
             "default_scale": 2,
             "denoise_levels": [0.2, 0.3, 0.4, 0.5],  # offered with MS_DENOISE
             "default_denoise": 0.3,
+            # At or below this denoise the dialog starts on a refine prompt
+            # (upscale_refine_prompts) instead of the image's own.
+            "refine_prompt_max_denoise": 0.3,
         }
     """
     raw = config.get("upscale", {}) or {}
@@ -220,6 +223,13 @@ def get_upscale_config(config: dict) -> dict:
         or not 0 < default_denoise <= 1
     ):
         default_denoise = 0.3 if 0.3 in levels else levels[0]
+    refine_max = raw.get("refine_prompt_max_denoise")
+    if (
+        not isinstance(refine_max, (int, float))
+        or isinstance(refine_max, bool)
+        or not 0 <= refine_max <= 1
+    ):
+        refine_max = 0.3
     original_root = raw.get("original_root")
     original_root = original_root.strip() if isinstance(original_root, str) else ""
     return {
@@ -232,6 +242,7 @@ def get_upscale_config(config: dict) -> dict:
         "default_scale": float(default_scale),
         "denoise_levels": levels,
         "default_denoise": float(default_denoise),
+        "refine_prompt_max_denoise": float(refine_max),
     }
 
 

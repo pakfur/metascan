@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from metascan.core.phash_utils import compute_phash_for_file
 from metascan.core.upscale_defaults import generation_defaults
+from metascan.core.upscale_refine_prompts import default_store, guess_refine_prompt
 from metascan.core.upscale_store import UpscaleError, UpscaleStore
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -79,11 +80,19 @@ class UpscaleService:
         media record of an upscaled item carries its original's metadata
         (``Scanner._process_media_file``), so this is the original's too."""
         scorecard = self.db.scorecard_for_path(posix)
-        return generation_defaults(
-            self.db.get_media(Path(to_native_path(posix))),
+        native = Path(to_native_path(posix))
+        out = generation_defaults(
+            self.db.get_media(native),
             self.db.t2i_loras_for_path(posix),
             blind=bool(scorecard and scorecard["blind"]),
         )
+        # The refine prompt for the image's subject (people, a scene or an
+        # illustration), guessed from its tags; the dialog starts on it at a
+        # low denoise.
+        out["refine_prompt"] = guess_refine_prompt(
+            self.db.get_tags_for_file(native), default_store().prompts()
+        )
+        return out
 
     # ---- swaps ------------------------------------------------------------
     async def accept(self, candidate_id: int) -> str:
