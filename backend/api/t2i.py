@@ -445,6 +445,20 @@ async def list_batches() -> List[Dict[str, Any]]:
     return rows
 
 
+@router.get("/jobs/{job_id}")
+async def pending_job(job_id: int) -> Dict[str, Any]:
+    """A queued / running image's caption, prompt and settings, read-only
+    (the dialog's placeholder tile). 404 for a job that is not a T2I one,
+    and for a scorecard job (blind until graded)."""
+    runner = _require_runner()
+    job = await asyncio.to_thread(get_db().get_generation_job, job_id)
+    info = runner.pending_job_info(job) if job and job.get("t2i_batch_id") else None
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"No image job {job_id}")
+    result: Dict[str, Any] = info
+    return result
+
+
 @router.post("/batches/{batch_id}/cancel")
 async def cancel_batch(batch_id: str) -> Dict[str, str]:
     """Cancel a batch. Idempotent: one that is already over answers the same

@@ -81,6 +81,7 @@ async function copyPrompt(): Promise<void> {
 <template>
   <div class="ipe">
     <div class="ipe-bar">
+      <span class="ipe-title">Prompt</span>
       <div class="seg" role="radiogroup" aria-label="Prompt view">
         <label class="seg-opt">
           <input
@@ -179,7 +180,15 @@ async function copyPrompt(): Promise<void> {
 
 <style scoped>
 .ipe { margin-top: 14px; }
-.ipe-bar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.ipe-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+/* The section title as T2IDialog draws it. */
+.ipe-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-color-secondary);
+}
 
 /* The same segmented control as T2IDialog's Manual | Random Caption. The
    radios stay real and focusable; only their circles are hidden. */

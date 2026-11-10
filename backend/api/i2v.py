@@ -8,6 +8,7 @@ lints the submitted prompt text (advisory -- warnings never block).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -25,7 +26,12 @@ from backend.services.i2v_service import I2vService
 from backend.services.gpu_lock import GPU_FREE, gpu_busy_http_error
 from metascan.core.comfy_bindings import BindingError
 from metascan.core.comfy_client import ComfyError, GpuBusyError, PresetNotFoundError
-from metascan.core.i2v_compiler import I2vError, lint_i2v_prompt
+from metascan.core.i2v_compiler import (
+    I2vError,
+    lint_i2v_prompt,
+    music_of,
+    without_music,
+)
 from metascan.core.i2v_fixes import lint_i2v_report
 from metascan.core.i2v_form import FormStateError, validate_form_patch
 from metascan.core.i2v_output import (
@@ -108,6 +114,9 @@ class PromptRequest(BaseModel):
     # The unguided base writer, or an I2V prompt-writer adapter
     # (``adapter:<id>``); taste examples are T2I-only.
     writer: Annotated[str, AfterValidator(_writer_choice)] = "base"
+    # "Add non-diegetic music": off returns the prompt with its music field
+    # as N/A (the reply's ``music`` still carries what the writer wrote).
+    music: bool = True
 
 
 class LintRequest(BaseModel):
@@ -155,6 +164,9 @@ class BatchRequestBody(GenerateRequest):
     batch_size: int
     count_per_batch: int
     writer: Annotated[str, AfterValidator(_writer_choice)] = "base"
+    # "Add non-diegetic music": off writes the music field of every prompt
+    # the run writes as N/A.
+    music: bool = True
 
 
 @router.post("/prompt", dependencies=GPU_FREE)
@@ -192,7 +204,10 @@ async def generate_prompt(body: PromptRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     # No deterministic fallback exists for I2V: a success is always the writer.
     return {
-        "prompt": prompt,
+        "prompt": prompt if body.music else without_music(prompt),
+        # What the writer put in the music field, so the dialog can restore
+        # it when "Add non-diegetic music" is turned back on.
+        "music": music_of(prompt),
         "warnings": warnings,
         "writer_id": body.writer,
         "writer_model": writer_model,
@@ -311,6 +326,7 @@ async def start_batch(body: BatchRequestBody) -> Dict[str, Any]:
         draft_prompt=body.draft_prompt,
         writer_model=body.writer_model,
         window=cfg["window"],
+        music=body.music,
     )
     try:
         started = await runner.start_batch(request)
@@ -346,6 +362,18 @@ async def list_batches() -> List[Dict[str, Any]]:
     runner = _require_runner()
     rows: List[Dict[str, Any]] = runner.active_batches()
     return rows
+
+
+@router.get("/jobs/{job_id}")
+async def pending_job(job_id: int) -> Dict[str, Any]:
+    """A queued / running video's caption, prompt and settings, read-only
+    (the dialog's placeholder tile). 404 for a job that is not an I2V one."""
+    runner = _require_runner()
+    job = await asyncio.to_thread(get_db().get_generation_job, job_id)
+    if job is None or not job.get("i2v_source_path"):
+        raise HTTPException(status_code=404, detail=f"No video job {job_id}")
+    info: Dict[str, Any] = runner.pending_job_info(job)
+    return info
 
 
 @router.post("/batches/{batch_id}/cancel")

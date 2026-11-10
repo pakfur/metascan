@@ -6,6 +6,7 @@ import type {
   I2vConfig,
   I2vFormState,
   I2vLintReport,
+  I2vPendingJob,
   I2vTemplate,
   I2vVideo,
 } from '../types/i2v'
@@ -16,8 +17,22 @@ export function generatePrompt(body: {
   duration_s: number
   template_id?: string | null
   writer?: I2vWriter
-}): Promise<{ prompt: string; warnings: string[]; writer_id: string; writer_model: string | null }> {
+  // false: the reply's prompt has its music field as N/A; `music` is still
+  // what the writer wrote, so turning the checkbox back on can restore it.
+  music?: boolean
+}): Promise<{
+  prompt: string
+  music: string | null
+  warnings: string[]
+  writer_id: string
+  writer_model: string | null
+}> {
   return post('/i2v/prompt', body)
+}
+
+// A queued / running video's caption, prompt and settings (read-only).
+export function getI2vPendingJob(jobId: number): Promise<I2vPendingJob> {
+  return get(`/i2v/jobs/${jobId}`)
 }
 
 // Advisory lint of the prompt text plus the no-model rewrites it could

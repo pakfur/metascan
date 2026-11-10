@@ -39,8 +39,12 @@ import type { Media } from '../../types/media'
 import type { WorkflowPreset } from '../../types/storyboard'
 import { ApiError } from '../../api/client'
 import { listPresets } from '../../api/comfy'
-import { fetchCaptionTokens } from '../../api/t2i'
-import type { CaptionToken } from '../../types/t2i'
+import { fetchCaptionTokens, getT2iPendingJob } from '../../api/t2i'
+import { t2iWriterLabel, type CaptionToken, type T2iPendingJob } from '../../types/t2i'
+import PendingJobDetails from '../generation/PendingJobDetails.vue'
+import TextEditPopup from '../storyboard/TextEditPopup.vue'
+import { usePendingJob } from '../../composables/usePendingJob'
+import { jobStateText, type PendingJobRow } from '../../types/jobs'
 import TokenTextarea from '../generation/TokenTextarea.vue'
 import { useFoldersStore } from '../../stores/folders'
 import { useT2iStore } from '../../stores/t2i'
@@ -851,7 +855,57 @@ const gridItems = computed(() => {
 // are, and nothing is started (a stored Random mode only restores the mode
 // and its filter). The grid only reports the FIRST click of a double-click,
 // so opening the viewer never selects twice.
+// ---- a placeholder tile, read-only ---------------------------------------------------------------
+// A click on a job tile shows what that image was submitted with in place of
+// the form; the form is left as it was and comes back with "Back to the form".
+const pending = usePendingJob(() => store.jobs, getT2iPendingJob)
+
+function fmt(n: number | null | undefined, unit = ''): string | null {
+  return n === null || n === undefined ? null : `${n}${unit}`
+}
+
+const pendingRows = computed<PendingJobRow[]>(() => {
+  const j: T2iPendingJob | null = pending.info.value
+  if (!j) return []
+  const model = j.model ? (models.value.find((m) => m.id === j.model)?.label ?? j.model) : null
+  const workflow =
+    j.preset_id == null
+      ? null
+      : (presets.value.find((p) => p.id === j.preset_id)?.name ?? `Workflow #${j.preset_id}`)
+  const rows: PendingJobRow[] = [{ label: 'Caption', value: j.caption, multiline: true }]
+  if (j.resolved_caption) rows.push({ label: 'Resolved caption', value: j.resolved_caption, multiline: true })
+  rows.push({ label: 'Prompt', value: j.prompt, multiline: true })
+  if (j.negative) rows.push({ label: 'Negative prompt', value: j.negative, multiline: true })
+  rows.push(
+    { label: 'Model', value: model },
+    { label: 'Workflow', value: workflow },
+    {
+      label: 'Size',
+      value: j.width && j.height
+        ? `${j.megapixels != null ? `${j.megapixels} MP · ` : ''}${j.width}×${j.height}${j.aspect_ratio ? ` · ${j.aspect_ratio}` : ''}`
+        : fmt(j.megapixels, ' MP'),
+    },
+    { label: 'Seed', value: fmt(j.seed) },
+    {
+      label: 'LoRAs',
+      value: j.loras.length ? j.loras.map((l) => `${l.name} × ${l.strength}`).join('\n') : 'none',
+      multiline: j.loras.length > 1,
+    },
+    {
+      label: 'Writer',
+      value: j.writer_id
+        ? `${t2iWriterLabel(j.writer_id, store.adaptersLoaded ? store.adapters : null) ?? j.writer_id}` +
+          (j.variant_index != null ? ` · prompt ${j.variant_index + 1}` : '')
+        : null,
+    },
+  )
+  return rows
+})
+
+const pendingStatus = computed(() => `Queued image · ${jobStateText(pending.chip.value)}`)
+
 function onSelectTile(item: ThumbItem) {
+  pending.clear() // a tile click goes back to the form
   const id = Number(item.id)
   if (!ready.value || id === store.selectedId) return
   if (randomLocked.value) {
@@ -1030,6 +1084,18 @@ onBeforeUnmount(() => {
              says where edits are going; with none selected the form is an
              unsaved scratch area. -->
         <div class="t2i-main">
+          <!-- A selected placeholder tile: what its image was submitted with,
+               read-only, in place of the form (which keeps its values). -->
+          <PendingJobDetails
+            v-if="pending.selectedJobId.value !== null"
+            :status="pendingStatus"
+            :rows="pendingRows"
+            :loading="pending.loading.value"
+            :error="pending.error.value"
+            @close="pending.clear()"
+          />
+          <!-- Hidden, not unmounted: the boxes keep their state (undo, scroll). -->
+          <div v-show="pending.selectedJobId.value === null" class="form-wrap">
           <div class="t2i-top">
             <div v-if="!store.config && store.configError" class="bar failed" role="alert">
               <span>Couldn't load the Text to Image settings: {{ store.configError }}</span>
@@ -1139,15 +1205,27 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </div>
-              <TokenTextarea
-                id="t2i-caption"
-                :rows="3"
-                :tokens="captionTokens"
+              <TextEditPopup
+                class="area-pop"
+                title="Caption"
+                width="760px"
+                :rows="14"
+                multiline
+                :disabled="randomLocked"
                 :value="shownCaption"
-                :readonly="randomLocked"
-                :placeholder="randomLocked ? 'A caption is drawn from the caption file for each caption of the run…' : 'Describe the image. Type __ for character tokens like __ALICE__ and __HAIR__: they are filled in for you, and two or more characters keep their traits apart.'"
-                @input="onCaptionInput"
-              />
+                @save="onCaptionInput"
+              >
+                <TokenTextarea
+                  id="t2i-caption"
+                  class="area-host"
+                  :rows="3"
+                  :tokens="captionTokens"
+                  :value="shownCaption"
+                  :readonly="randomLocked"
+                  :placeholder="randomLocked ? 'A caption is drawn from the caption file for each caption of the run…' : 'Describe the image. Type __ for character tokens like __ALICE__ and __HAIR__: they are filled in for you, and two or more characters keep their traits apart.'"
+                  @input="onCaptionInput"
+                />
+              </TextEditPopup>
               <div class="sec-foot">
                 <button
                   type="button"
@@ -1237,16 +1315,27 @@ onBeforeUnmount(() => {
                   Caption directions
                 </label>
               </div>
-              <textarea
-                id="t2i-prompt"
-                class="area"
-                rows="6"
-                spellcheck="false"
+              <TextEditPopup
+                class="area-pop"
+                title="Prompt"
+                width="900px"
+                :rows="22"
+                multiline
+                :disabled="randomLocked"
                 :value="shownPrompt"
-                :readonly="randomLocked"
-                :placeholder="randomLocked ? 'The prompts are written for each caption…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
-                @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
-              />
+                @save="form.prompt = $event"
+              >
+                <textarea
+                  id="t2i-prompt"
+                  class="area area-host"
+                  rows="6"
+                  spellcheck="false"
+                  :value="shownPrompt"
+                  :readonly="randomLocked"
+                  :placeholder="randomLocked ? 'The prompts are written for each caption…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
+                  @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
+                />
+              </TextEditPopup>
               <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
                 <li v-for="w in [...promptWarnings, ...stepWarnings]" :key="w">⚠ {{ w }}</li>
               </ul>
@@ -1262,16 +1351,27 @@ onBeforeUnmount(() => {
                     @click="negativeOpen = !negativeOpen"
                   >{{ negativeOpen ? '▾' : '▸' }} Negative prompt{{ shownNegative.trim() ? ' •' : '' }}</button>
                 </div>
-                <textarea
+                <TextEditPopup
                   v-if="negativeOpen"
-                  class="area"
-                  rows="3"
-                  spellcheck="false"
-                  aria-label="Negative prompt"
+                  class="area-pop"
+                  title="Negative prompt"
+                  width="760px"
+                  :rows="12"
+                  multiline
+                  :disabled="randomLocked"
                   :value="shownNegative"
-                  :readonly="randomLocked"
-                  @input="form.negative = ($event.target as HTMLTextAreaElement).value"
-                />
+                  @save="form.negative = $event"
+                >
+                  <textarea
+                    class="area area-host"
+                    rows="3"
+                    spellcheck="false"
+                    aria-label="Negative prompt"
+                    :value="shownNegative"
+                    :readonly="randomLocked"
+                    @input="form.negative = ($event.target as HTMLTextAreaElement).value"
+                  />
+                </TextEditPopup>
               </template>
             </section>
 
@@ -1407,6 +1507,7 @@ onBeforeUnmount(() => {
               <li v-for="w in batchWarnings" :key="w">⚠ {{ w }}</li>
             </ul>
           </footer>
+          </div>
         </div>
 
         <!-- The images, newest first, a page of 60 at a time. -->
@@ -1435,6 +1536,8 @@ onBeforeUnmount(() => {
                 v-for="[jobId, chip] in store.jobs"
                 :key="`job-${jobId}`"
                 :chip="chip"
+                :selected="pending.selectedJobId.value === jobId"
+                @select="pending.toggle(jobId)"
                 @cancel="onCancelJob(jobId)"
                 @dismiss="store.dismissJob(jobId)"
               />
@@ -2186,4 +2289,13 @@ onBeforeUnmount(() => {
     min-height: 0;
   }
 }
+
+/* The form's wrapper takes no box of its own: its sticky rows stay children of
+   the scrolling column as far as layout is concerned. */
+.form-wrap { display: contents; }
+
+/* TextEditPopup centres its button against an input; beside a box it sits at
+   the top and the box fills the row. */
+.area-pop { align-items: flex-start; width: 100%; }
+.area-pop .area-host { flex: 1; min-width: 0; }
 </style>

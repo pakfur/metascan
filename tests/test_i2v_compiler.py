@@ -276,3 +276,21 @@ def test_single_take_output_is_pinned():
         "\n\noverall_soundscape: quiet room."
         "\n\nnon_diegetic_music: none."
     )
+
+
+# ---- "Add non-diegetic music" ------------------------------------------------
+
+
+def test_without_music_sets_only_the_music_field_to_na():
+    from metascan.core.i2v_compiler import music_of, without_music
+
+    text = (
+        "Head\n\nintegrated_multimodal_description: A.\n\n"
+        "overall_soundscape: Wind.\n\nnon_diegetic_music: Soft piano.\nMore."
+    )
+    out = without_music(text)
+    assert out == text[: text.index("non_diegetic_music:")] + "non_diegetic_music: N/A"
+    assert music_of(text) == "Soft piano.\nMore."
+    assert without_music(out) == out
+    assert without_music("no fields here") == "no fields here"
+    assert music_of("no fields here") is None

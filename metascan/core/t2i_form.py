@@ -411,9 +411,10 @@ def render_seconds(
 ) -> Optional[float]:
     """Wall-clock seconds a job spent rendering, from the job row's ISO
     stamps. ``job_outputs`` fires before the job is marked done, so a
-    missing ``finished_at`` means "now". ``started_at`` is stamped when
-    metascan hands the prompt to ComfyUI, so time spent behind another
-    in-flight prompt inside ComfyUI is included. Naive stamps are read as
+    missing ``finished_at`` means "now". ``started_at`` is when ComfyUI began
+    executing the prompt (its ``execution_start``; the dispatch time until
+    that arrives), so time spent queued behind another prompt is not
+    counted. Naive stamps are read as
     UTC. None when the start is absent/unparseable or the span is
     negative."""
     if not started_at:

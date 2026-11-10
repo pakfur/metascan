@@ -17,13 +17,15 @@ import ModalShell from './ModalShell.vue'
 // are kept.
 //
 // `width`/`rows` size the popup for long values; they default to the
-// compact size every original caller was written against.
+// compact size every original caller was written against. `disabled` greys
+// the button out while the host box is read-only.
 const props = defineProps<{
   value: string | null | undefined
   title?: string
   width?: string
   rows?: number
   multiline?: boolean
+  disabled?: boolean
 }>()
 const emit = defineEmits<{ (e: 'save', value: string): void }>()
 
@@ -81,6 +83,7 @@ function save(): void {
       type="button"
       class="tep-btn"
       :title="`Edit ${title ?? 'text'} in a popup`"
+      :disabled="disabled"
       @click.stop.prevent="openDialog"
     >
       <span class="pi pi-window-maximize" />
@@ -136,7 +139,12 @@ function save(): void {
     color 0.15s;
 }
 
-.tep-btn:hover {
+.tep-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tep-btn:hover:not(:disabled) {
   background: var(--surface-hover);
   color: var(--text-color);
 }

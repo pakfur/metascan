@@ -12,10 +12,17 @@ import type {
   T2iFormState,
   T2iImage,
   T2iOutputPreview,
+  T2iPendingJob,
   T2iPromptResult,
   T2iResolveResult,
   T2iWriter,
 } from '../types/t2i'
+
+// A queued / running image's caption, prompt and settings (read-only). 404
+// for a scorecard job, whose prompt stays blind until it is graded.
+export function getT2iPendingJob(jobId: number): Promise<T2iPendingJob> {
+  return get(`/t2i/jobs/${jobId}`)
+}
 
 export function fetchT2iConfig(): Promise<T2iConfig> {
   return get('/t2i/config')

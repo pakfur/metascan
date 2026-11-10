@@ -178,3 +178,13 @@ the root CLAUDE.md still applies.
   row again calls `resetForm()`. After a successful update the selection
   and form are kept so the user can keep iterating. `selectSeq` drops
   out-of-order preset loads.
+- **`started_at` is when ComfyUI began executing the prompt.** `_mark_running`
+  stamps the dispatch time, but up to `in_flight` prompts sit inside ComfyUI
+  at once and it runs one at a time, so a job dispatched behind another used
+  to count its wait as render time (every video of an I2V batch timed from
+  the first one's start). `execution_start` is therefore not in
+  `_EVENT_KINDS_WITHOUT_JOB_ID`: `_mark_executing` restamps a running row's
+  `started_at`, keeps the time in `_executing_at` for a "running" write that
+  has not landed yet (`_mark_running` takes it), and leaves a terminal job
+  alone. `render_seconds` (I2V and T2I) reads it, so a clip's render time is
+  its own.

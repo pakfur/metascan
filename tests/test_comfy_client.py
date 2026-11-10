@@ -1753,3 +1753,55 @@ async def test_submit_refuses_when_the_lock_lands_mid_submit(
             await started_client.submit_now(pid, params())
     finally:
         gpu_guard.set_gpu_reservation(None)
+
+
+# ---- execution_start restamps started_at ------------------------------------
+
+
+async def test_execution_start_restamps_a_running_jobs_started_at(client):
+    """A prompt dispatched behind another waits inside ComfyUI: its render
+    time starts when ComfyUI begins executing it, not at dispatch."""
+    pid = await client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = client.db.create_generation_job(pid, params().to_json())
+    client.db.update_generation_job(
+        job_id, state="running", started_at="2000-01-01T00:00:00+00:00"
+    )
+    client._prompt_to_job["p-1"] = job_id
+
+    await client._handle_event(
+        {"type": "execution_start", "data": {"prompt_id": "p-1"}}
+    )
+
+    started = client.db.get_generation_job(job_id)["started_at"]
+    assert started and not started.startswith("2000-")
+
+
+async def test_execution_start_before_the_running_write_is_kept_for_it(client):
+    pid = await client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = client.db.create_generation_job(pid, params().to_json())
+    client._prompt_to_job["p-2"] = job_id
+
+    await client._handle_event(
+        {"type": "execution_start", "data": {"prompt_id": "p-2"}}
+    )
+    held = client._executing_at[job_id]
+    assert await client._mark_running(job_id, "p-2")
+
+    assert client.db.get_generation_job(job_id)["started_at"] == held
+    assert job_id not in client._executing_at
+
+
+async def test_execution_start_leaves_a_terminal_job_alone(client):
+    pid = await client.register_preset("sdxl", "t2i", t2i_workflow())
+    job_id = client.db.create_generation_job(pid, params().to_json())
+    client.db.update_generation_job(
+        job_id, state="done", started_at="2000-01-01T00:00:00+00:00"
+    )
+    client._prompt_to_job["p-3"] = job_id
+
+    await client._handle_event(
+        {"type": "execution_start", "data": {"prompt_id": "p-3"}}
+    )
+
+    assert client.db.get_generation_job(job_id)["started_at"].startswith("2000-")
+    assert job_id not in client._executing_at

@@ -4729,3 +4729,41 @@ class TestWithTheRealComfyClient(RealClientCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPendingJobInfo(RunnerCase):
+    def _job(self, job_id):
+        return {
+            "id": job_id,
+            "state": "queued",
+            "t2i_batch_id": "b",
+            "preset_id": 3,
+            "params": json.dumps(
+                {"positive": "THE PROMPT", "seed": 9, "width": 1024, "height": 1024}
+            ),
+        }
+
+    def test_reads_the_params_and_the_meta(self):
+        self.runner._job_meta[5] = {
+            "mode": "manual",
+            "caption": "__ALICE__ reads",
+            "resolved_caption": "the woman reads",
+            "negative": "blurry",
+            "model": "krea2",
+            "aspect_ratio": "1:1",
+            "megapixels": 1.0,
+            "loras": [],
+            "writer_id": "base",
+            "scorecard_id": None,
+        }
+        info = self.runner.pending_job_info(self._job(5))
+        assert info is not None
+        self.assertEqual(
+            (info["caption"], info["resolved_caption"], info["prompt"], info["seed"]),
+            ("__ALICE__ reads", "the woman reads", "THE PROMPT", 9),
+        )
+        self.assertEqual((info["negative"], info["preset_id"]), ("blurry", 3))
+
+    def test_a_scorecard_job_stays_blind(self):
+        self.runner._job_meta[6] = {"scorecard_id": "sc1", "prompt": "secret"}
+        self.assertIsNone(self.runner.pending_job_info(self._job(6)))

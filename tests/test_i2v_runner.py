@@ -1113,6 +1113,12 @@ class TestBatchRun(I2vRunnerBase):
         self.assertEqual(len(last["warnings"]), 1)
         self.assertTrue(last["warnings"][0].startswith("Batch 1 (best of"))
 
+    def test_music_off_writes_na_into_written_prompts_only(self):
+        self.run_batch(self._req(batch_size=2, music=False))
+        texts = [p.positive for _, p, _ in self.comfy.submits]
+        self.assertEqual(texts[0], "BOX PROMPT")
+        self.assertTrue(texts[1].endswith("non_diegetic_music: N/A"))
+
     def test_box_text_is_never_rewritten_for_its_lint(self):
         with self._lint_flags(set(range(1, 10))):
             self.run_batch(self._req(batch_size=1))
@@ -1314,3 +1320,52 @@ class TestBatchRun(I2vRunnerBase):
         self.assertEqual(len(self.comfy.submits), 1)
         with self.assertRaises(I2vUnavailableError):
             self.run_async(self.runner.start_batch(self._req(batch_size=2)))
+
+
+class TestPendingJobInfo(I2vRunnerBase):
+    def test_reads_the_params_and_the_meta(self):
+        self.runner._job_meta[7] = {
+            "idea": "rain at night",
+            "quality": "fast",
+            "megapixels": 0.75,
+            "loras": [{"name": "a.safetensors", "strength": 0.8}],
+            "writer_id": "base",
+            "writer_model": "qwen3vl-8b",
+            "form": {"template_id": "two_shot"},
+        }
+        job = {
+            "id": 7,
+            "state": "queued",
+            "i2v_source_path": "/lib/a.png",
+            "created_at": "2026-11-09 10:00:00",
+            "started_at": None,
+            "params": json.dumps(
+                {
+                    "positive": "THE PROMPT",
+                    "seed": 42,
+                    "width": 832,
+                    "height": 480,
+                    "duration_s": 6,
+                    "steps": None,
+                }
+            ),
+        }
+        info = self.runner.pending_job_info(job)
+        self.assertEqual(
+            (info["caption"], info["prompt"], info["seed"], info["width"]),
+            ("rain at night", "THE PROMPT", 42, 832),
+        )
+        self.assertEqual(info["template_id"], "two_shot")
+        self.assertEqual(info["loras"], [{"name": "a.safetensors", "strength": 0.8}])
+
+    def test_a_job_with_no_meta_still_shows_its_params(self):
+        job = {
+            "id": 8,
+            "state": "running",
+            "i2v_source_path": "/lib/a.png",
+            "params": json.dumps({"positive": "P", "seed": 1, "width": 0, "height": 0}),
+        }
+        info = self.runner.pending_job_info(job)
+        self.assertEqual(
+            (info["prompt"], info["caption"], info["width"]), ("P", None, None)
+        )

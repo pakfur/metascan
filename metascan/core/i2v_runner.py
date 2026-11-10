@@ -44,6 +44,7 @@ from metascan.core.i2v_compiler import (
     i2v_max_tokens,
     lint_i2v_prompt,
     validate_i2v_beats,
+    without_music,
 )
 from metascan.core.i2v_form import build_form_state
 from metascan.core.i2v_output import I2vOutputError, resolve_output_target
@@ -85,9 +86,10 @@ def render_seconds(
 ) -> Optional[float]:
     """Wall-clock seconds a job spent rendering, from the job row's ISO
     stamps. ``job_outputs`` fires before the job is marked done, so a
-    missing ``finished_at`` means "now". ``started_at`` is stamped when
-    metascan hands the prompt to ComfyUI, so time spent behind another
-    in-flight prompt inside ComfyUI is included. None when the start is
+    missing ``finished_at`` means "now". ``started_at`` is when ComfyUI began
+    executing the prompt (its ``execution_start``; the dispatch time until
+    that arrives), so time spent queued behind another prompt is not
+    counted. None when the start is
     absent/unparseable or the span is negative."""
     if not started_at:
         return None
@@ -214,6 +216,9 @@ class I2vBatchRequest:
     draft_prompt: Optional[str] = None
     writer_model: Optional[str] = None
     window: int = 4
+    # "Add non-diegetic music": off writes the music field of every prompt
+    # the run writes as N/A (the box text arrives already applied).
+    music: bool = True
 
 
 @dataclass
@@ -777,6 +782,8 @@ class I2vRunner:
                 )
         assert best is not None
         text, warnings, model, lint = best
+        if not req.music:
+            text = without_music(text)
         if lint:
             # Nobody sees a written prompt before it renders: say which one.
             label = f"Batch {index + 1} (best of {_LINT_ATTEMPTS} takes): "
@@ -1028,6 +1035,47 @@ class I2vRunner:
         b = self._batches.get(batch_id)
         if b is not None:
             self._release(b, job_id)
+
+    # ---- a pending job, read-only ------------------------------------------
+
+    def pending_job_info(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """What a queued or running video was submitted with, for the
+        dialog's read-only view of its placeholder tile: the job row's
+        params (what ComfyUI gets) plus the in-memory ``_job_meta`` (the
+        caption and the form). A restart loses the meta, so those fields
+        are then None. Never writes anything."""
+        try:
+            params: Dict[str, Any] = json.loads(job.get("params") or "{}")
+        except (TypeError, ValueError):
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        meta = self._job_meta.get(int(job["id"])) or {}
+        form = meta.get("form") or {}
+        loras = meta.get("loras")
+        if loras is None:
+            loras = params.get("loras") or []
+        source = job.get("i2v_source_path")
+        return {
+            "job_id": int(job["id"]),
+            "state": job.get("state"),
+            "source_path": to_native_path(source) if source else None,
+            "created_at": job.get("created_at"),
+            "started_at": job.get("started_at"),
+            "caption": meta.get("idea"),
+            "prompt": params.get("positive"),
+            "seed": params.get("seed"),
+            "duration_s": params.get("duration_s"),
+            "quality": meta.get("quality"),
+            "steps": params.get("steps"),
+            "megapixels": meta.get("megapixels"),
+            "width": params.get("width") or None,
+            "height": params.get("height") or None,
+            "loras": [dict(entry) for entry in loras if isinstance(entry, dict)],
+            "template_id": form.get("template_id"),
+            "writer_id": meta.get("writer_id"),
+            "writer_model": meta.get("writer_model"),
+        }
 
     # ---- ingest ------------------------------------------------------------
 

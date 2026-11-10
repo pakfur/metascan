@@ -203,6 +203,27 @@ def assemble_i2v_prompt(result: I2vResult) -> str:
     )
 
 
+# The music field when the dialog's "Add non-diegetic music" is off.
+NO_MUSIC = "N/A"
+_MUSIC_FIELD = "\n\nnon_diegetic_music:"
+
+
+def music_of(text: str) -> Optional[str]:
+    """The text of the prompt's ``non_diegetic_music:`` field (always the
+    document's last field), or None when it has none."""
+    i = text.rfind(_MUSIC_FIELD)
+    return None if i < 0 else text[i + len(_MUSIC_FIELD) :].strip()
+
+
+def without_music(text: str) -> str:
+    """The prompt with its music field set to ``N/A``; every byte before the
+    field is kept. A prompt with no music field is returned unchanged."""
+    i = text.rfind(_MUSIC_FIELD)
+    if i < 0:
+        return text
+    return f"{text[: i + len(_MUSIC_FIELD)]} {NO_MUSIC}"
+
+
 _LABEL_RE = re.compile(r"<([^<>\n]+)>")
 _ALLOWED_LABELS = {"Picture 1", "d", "/d"}
 _REQUIRED_FIELDS = (

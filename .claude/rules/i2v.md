@@ -365,3 +365,28 @@ the root CLAUDE.md still applies.
   stale rewrite must never clobber newer typing). Never auto-apply on
   Generate: the box is "Generate uses this text".
 - **Generation categories.** `POST /api/i2v/batches` takes `category_ids` (default `[]`), validated by `checked_category_ids` (404 `{code: "unknown_category"}` before upload/queue) and passed to `I2vRunner.generate(category_ids=…)`, which keeps them in the in-memory `_job_meta` (not the form). Ingest tags each new clip via `generation_categories.tag_generated_media` (source `generation`) before `i2v_videos_changed`; a deleted category is a logged skip. The dialog's selection is session-local like the seed policy (`metascan.i2v.categories.v1`).
+- **Job tiles match the open image by `utils/path.ts::pathKey`.** Job rows
+  (`GET /api/comfy/jobs`) come back POSIX as stored (`/mnt/d/...`), clip and
+  Media rows native (`D:\...` on Windows), so `stores/i2v.ts::norm` maps a
+  drive spelt either way to `d:/`; comparing by slashes alone matched no job
+  on Windows and the left list showed no placeholder. A job tile is
+  selectable like T2I's (`GET /api/i2v/jobs/{id}` →
+  `I2vRunner.pending_job_info`; caption and form are in-memory `_job_meta`,
+  null after a restart): the read-only details replace the form
+  (`PendingJobDetails`, the form hidden with `v-show`, never written); a clip
+  click or the tile leaving ends it.
+- **The dialog's names follow T2I's:** Caption (the `idea` field, which keeps
+  its name in `form_state` and the API), Prompt, Generate Prompt, and the run
+  counts Prompts × Videos (`batch_size` / `count_per_batch` on the wire). The
+  Caption box is a `multiline` `TextEditPopup` like the prompt panels.
+- **"Add non-diegetic music"** (beside the Caption title, per browser:
+  `metascan.i2v.music.v1`, default on; never `form_state`, the prompt text
+  already says what a clip had). Off, the music field is `N/A`
+  (`i2v_compiler.NO_MUSIC` / `without_music`, mirrored by
+  `i2vPromptSections.ts::withoutMusic`; the field is always the document's
+  last, so everything before it is kept byte for byte): in the box at once,
+  in `/prompt`'s reply (`music: false`; its `music` field still carries what
+  the writer wrote, so turning the box back on restores it), in every prompt
+  a run writes (`I2vBatchRequest.music`, applied after the lint rerolls), and
+  in the box text Generate sends. On never invents music: it restores the
+  held text only while the field reads `N/A`.
