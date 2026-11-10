@@ -197,6 +197,20 @@ class TestI2vApi(_I2vApiBase):
         self.assertEqual(body["prompt"], self.runner.prompt_result[0])
         self.assertEqual(body["warnings"], ["w1"])
 
+    def test_prompt_without_music_writes_na_and_keeps_the_writers_music(self):
+        self.runner.prompt_result = (
+            "For the target video, ...\n\noverall_soundscape: Wind.\n\n"
+            "non_diegetic_music: Soft piano.",
+            [],
+        )
+        body = {"source_path": "/lib/a.png", "idea": "x", "duration_s": 6}
+        on = self.client.post("/api/i2v/prompt", json=body).json()
+        self.assertTrue(on["prompt"].endswith("non_diegetic_music: Soft piano."))
+        self.assertEqual(on["music"], "Soft piano.")
+        off = self.client.post("/api/i2v/prompt", json={**body, "music": False}).json()
+        self.assertTrue(off["prompt"].endswith("non_diegetic_music: N/A"))
+        self.assertEqual(off["music"], "Soft piano.")
+
     def test_prompt_503_when_runner_missing(self):
         set_i2v_runner(None)
         resp = self.client.post(
@@ -462,6 +476,11 @@ class TestI2vBatchApi(_I2vApiBase):
             ("increment", 3, 2, "adapter:7"),
         )
         self.assertEqual((req.steps, req.category_ids), (30, [cat]))
+        self.assertTrue(req.music)
+
+    def test_start_batch_passes_the_music_choice(self):
+        self.assertEqual(self._post(music=False).status_code, 200)
+        self.assertFalse(self.runner.batch_calls[0].music)
 
     def test_start_batch_is_gpu_free(self):
         with patch("backend.services.gpu_lock.gpu_reserved", return_value=True):

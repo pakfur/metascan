@@ -120,3 +120,28 @@ export function replaceI2vSection(text: string, key: I2vSectionKey, value: strin
   const { start, end } = parsed.spans[key]
   return text.slice(0, start) + value + text.slice(end)
 }
+
+// ---- "Add non-diegetic music" ----------------------------------------------
+// Mirrors i2v_compiler.py's NO_MUSIC / music_of / without_music: the music
+// field is always the document's last one, so its text runs to the end.
+
+export const NO_MUSIC = 'N/A'
+const MUSIC_FIELD = '\n\n' + MUSIC_LABEL
+
+/** The text of the prompt's music field, or null when it has none. */
+export function musicOf(text: string): string | null {
+  const i = text.lastIndexOf(MUSIC_FIELD)
+  return i < 0 ? null : text.slice(i + MUSIC_FIELD.length).trim()
+}
+
+/** The prompt with its music field set to N/A; every byte before it is kept. */
+export function withoutMusic(text: string): string {
+  const i = text.lastIndexOf(MUSIC_FIELD)
+  return i < 0 ? text : `${text.slice(0, i + MUSIC_FIELD.length)} ${NO_MUSIC}`
+}
+
+/** The prompt with its music field set to `music` (unchanged with no field). */
+export function withMusic(text: string, music: string): string {
+  const i = text.lastIndexOf(MUSIC_FIELD)
+  return i < 0 ? text : `${text.slice(0, i + MUSIC_FIELD.length)} ${music.trim()}`
+}

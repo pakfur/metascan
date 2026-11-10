@@ -95,6 +95,35 @@ export interface I2vBatchBody {
   writer_id?: string
   draft_prompt?: string
   writer_model?: string | null
+  // "Add non-diegetic music": false writes the music field of every prompt
+  // the run writes as N/A.
+  music?: boolean
+}
+
+/**
+ * GET /api/i2v/jobs/{id}: what a queued / running video was submitted with,
+ * for its placeholder tile's read-only view. The caption and the form come
+ * from the server's memory, so they are null after a restart.
+ */
+export interface I2vPendingJob {
+  job_id: number
+  state: string | null
+  source_path: string | null
+  created_at: string | null
+  started_at: string | null
+  caption: string | null
+  prompt: string | null
+  seed: number | null
+  duration_s: number | null
+  quality: 'fast' | 'quality' | null
+  steps: number | null
+  megapixels: number | null
+  width: number | null
+  height: number | null
+  loras: { name: string; strength: number }[]
+  template_id: string | null
+  writer_id: string | null
+  writer_model: string | null
 }
 
 export interface I2vConfig {

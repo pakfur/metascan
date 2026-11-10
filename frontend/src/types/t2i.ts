@@ -940,3 +940,33 @@ export function sanitizeDraft(raw: unknown): Partial<T2iFormState> | null {
   }
   return Object.keys(out).length > 0 ? out : null
 }
+
+/**
+ * GET /api/t2i/jobs/{id}: what a queued / running image was submitted with,
+ * for its placeholder tile's read-only view. The caption, model and writer
+ * come from the server's memory, so they are null after a restart.
+ */
+export interface T2iPendingJob {
+  job_id: number
+  state: string | null
+  created_at: string | null
+  started_at: string | null
+  mode: string | null
+  caption: string | null
+  // The caption as the writer saw it, when tokens changed it; else null.
+  resolved_caption: string | null
+  prompt: string | null
+  negative: string | null
+  seed: number | null
+  model: string | null
+  preset_id: number | null
+  aspect_ratio: string | null
+  megapixels: number | null
+  width: number | null
+  height: number | null
+  steps: number | null
+  loras: { name: string; strength: number }[]
+  writer_id: string | null
+  writer_model: string | null
+  variant_index: number | null
+}

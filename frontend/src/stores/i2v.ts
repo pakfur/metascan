@@ -26,14 +26,15 @@ import { listWriterAdapters } from '../api/writers'
 import type { WriterAdapter } from '../types/writers'
 import { makeRowNotes } from '../utils/rowNotes'
 import { mergeNewestPage } from '../utils/i2vLists'
+import { pathKey } from '../utils/path'
 
 // Rows per page of the all-videos list.
 const ALL_PAGE = 60
 
-// POSIX/native tolerance: job rows store POSIX, Media paths are native.
-function norm(p: string): string {
-  return p.replace(/\\/g, '/')
-}
+// POSIX/native tolerance: job rows come back POSIX (`/mnt/d/...`), clip and
+// Media rows native (`D:\...`). Comparing them by slashes alone matched no job
+// on Windows, so the left list never showed a job tile there.
+const norm = pathKey
 
 export const useI2vStore = defineStore('i2v', () => {
   // The open source image's path, as given (native or POSIX). `source` is

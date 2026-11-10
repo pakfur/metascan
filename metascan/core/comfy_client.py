@@ -87,8 +87,11 @@ _STABLE_CONNECTION_SECONDS = 2.0
 # immediately after `PromptQueue.task_done()` — the only frame guaranteed
 # to arrive *after* the history entry exists. _handle_event filters the
 # node-carrying variant explicitly so the fast path is preserved.
+#
+# `execution_start` is not in here either: it is the moment ComfyUI starts
+# executing a prompt, which restamps the job's `started_at` (_mark_executing).
 _EVENT_KINDS_WITHOUT_JOB_ID: FrozenSet[str] = frozenset(
-    {"execution_start", "execution_cached", "status", "progress_state"}
+    {"execution_cached", "status", "progress_state"}
 )
 
 # How long collect_outputs will wait for ComfyUI to publish a history
@@ -253,6 +256,10 @@ class ComfyClient:
         # event reader never touches SQLite: ComfyUI emits `progress`
         # many times per second per job.
         self._prompt_to_job: Dict[str, int] = {}
+        # ComfyUI's execution_start time of a job whose "running" write had
+        # not landed yet when the event arrived (_mark_executing): the write
+        # takes it as `started_at` instead of the dispatch time.
+        self._executing_at: Dict[int, str] = {}
         self.connected: bool = False
         self._ws_task: Optional[asyncio.Task] = None
         self._reconcile_task: Optional[asyncio.Task] = None
@@ -501,9 +508,31 @@ class ComfyClient:
                 job_id,
                 state="running",
                 comfy_prompt_id=prompt_id,
-                started_at=_now(),
+                started_at=self._executing_at.pop(job_id, "") or _now(),
             )
             return True
+
+    async def _mark_executing(self, job_id: int) -> None:
+        """ComfyUI began executing this job's prompt: restamp `started_at`.
+
+        `_mark_running` stamps the dispatch time, but up to `in_flight`
+        prompts sit inside ComfyUI at once and it runs one at a time, so a
+        job dispatched behind another would count the wait as render time
+        (each video of an I2V batch timed from the first one's start). An
+        event that beats the "running" write is kept for that write; a
+        terminal job is left alone.
+        """
+        now = _now()
+        async with self._finish_lock:
+            current = await asyncio.to_thread(self.db.get_generation_job, job_id)
+            if current is None or current["state"] in _TERMINAL_STATES:
+                return
+            if current["state"] == "running":
+                await asyncio.to_thread(
+                    self.db.update_generation_job, job_id, started_at=now
+                )
+            else:
+                self._executing_at[job_id] = now
 
     # ---- reference images ---------------------------------------------
 
@@ -1401,6 +1430,10 @@ class ComfyClient:
         if job_id is None:
             return  # an event for someone else's client, or a stale prompt
 
+        if kind == "execution_start":
+            await self._mark_executing(job_id)
+            return
+
         if kind == "progress":
             self._emit(
                 "job_progress",
@@ -1691,6 +1724,7 @@ class ComfyClient:
         self._running.discard(job_id)
         self._job_source.pop(job_id, None)
         self._lost_resubmits.pop(job_id, None)
+        self._executing_at.pop(job_id, None)
         # The real anti-resurrection guard: a job already in a terminal
         # state never moves to a different one. Without this, a stale
         # completion -- e.g. a _complete_job task that was already

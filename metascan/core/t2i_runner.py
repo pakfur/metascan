@@ -2453,6 +2453,52 @@ class T2iRunner:
         if self.unload_vlm_during_generation:
             await self._unload_vlm(None)
 
+    # ---- a pending job, read-only ------------------------------------------------
+
+    def pending_job_info(self, job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """What a queued or running image was submitted with, for the
+        dialog's read-only view of its placeholder tile: the job row's
+        params (what ComfyUI gets) plus the in-memory ``_job_meta`` (caption,
+        model, writer). A restart loses the meta, so those fields are then
+        None. None for a scorecard job: its prompt stays blind until graded.
+        Never writes anything."""
+        meta = self._job_meta.get(int(job["id"])) or {}
+        if meta.get("scorecard_id"):
+            return None
+        try:
+            params: Dict[str, Any] = json.loads(job.get("params") or "{}")
+        except (TypeError, ValueError):
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        loras = meta.get("loras")
+        if loras is None:
+            loras = params.get("loras") or []
+        resolved = meta.get("resolved_caption")
+        return {
+            "job_id": int(job["id"]),
+            "state": job.get("state"),
+            "created_at": job.get("created_at"),
+            "started_at": job.get("started_at"),
+            "mode": meta.get("mode"),
+            "caption": meta.get("caption"),
+            "resolved_caption": resolved if resolved != meta.get("caption") else None,
+            "prompt": params.get("positive"),
+            "negative": meta.get("negative"),
+            "seed": params.get("seed"),
+            "model": meta.get("model"),
+            "preset_id": job.get("preset_id"),
+            "aspect_ratio": meta.get("aspect_ratio"),
+            "megapixels": meta.get("megapixels"),
+            "width": params.get("width") or None,
+            "height": params.get("height") or None,
+            "steps": params.get("steps"),
+            "loras": [dict(entry) for entry in loras if isinstance(entry, dict)],
+            "writer_id": meta.get("writer_id"),
+            "writer_model": meta.get("writer_model"),
+            "variant_index": meta.get("variant_index"),
+        }
+
     # ---- job events ---------------------------------------------------------------
 
     def handle_job_event(self, event: str, payload: Dict[str, Any]) -> None:

@@ -8,6 +8,7 @@ import {
   withCurrentOption,
   type I2vFix,
   I2V_WRITERS,
+  type I2vPendingJob,
   type I2vBatch,
   type I2vFormState,
   type I2vWriter,
@@ -15,8 +16,15 @@ import {
   type I2vVideo,
 } from '../../types/i2v'
 import { useI2vStore } from '../../stores/i2v'
-import { generatePrompt, startI2vBatch, deleteI2vVideo, lintI2vPrompt } from '../../api/i2v'
+import {
+  generatePrompt,
+  getI2vPendingJob,
+  startI2vBatch,
+  deleteI2vVideo,
+  lintI2vPrompt,
+} from '../../api/i2v'
 import { thumbnailUrl } from '../../api/client'
+import { pathKey } from '../../utils/path'
 import {
   ADAPTER_LOADING,
   ADAPTER_LOADING_TEXT,
@@ -39,6 +47,11 @@ import MediaViewer from '../viewer/MediaViewer.vue'
 import I2vClipList from '../generation/I2vClipList.vue'
 import I2vPromptEditor from '../generation/I2vPromptEditor.vue'
 import JobTile from '../generation/JobTile.vue'
+import PendingJobDetails from '../generation/PendingJobDetails.vue'
+import TextEditPopup from '../storyboard/TextEditPopup.vue'
+import { usePendingJob } from '../../composables/usePendingJob'
+import { jobStateText, type PendingJobRow } from '../../types/jobs'
+import { musicOf, NO_MUSIC, withMusic, withoutMusic } from '../../utils/i2vPromptSections'
 import SeedControls from '../generation/SeedControls.vue'
 import CategorySelect from '../generation/CategorySelect.vue'
 import LoraListEditor from '../storyboard/LoraListEditor.vue'
@@ -113,11 +126,49 @@ function onCadenceChange(id: string) {
 }
 
 const expanding = ref(false)
-const pathKey = (p: string) => p.replace(/\\/g, '/')
 
 // Writer: per browser like the seed policy, never per clip (form_state does
 // not carry it), so loading a clip never changes it. See the Writer pick below.
 const WRITER_STORAGE_KEY = 'metascan.i2v.writer.v1'
+
+// "Add non-diegetic music": per browser like the writer, never per clip (the
+// prompt text already says what a clip had). Off, the prompt's music field is
+// N/A: in the box at once, in every prompt the writer writes, and in what
+// Generate sends. On again, the music the writer last wrote comes back.
+const MUSIC_STORAGE_KEY = 'metascan.i2v.music.v1'
+function loadMusicChoice(): boolean {
+  try {
+    return localStorage.getItem(MUSIC_STORAGE_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+const addMusic = ref(loadMusicChoice())
+// What the writer (or the box, before it was turned off) had in the music
+// field: what turning the checkbox back on restores. Null when unknown.
+const heldMusic = ref<string | null>(null)
+
+function setAddMusic(on: boolean) {
+  addMusic.value = on
+  try {
+    localStorage.setItem(MUSIC_STORAGE_KEY, on ? 'on' : 'off')
+  } catch {
+    // storage unavailable: the choice lasts for this session
+  }
+  const current = musicOf(prompt.value)
+  if (current === null) return // no music field (empty or hand-written box)
+  if (!on) {
+    if (current !== NO_MUSIC) heldMusic.value = current
+    prompt.value = withoutMusic(prompt.value)
+  } else if (current === NO_MUSIC && heldMusic.value) {
+    prompt.value = withMusic(prompt.value, heldMusic.value)
+  }
+}
+
+// The box text as Generate sends it: music N/A while the checkbox is off.
+function promptToSend(text: string): string {
+  return addMusic.value ? text : withoutMusic(text)
+}
 
 // The held draft stops describing the prompt when the idea or cadence it was
 // written for changes (the source image and a selected clip clear it in the
@@ -384,8 +435,10 @@ async function onExpandPrompt() {
       duration_s: durationS.value,
       template_id: templateId.value || null,
       writer: writer.value,
+      music: addMusic.value,
     })
     prompt.value = res.prompt
+    heldMusic.value = res.music
     warnings.value = res.warnings
     store.setDraft({
       text: res.prompt,
@@ -537,6 +590,7 @@ function loadClip(v: I2vVideo) {
     missingTemplateNote.value = ''
   }
   warnings.value = []
+  heldMusic.value = null
   selectedId.value = v.id
   savedSnapshot = JSON.stringify(currentForm())
   saveFailed.value = false
@@ -583,6 +637,7 @@ let switching = false
 // A click on a clip in either list. The tile waits out the double-click
 // window (useDelayedClick), so a double-click never reaches here.
 async function onSelectClip(v: I2vVideo) {
+  pending.clear() // a clip click goes back to the form
   if (v.id === selectedId.value) return
   if (!ready.value) {
     toast.show('Still loading', 'info', 3000)
@@ -664,9 +719,53 @@ const canCancel = computed(() => store.sourceBatches.length > 0 || store.activeJ
 const runStatus = computed(() =>
   store.sourceBatches.map(
     (b: I2vBatch) =>
-      `Batch ${b.batch}/${b.total_batches} · ${b.phase === 'writing' ? 'writing prompt' : 'rendering'}`,
+      `Prompt ${b.batch}/${b.total_batches} · ${b.phase === 'writing' ? 'writing' : 'rendering'}`,
   ),
 )
+
+// ---- a placeholder tile, read-only ---------------------------------------------
+// A click on a job tile shows what that video was submitted with in place of
+// the form; the form is left as it was and comes back with "Back to the form".
+const pending = usePendingJob(() => store.jobs, getI2vPendingJob)
+
+function fmt(n: number | null | undefined, unit = ''): string | null {
+  return n === null || n === undefined ? null : `${n}${unit}`
+}
+
+const pendingRows = computed<PendingJobRow[]>(() => {
+  const j: I2vPendingJob | null = pending.info.value
+  if (!j) return []
+  const cadence = j.template_id
+    ? (store.templates.find((t) => t.id === j.template_id)?.name ?? j.template_id)
+    : 'Single take'
+  return [
+    { label: 'Caption', value: j.caption, multiline: true },
+    { label: 'Prompt', value: j.prompt, multiline: true },
+    { label: 'Cadence', value: j.caption === null && j.template_id === null ? null : cadence },
+    { label: 'Duration', value: fmt(j.duration_s, ' s') },
+    {
+      label: 'Quality',
+      value: j.quality === 'quality' ? 'High quality' : j.quality === 'fast' ? 'Fast (turbo)' : null,
+    },
+    { label: 'Steps', value: fmt(j.steps) },
+    {
+      label: 'Size',
+      value: j.width && j.height
+        ? `${j.megapixels != null ? `${j.megapixels} MP · ` : ''}${j.width}×${j.height}`
+        : fmt(j.megapixels, ' MP'),
+    },
+    { label: 'Seed', value: fmt(j.seed) },
+    {
+      label: 'LoRAs',
+      value: j.loras.length ? j.loras.map((l) => `${l.name} × ${l.strength}`).join('\n') : 'none',
+      multiline: j.loras.length > 1,
+    },
+    { label: 'Writer', value: j.writer_id ? `${j.writer_id}${j.writer_model ? ` (${j.writer_model})` : ''}` : null },
+    { label: 'Queued at', value: j.created_at ? formatI2vTimestamp(j.created_at) : null },
+  ]
+})
+
+const pendingStatus = computed(() => `Queued video · ${jobStateText(pending.chip.value)}`)
 
 const SOURCE_DELETED_NOTE =
   "This clip's source image was deleted, so it can't be generated again."
@@ -674,6 +773,10 @@ const SOURCE_DELETED_NOTE =
 async function onGenerate() {
   const sourcePath = store.sourcePath
   if (!ready.value || !sourcePath || !store.source) return
+  // Music off: the box shows what is sent (its music field N/A).
+  if (prompt.value.trim() && promptToSend(prompt.value) !== prompt.value) {
+    prompt.value = promptToSend(prompt.value)
+  }
   const text = prompt.value.trim()
   const signature = requestSignature()
   // Only a run that would repeat one identical render asks: box text, one
@@ -722,6 +825,7 @@ async function onGenerate() {
       writer: writer.value,
       template_id: templateId.value || null,
       category_ids: [...categoryIds.value],
+      music: addMusic.value,
       ...(heldDraft
         ? {
             writer_id: heldDraft.writer_id,
@@ -891,6 +995,8 @@ const viewerMedia = computed<Media[]>(() => {
                 v-for="[jobId, chip] in store.jobs"
                 :key="'job-' + jobId"
                 :chip="chip"
+                :selected="pending.selectedJobId.value === jobId"
+                @select="pending.toggle(jobId)"
                 @cancel="onCancelJob(jobId)"
                 @dismiss="store.dismissJob(jobId)"
               />
@@ -902,6 +1008,18 @@ const viewerMedia = computed<Media[]>(() => {
              gutter. The editing bar sticks to its top and the run row to its
              bottom. -->
         <div class="i2v-main">
+          <!-- A selected placeholder tile: what its video was submitted with,
+               read-only, in place of the form (which keeps its values). -->
+          <PendingJobDetails
+            v-if="pending.selectedJobId.value !== null"
+            :status="pendingStatus"
+            :rows="pendingRows"
+            :loading="pending.loading.value"
+            :error="pending.error.value"
+            @close="pending.clear()"
+          />
+          <!-- Hidden, not unmounted: the boxes keep their state (undo, scroll). -->
+          <div v-show="pending.selectedJobId.value === null" class="form-wrap">
           <!-- Shown only while a clip is selected: says where edits are going.
                With no clip selected the form is an unsaved scratch area. -->
           <div v-if="selectedVideo" class="i2v-top">
@@ -953,14 +1071,37 @@ const viewerMedia = computed<Media[]>(() => {
             }}</span>
           </div>
 
-          <label class="fld">
-            <span>Idea</span>
+          <div class="sec-head">
+            <label class="sec-title" for="i2v-caption">Caption</label>
+            <label
+              class="check"
+              title="Off: the prompt's non_diegetic_music field is N/A (in the box, in every prompt the writer writes, and in what Generate sends). On: it carries the music the writer wrote."
+            >
+              <input
+                type="checkbox"
+                :checked="addMusic"
+                @change="setAddMusic(($event.target as HTMLInputElement).checked)"
+              />
+              Add non-diegetic music
+            </label>
+          </div>
+          <TextEditPopup
+            class="area-pop"
+            title="Caption"
+            width="700px"
+            :rows="12"
+            multiline
+            :value="idea"
+            @save="idea = $event"
+          >
             <textarea
+              id="i2v-caption"
               v-model="idea"
+              class="area"
               rows="3"
-              placeholder="Short idea for the video (optional)"
+              placeholder="Describe the video (optional): the writer turns it into the prompt"
             />
-          </label>
+          </TextEditPopup>
           <div class="writer-row">
             <label class="inline-pick" title="Who writes the prompt: Base (the unguided prompt-writer model) or one of your trained writers (name · date · pass rate)">
               <span>Writer</span>
@@ -984,7 +1125,7 @@ const viewerMedia = computed<Media[]>(() => {
               :title="sourceMedia ? '' : SOURCE_DELETED_NOTE"
               @click="onExpandPrompt"
             >
-              {{ expanding ? 'Generating prompt…' : 'Generate prompt' }}
+              {{ expanding ? 'Writing prompt…' : 'Generate Prompt' }}
             </button>
           </div>
 
@@ -1073,9 +1214,9 @@ const viewerMedia = computed<Media[]>(() => {
               <div class="counts">
                 <label
                   class="fld fld-inline"
-                  title="How many prompts one Generate uses. With text in the Prompt box, batch 1 renders it; the others are written."
+                  title="How many prompts one Generate uses. With text in the Prompt box, prompt 1 is that text; the others are written for the caption."
                 >
-                  <span>Batch</span>
+                  <span>Prompts</span>
                   <input
                     v-model.number="batchSize"
                     type="number"
@@ -1085,14 +1226,15 @@ const viewerMedia = computed<Media[]>(() => {
                     @change="batchSize = effectiveBatch"
                   />
                 </label>
+                <span class="times" aria-hidden="true">×</span>
                 <label
                   class="fld fld-inline"
                   :class="{ 'fld-off': countIgnored }"
                   :title="countIgnored
                     ? 'Ignored while the seed is Fixed: the same seed would render the same video again'
-                    : 'How many videos to render for each prompt'"
+                    : 'How many videos (one seed each) to render for each prompt'"
                 >
-                  <span>Count</span>
+                  <span>Videos</span>
                   <input
                     v-model.number="generateCount"
                     type="number"
@@ -1134,6 +1276,7 @@ const viewerMedia = computed<Media[]>(() => {
               <li v-for="w in store.warnings" :key="w">⚠ {{ w }}</li>
             </ul>
           </footer>
+          </div>
         </div>
 
         <!-- Right: every I2V video in the library, newest first. -->
@@ -1426,4 +1569,51 @@ const viewerMedia = computed<Media[]>(() => {
 .cadence-chip.cut { border-color: var(--primary-color, #6366f1); color: var(--text-color); }
 .cadence-chip.j_cut { border-style: dashed; border-color: var(--primary-color, #6366f1); color: var(--text-color); }
 .dims-hint.warn { color: #c33; }
+
+/* The section titles, the checkbox and the box as T2IDialog draws them. */
+.sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+.sec-head .sec-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-color-secondary);
+}
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+  cursor: pointer;
+}
+.area {
+  width: 100%;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-color);
+  background: var(--surface-ground);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+  resize: vertical;
+}
+.area:focus { outline: none; border-color: var(--primary-color); }
+/* TextEditPopup centres its button against an input; beside a textarea it
+   sits at the top and the box fills the row. */
+.area-pop { align-items: flex-start; width: 100%; }
+.area-pop .area { flex: 1; min-width: 0; }
+.counts .times { align-self: center; color: var(--text-color-secondary); font-size: 12px; }
+
+/* The form's wrapper takes no box of its own: its sticky rows stay children of
+   the scrolling column as far as layout is concerned. */
+.form-wrap { display: contents; }
 </style>

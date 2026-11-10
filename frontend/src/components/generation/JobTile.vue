@@ -4,9 +4,11 @@ import { jobChipLabel, type JobChip } from '../../types/jobs'
 
 // A dashed placeholder tile for a job that has not produced its file yet:
 // queued / running with progress, or failed with the server's error text
-// shown verbatim. The ✕ cancels a live job and dismisses a failed one.
-const props = defineProps<{ chip: JobChip }>()
-const emit = defineEmits<{ cancel: []; dismiss: [] }>()
+// shown verbatim. The ✕ cancels a live job and dismisses a failed one. A
+// click on the tile selects it (`select`), so the dialog can show what the
+// job was submitted with, read-only.
+const props = defineProps<{ chip: JobChip; selected?: boolean }>()
+const emit = defineEmits<{ cancel: []; dismiss: []; select: [] }>()
 
 const failed = computed(() => props.chip.state === 'failed')
 const label = computed(() => jobChipLabel(props.chip))
@@ -20,15 +22,21 @@ function onClose() {
 <template>
   <div
     class="job-tile"
-    :class="{ failed }"
-    :title="failed ? (chip.error ?? undefined) : undefined"
+    :class="{ failed, selected }"
+    role="button"
+    tabindex="0"
+    :aria-pressed="!!selected"
+    :title="failed ? (chip.error ?? undefined) : 'Show what this job was submitted with'"
+    @click="emit('select')"
+    @keydown.enter.prevent="emit('select')"
+    @keydown.space.prevent="emit('select')"
   >
     <button
       type="button"
       class="job-x"
       :title="failed ? 'Dismiss' : 'Cancel this job'"
       :disabled="!failed && !!chip.cancelling"
-      @click="onClose"
+      @click.stop="onClose"
     >✕</button>
     <span class="job-label">{{ label }}</span>
     <span v-if="failed && chip.error" class="job-error">{{ chip.error }}</span>
@@ -52,6 +60,21 @@ function onClose() {
   border-radius: 6px;
   font-size: 13px;
   color: var(--text-color-secondary);
+  cursor: pointer;
+}
+
+.job-tile:hover {
+  border-color: var(--text-color-secondary);
+}
+
+.job-tile.selected {
+  outline: 2px solid var(--primary-color, #6366f1);
+  outline-offset: 1px;
+}
+
+.job-tile:focus-visible {
+  outline: 2px solid var(--primary-color, #6366f1);
+  outline-offset: 1px;
 }
 
 .job-tile.failed {
