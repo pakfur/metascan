@@ -14,6 +14,9 @@ import { promptViewState, type I2vPromptView } from '../../utils/i2vPromptView'
 // document stays ONE string: the toggle is a view switch and never writes
 // `modelValue`; each editable panel splices only its own span back in.
 const prompt = defineModel<string>({ required: true })
+// `readonly`: every box shows its text (still selectable for copying) and
+// none can be edited; the RAW / STRUCTURED view and Copy still work.
+const props = withDefaults(defineProps<{ readonly?: boolean }>(), { readonly: false })
 
 const toast = useToast()
 
@@ -111,16 +114,17 @@ async function copyPrompt(): Promise<void> {
         <textarea :value="sections.header" rows="3" readonly spellcheck="false" />
       </div>
       <div class="fld i2v-panel">
-        <span>Prompt (editable — Generate uses this text)</span>
+        <span>{{ props.readonly ? 'Prompt' : 'Prompt (editable — Generate uses this text)' }}</span>
         <TextEditPopup
           title="Prompt"
           width="900px"
           :rows="22"
           multiline
+          :disabled="props.readonly"
           :value="promptBody"
           @save="promptBody = $event"
         >
-          <textarea v-model="promptBody" rows="8" spellcheck="false" />
+          <textarea v-model="promptBody" rows="8" :readonly="props.readonly" spellcheck="false" />
         </TextEditPopup>
       </div>
       <div class="fld i2v-panel">
@@ -130,10 +134,11 @@ async function copyPrompt(): Promise<void> {
           width="700px"
           :rows="8"
           multiline
+          :disabled="props.readonly"
           :value="soundscapeBody"
           @save="soundscapeBody = $event"
         >
-          <textarea v-model="soundscapeBody" rows="2" spellcheck="false" />
+          <textarea v-model="soundscapeBody" rows="2" :readonly="props.readonly" spellcheck="false" />
         </TextEditPopup>
       </div>
       <div class="fld i2v-panel">
@@ -143,25 +148,27 @@ async function copyPrompt(): Promise<void> {
           width="700px"
           :rows="8"
           multiline
+          :disabled="props.readonly"
           :value="musicBody"
           @save="musicBody = $event"
         >
-          <textarea v-model="musicBody" rows="2" spellcheck="false" />
+          <textarea v-model="musicBody" rows="2" :readonly="props.readonly" spellcheck="false" />
         </TextEditPopup>
       </div>
     </div>
     <div v-else class="fld i2v-panel i2v-prompt">
-      <span>MiniMax I2VA prompt (editable — Generate uses this text)</span>
+      <span>{{ props.readonly ? 'MiniMax I2VA prompt' : 'MiniMax I2VA prompt (editable — Generate uses this text)' }}</span>
       <div class="ipe-raw">
         <TextEditPopup
           title="Prompt"
           width="900px"
           :rows="22"
           multiline
+          :disabled="props.readonly"
           :value="prompt"
           @save="prompt = $event"
         >
-          <textarea v-model="prompt" rows="10" spellcheck="false" />
+          <textarea v-model="prompt" rows="10" :readonly="props.readonly" spellcheck="false" />
         </TextEditPopup>
         <button
           type="button"

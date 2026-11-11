@@ -63,14 +63,6 @@ export interface ThumbItem {
   blind?: boolean
 }
 
-/** One read-only field of a selected placeholder tile (PendingJobDetails). */
-export interface PendingJobRow {
-  label: string
-  // null / '' shows as "—" (unknown, e.g. the server restarted since).
-  value: string | null
-  multiline?: boolean
-}
-
 /**
  * The pass a new progress value belongs to: the previous chip's pass, plus
  * one when the value went back down (the next sampler run started again at

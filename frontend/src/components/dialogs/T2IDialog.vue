@@ -41,10 +41,9 @@ import { ApiError } from '../../api/client'
 import { listPresets } from '../../api/comfy'
 import { fetchCaptionTokens, getT2iPendingJob } from '../../api/t2i'
 import { t2iWriterLabel, type CaptionToken, type T2iPendingJob } from '../../types/t2i'
-import PendingJobDetails from '../generation/PendingJobDetails.vue'
 import TextEditPopup from '../storyboard/TextEditPopup.vue'
 import { usePendingJob } from '../../composables/usePendingJob'
-import { jobStateText, type PendingJobRow } from '../../types/jobs'
+import { jobStateText } from '../../types/jobs'
 import TokenTextarea from '../generation/TokenTextarea.vue'
 import { useFoldersStore } from '../../stores/folders'
 import { useT2iStore } from '../../stores/t2i'
@@ -210,6 +209,45 @@ watch(connected, (up) => {
   if (up && ready.value) void store.reattach()
 })
 
+// ---- a placeholder tile, shown in the form --------------------------------------------------------
+// A click on a job tile shows what that image was submitted with in the form's
+// own boxes, read-only, the way a Random run shows its batch: the boxes display
+// the job (the shown* values below) and the form itself is never written. So
+// nothing autosaves into a selected image, the scratch draft is untouched, and
+// the form is exactly as it was on "Back to the form", a tile click or the
+// tile leaving (the job finished, was cancelled or dismissed).
+const pending = usePendingJob(() => store.jobs, getT2iPendingJob)
+const viewingJob = computed(() => pending.selectedJobId.value !== null)
+const job = computed<T2iPendingJob | null>(() => (viewingJob.value ? pending.info.value : null))
+
+const jobModel = computed(() => {
+  const id = job.value?.model
+  return id ? (models.value.find((m) => m.id === id)?.label ?? id) : 'unknown'
+})
+const jobWorkflow = computed(() => {
+  const id = job.value?.preset_id
+  return id == null ? 'unknown' : (presets.value.find((p) => p.id === id)?.name ?? `Workflow #${id}`)
+})
+const jobSize = computed(() => {
+  const j = job.value
+  if (!j || j.megapixels == null) return 'unknown'
+  return j.width && j.height ? `${j.megapixels} MP · ${j.width}×${j.height}` : `${j.megapixels} MP`
+})
+const jobViewText = computed(() => {
+  if (pending.error.value) return pending.error.value
+  if (pending.loading.value) return 'Loading the queued image…'
+  const j = job.value
+  const parts = [`Queued image · ${jobStateText(pending.chip.value)}`]
+  if (j?.created_at) parts.push(`queued ${formatT2iTimestamp(j.created_at)}`)
+  if (j?.writer_id) {
+    const who = t2iWriterLabel(j.writer_id, store.adaptersLoaded ? store.adapters : null) ?? j.writer_id
+    parts.push(`written by ${who}${j.variant_index != null ? ` · prompt ${j.variant_index + 1}` : ''}`)
+  }
+  if (j && j.caption === null && j.model === null) parts.push('caption and model not kept (server restarted)')
+  parts.push('read-only')
+  return parts.join(' · ')
+})
+
 // ---- Random batches take over the boxes ----------------------------------------------------
 // While a Random batch runs, Caption / Prompt / Negative / Aspect / Seed are
 // read-only live views of it. The server decides what to show: the batch being
@@ -219,6 +257,8 @@ watch(connected, (up) => {
 // last batch's values are copied in (a finished batch hands its values over
 // exactly once).
 const randomLocked = computed(() => store.randomBatch !== null)
+// Every box read-only: a Random run holds them, or a job tile is on show.
+const locked = computed(() => randomLocked.value || viewingJob.value)
 const step = computed(() => (randomLocked.value ? store.currentStep : null))
 // A run whose first batch is already known to the dialog (the user's own prompt,
 // or their caption to write a prompt for) has nothing to wait for. From the moment
@@ -229,15 +269,29 @@ const step = computed(() => (randomLocked.value ? store.currentStep : null))
 const supplyingFirstStep = ref(false)
 const holdForm = computed(() => randomLocked.value && step.value === null && supplyingFirstStep.value)
 const liveBoxes = computed(() => randomLocked.value && !holdForm.value)
-const shownCaption = computed(() => (liveBoxes.value ? (step.value?.caption ?? '') : form.caption))
-const shownPrompt = computed(() => (liveBoxes.value ? (step.value?.prompt ?? '') : form.prompt))
-const shownNegative = computed(() => (liveBoxes.value ? (step.value?.negative ?? '') : form.negative))
-const shownAspect = computed(() => (step.value ? step.value.aspect_ratio : form.aspect))
+const shownCaption = computed(() =>
+  viewingJob.value ? (job.value?.caption ?? '') : liveBoxes.value ? (step.value?.caption ?? '') : form.caption,
+)
+const shownPrompt = computed(() =>
+  viewingJob.value ? (job.value?.prompt ?? '') : liveBoxes.value ? (step.value?.prompt ?? '') : form.prompt,
+)
+const shownNegative = computed(() =>
+  viewingJob.value ? (job.value?.negative ?? '') : liveBoxes.value ? (step.value?.negative ?? '') : form.negative,
+)
+const shownAspect = computed(() =>
+  viewingJob.value ? (job.value?.aspect_ratio ?? '') : step.value ? step.value.aspect_ratio : form.aspect,
+)
 // The seed box always holds the seed the next image will use. While a Random run
 // renders that is the image being rendered; the form's own seed was advanced to
 // the next unused one when Generate was pressed, so it is right the moment the
 // boxes unlock, and after a reload or a dialog closed mid-run.
-const shownSeed = computed(() => (randomLocked.value ? (store.liveSeed ?? form.seed) : form.seed))
+const shownSeed = computed(() =>
+  viewingJob.value
+    ? (job.value?.seed ?? form.seed)
+    : randomLocked.value
+      ? (store.liveSeed ?? form.seed)
+      : form.seed,
+)
 const stepWarnings = computed(() => step.value?.warnings ?? [])
 
 // The flag means exactly "waiting for the first step's frame": it ends when a
@@ -397,6 +451,7 @@ function handledAdapterError(e: unknown): boolean {
 // the running step's while a Random batch has the boxes. Display only.
 const promptDirection = ref<{ text: string; parts: string[] } | null>(null)
 const shownDirection = computed(() => {
+  if (viewingJob.value) return null
   if (liveBoxes.value) {
     const s = step.value
     return s?.direction ? { text: s.direction, parts: s.direction_parts } : null
@@ -567,7 +622,7 @@ function onCaptionInput(text: string) {
 // box. Shown only while they still belong to it and nothing has the boxes.
 const draftSet = computed(() => {
   const set = store.drafts
-  return set && !randomLocked.value && set.caption === form.caption && set.entries.length > 1 ? set : null
+  return set && !locked.value && set.caption === form.caption && set.entries.length > 1 ? set : null
 })
 const draftLabel = computed(() => {
   const set = draftSet.value
@@ -736,7 +791,7 @@ const firstBatchHint = computed(() => {
 })
 
 const blocker = computed(() =>
-  generateBlocker(form, {
+  viewingJob.value ? 'Showing a queued image: go back to the form to generate' : generateBlocker(form, {
     ready: ready.value,
     csvAvailable: csvAvailable.value,
     randomRunning: randomLocked.value,
@@ -855,54 +910,6 @@ const gridItems = computed(() => {
 // are, and nothing is started (a stored Random mode only restores the mode
 // and its filter). The grid only reports the FIRST click of a double-click,
 // so opening the viewer never selects twice.
-// ---- a placeholder tile, read-only ---------------------------------------------------------------
-// A click on a job tile shows what that image was submitted with in place of
-// the form; the form is left as it was and comes back with "Back to the form".
-const pending = usePendingJob(() => store.jobs, getT2iPendingJob)
-
-function fmt(n: number | null | undefined, unit = ''): string | null {
-  return n === null || n === undefined ? null : `${n}${unit}`
-}
-
-const pendingRows = computed<PendingJobRow[]>(() => {
-  const j: T2iPendingJob | null = pending.info.value
-  if (!j) return []
-  const model = j.model ? (models.value.find((m) => m.id === j.model)?.label ?? j.model) : null
-  const workflow =
-    j.preset_id == null
-      ? null
-      : (presets.value.find((p) => p.id === j.preset_id)?.name ?? `Workflow #${j.preset_id}`)
-  const rows: PendingJobRow[] = [{ label: 'Caption', value: j.caption, multiline: true }]
-  if (j.resolved_caption) rows.push({ label: 'Resolved caption', value: j.resolved_caption, multiline: true })
-  rows.push({ label: 'Prompt', value: j.prompt, multiline: true })
-  if (j.negative) rows.push({ label: 'Negative prompt', value: j.negative, multiline: true })
-  rows.push(
-    { label: 'Model', value: model },
-    { label: 'Workflow', value: workflow },
-    {
-      label: 'Size',
-      value: j.width && j.height
-        ? `${j.megapixels != null ? `${j.megapixels} MP · ` : ''}${j.width}×${j.height}${j.aspect_ratio ? ` · ${j.aspect_ratio}` : ''}`
-        : fmt(j.megapixels, ' MP'),
-    },
-    { label: 'Seed', value: fmt(j.seed) },
-    {
-      label: 'LoRAs',
-      value: j.loras.length ? j.loras.map((l) => `${l.name} × ${l.strength}`).join('\n') : 'none',
-      multiline: j.loras.length > 1,
-    },
-    {
-      label: 'Writer',
-      value: j.writer_id
-        ? `${t2iWriterLabel(j.writer_id, store.adaptersLoaded ? store.adapters : null) ?? j.writer_id}` +
-          (j.variant_index != null ? ` · prompt ${j.variant_index + 1}` : '')
-        : null,
-    },
-  )
-  return rows
-})
-
-const pendingStatus = computed(() => `Queued image · ${jobStateText(pending.chip.value)}`)
 
 function onSelectTile(item: ThumbItem) {
   pending.clear() // a tile click goes back to the form
@@ -1084,25 +1091,24 @@ onBeforeUnmount(() => {
              says where edits are going; with none selected the form is an
              unsaved scratch area. -->
         <div class="t2i-main">
-          <!-- A selected placeholder tile: what its image was submitted with,
-               read-only, in place of the form (which keeps its values). -->
-          <PendingJobDetails
-            v-if="pending.selectedJobId.value !== null"
-            :status="pendingStatus"
-            :rows="pendingRows"
-            :loading="pending.loading.value"
-            :error="pending.error.value"
-            @close="pending.clear()"
-          />
-          <!-- Hidden, not unmounted: the boxes keep their state (undo, scroll). -->
-          <div v-show="pending.selectedJobId.value === null" class="form-wrap">
           <div class="t2i-top">
             <div v-if="!store.config && store.configError" class="bar failed" role="alert">
               <span>Couldn't load the Text to Image settings: {{ store.configError }}</span>
               <button type="button" class="link-btn" @click="retryLoad">Retry</button>
             </div>
             <p v-else-if="!ready" class="note">Loading…</p>
-            <div v-if="store.selectedImage" class="bar" :class="{ failed: saveFailed }" role="status">
+            <!-- A selected placeholder tile: the boxes show what its image was
+                 submitted with, read-only; the form behind them is untouched. -->
+            <div v-if="viewingJob" class="bar" :class="{ failed: pending.error.value }" role="status">
+              <span>{{ jobViewText }}</span>
+              <button
+                type="button"
+                class="link-btn"
+                title="Show the form again, as it was before this job was selected"
+                @click="pending.clear()"
+              >Back to the form</button>
+            </div>
+            <div v-else-if="store.selectedImage" class="bar" :class="{ failed: saveFailed }" role="status">
               <span v-if="saveFailed">
                 Couldn't save your changes to this image — they'll be retried on the next edit.
               </span>
@@ -1162,7 +1168,7 @@ onBeforeUnmount(() => {
                 <div class="source">
                   <div class="seg" role="radiogroup" aria-label="Caption source">
                     <label class="seg-opt">
-                      <input v-model="form.mode" type="radio" name="t2i-mode" value="manual" :disabled="randomLocked" />
+                      <input v-model="form.mode" type="radio" name="t2i-mode" value="manual" :disabled="locked" />
                       <span>Manual</span>
                     </label>
                     <label class="seg-opt" :title="csvAvailable ? '' : (store.config?.csv.error ?? 'The caption file is not available')">
@@ -1171,7 +1177,7 @@ onBeforeUnmount(() => {
                         type="radio"
                         name="t2i-mode"
                         value="random"
-                        :disabled="randomLocked || !csvAvailable"
+                        :disabled="locked || !csvAvailable"
                       />
                       <span>Random Caption</span>
                     </label>
@@ -1181,7 +1187,7 @@ onBeforeUnmount(() => {
                     class="icon-btn dice"
                     title="Load a random caption from the caption file (this empties the prompt, so Generate writes one for it)"
                     aria-label="Roll a random caption"
-                    :disabled="rolling || randomLocked || !csvAvailable"
+                    :disabled="rolling || locked || !csvAvailable"
                     @click="onRoll"
                   >🎲</button>
                   <span ref="filterAnchor" class="filter-anchor">
@@ -1189,7 +1195,7 @@ onBeforeUnmount(() => {
                       type="button"
                       class="btn"
                       :aria-expanded="filterOpen"
-                      :disabled="!csvAvailable"
+                      :disabled="!csvAvailable || viewingJob"
                       @click="filterOpen = !filterOpen"
                     >Filter<span v-if="filterActive > 0" class="badge">{{ filterActive }}</span></button>
                     <CaptionFilterPopover
@@ -1211,7 +1217,7 @@ onBeforeUnmount(() => {
                 width="760px"
                 :rows="14"
                 multiline
-                :disabled="randomLocked"
+                :disabled="locked"
                 :value="shownCaption"
                 @save="onCaptionInput"
               >
@@ -1221,7 +1227,7 @@ onBeforeUnmount(() => {
                   :rows="3"
                   :tokens="captionTokens"
                   :value="shownCaption"
-                  :readonly="randomLocked"
+                  :readonly="locked"
                   :placeholder="randomLocked ? 'A caption is drawn from the caption file for each caption of the run…' : 'Describe the image. Type __ for character tokens like __ALICE__ and __HAIR__: they are filled in for you, and two or more characters keep their traits apart.'"
                   @input="onCaptionInput"
                 />
@@ -1231,7 +1237,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="link-btn fold"
                   :aria-expanded="resolvedOpen"
-                  :disabled="randomLocked"
+                  :disabled="locked"
                   @click="toggleResolved"
                 >{{ resolvedOpen ? '▾' : '▸' }} Resolved caption</button>
                 <div class="writer-row">
@@ -1239,7 +1245,7 @@ onBeforeUnmount(() => {
                     <span>Writer</span>
                     <select
                       :value="writer"
-                      :disabled="randomLocked"
+                      :disabled="locked"
                       @change="setWriter(($event.target as HTMLSelectElement).value)"
                     >
                       <option v-for="w in builtinOptions" :key="w.id" :value="w.id">{{ w.label }}</option>
@@ -1255,13 +1261,13 @@ onBeforeUnmount(() => {
                   <button
                     type="button"
                     class="btn"
-                    :disabled="generating || submitting || randomLocked || !form.caption.trim() || !form.model"
+                    :disabled="generating || submitting || locked || !form.caption.trim() || !form.model"
                     :title="promptCount > 1 ? `Writes ${promptCount} prompts (PROMPTS) for the caption, to read and edit before rendering` : 'Writes the prompt for the caption, to read and edit before rendering'"
                     @click="onGeneratePrompt"
                   >{{ generating ? (promptCount > 1 ? 'Writing prompts…' : 'Writing prompt…') : (promptCount > 1 ? 'Generate Prompts' : 'Generate Prompt') }}</button>
                 </div>
               </div>
-              <div v-if="resolvedOpen && !randomLocked" class="resolved">
+              <div v-if="resolvedOpen && !locked" class="resolved">
                 <p v-if="!form.caption.trim()" class="note">Nothing to resolve yet: write a caption first.</p>
                 <template v-else-if="resolved">
                   <textarea
@@ -1279,6 +1285,16 @@ onBeforeUnmount(() => {
                 </template>
                 <p v-else class="note">Resolving…</p>
               </div>
+              <textarea
+                v-if="job?.resolved_caption"
+                class="area resolved-text"
+                rows="4"
+                readonly
+                spellcheck="false"
+                aria-label="Resolved caption"
+                title="The caption as the writer saw it"
+                :value="job.resolved_caption"
+              />
             </section>
 
             <section class="sec">
@@ -1309,7 +1325,7 @@ onBeforeUnmount(() => {
                   <input
                     type="checkbox"
                     :checked="useDirections"
-                    :disabled="randomLocked"
+                    :disabled="locked"
                     @change="setDirections(($event.target as HTMLInputElement).checked)"
                   />
                   Caption directions
@@ -1321,7 +1337,7 @@ onBeforeUnmount(() => {
                 width="900px"
                 :rows="22"
                 multiline
-                :disabled="randomLocked"
+                :disabled="locked"
                 :value="shownPrompt"
                 @save="form.prompt = $event"
               >
@@ -1331,18 +1347,18 @@ onBeforeUnmount(() => {
                   rows="6"
                   spellcheck="false"
                   :value="shownPrompt"
-                  :readonly="randomLocked"
+                  :readonly="locked"
                   :placeholder="randomLocked ? 'The prompts are written for each caption…' : 'The text the image model receives. Write it here, or press Generate Prompt to have it written from the caption.'"
                   @input="form.prompt = ($event.target as HTMLTextAreaElement).value"
                 />
               </TextEditPopup>
-              <ul v-if="promptWarnings.length || stepWarnings.length" class="lint">
+              <ul v-if="!viewingJob && (promptWarnings.length || stepWarnings.length)" class="lint">
                 <li v-for="w in [...promptWarnings, ...stepWarnings]" :key="w">⚠ {{ w }}</li>
               </ul>
               <p v-if="shownDirection" class="direction" :title="shownDirection.text">
                 Direction · {{ shownDirection.parts.join(' · ') }}: {{ shownDirection.text }}
               </p>
-              <template v-if="hasNegative">
+              <template v-if="viewingJob ? !!job?.negative : hasNegative">
                 <div>
                   <button
                     type="button"
@@ -1358,7 +1374,7 @@ onBeforeUnmount(() => {
                   width="760px"
                   :rows="12"
                   multiline
-                  :disabled="randomLocked"
+                  :disabled="locked"
                   :value="shownNegative"
                   @save="form.negative = $event"
                 >
@@ -1368,7 +1384,7 @@ onBeforeUnmount(() => {
                     spellcheck="false"
                     aria-label="Negative prompt"
                     :value="shownNegative"
-                    :readonly="randomLocked"
+                    :readonly="locked"
                     @input="form.negative = ($event.target as HTMLTextAreaElement).value"
                   />
                 </TextEditPopup>
@@ -1380,13 +1396,15 @@ onBeforeUnmount(() => {
             <section class="sec settings">
               <label class="fld f-model">
                 <span>Model</span>
-                <select :value="form.model" @change="onModelChange(($event.target as HTMLSelectElement).value)">
+                <select v-if="viewingJob" disabled><option>{{ jobModel }}</option></select>
+                <select v-else :value="form.model" @change="onModelChange(($event.target as HTMLSelectElement).value)">
                   <option v-for="m in modelOptions" :key="m.id" :value="m.id">{{ m.label }}</option>
                 </select>
               </label>
               <label class="fld f-workflow">
                 <span>Workflow</span>
-                <select v-model="form.presetId">
+                <select v-if="viewingJob" disabled><option>{{ jobWorkflow }}</option></select>
+                <select v-else v-model="form.presetId">
                   <option :value="null" disabled>Choose a workflow…</option>
                   <option v-if="presetMissing" :value="form.presetId" disabled>Workflow #{{ form.presetId }} (not found)</option>
                   <option v-for="p in presets" :key="p.id" :value="p.id">{{ p.name }}</option>
@@ -1395,7 +1413,8 @@ onBeforeUnmount(() => {
               </label>
               <label class="fld f-size">
                 <span>Size</span>
-                <select v-model="form.megapixels">
+                <select v-if="viewingJob" disabled><option>{{ jobSize }}</option></select>
+                <select v-else v-model="form.megapixels">
                   <option v-for="m in sizeOptions" :key="m" :value="m">{{ m }} MP</option>
                 </select>
               </label>
@@ -1403,7 +1422,7 @@ onBeforeUnmount(() => {
                 <span>Aspect Ratio</span>
                 <select
                   :value="shownAspect"
-                  :disabled="randomLocked"
+                  :disabled="locked"
                   :title="form.mode === 'random' ? 'A Random batch takes the aspect ratio of each caption' : ''"
                   @change="form.aspect = ($event.target as HTMLSelectElement).value"
                 >
@@ -1416,15 +1435,21 @@ onBeforeUnmount(() => {
                 :seed="shownSeed"
                 :policy="form.seedPolicy"
                 :disabled="randomLocked"
+                :readonly="viewingJob"
                 :max="seedMax"
                 @update:seed="form.seed = $event"
                 @update:policy="form.seedPolicy = $event"
               />
-              <CategorySelect v-model="categoryIds" class="f-categories" />
+              <CategorySelect v-model="categoryIds" class="f-categories" :disabled="viewingJob" />
             </section>
 
             <section class="sec">
-              <LoraListEditor label="LoRAs" :entries="form.loras" @change="form.loras = $event" />
+              <LoraListEditor
+                label="LoRAs"
+                :entries="viewingJob ? (job?.loras ?? []) : form.loras"
+                :readonly="viewingJob"
+                @change="form.loras = $event"
+              />
             </section>
           </fieldset>
 
@@ -1443,7 +1468,7 @@ onBeforeUnmount(() => {
                     :max="maxBatchSize"
                     step="1"
                     :value="shownCaptions"
-                    :disabled="form.mode === 'manual' || randomLocked"
+                    :disabled="form.mode === 'manual' || locked"
                     @change="onCaptionCount"
                   />
                 </label>
@@ -1460,7 +1485,7 @@ onBeforeUnmount(() => {
                     :max="MAX_VARIANTS"
                     step="1"
                     :value="shownPrompts"
-                    :disabled="promptsFixed || randomLocked"
+                    :disabled="promptsFixed || locked"
                     @change="onPromptCount"
                   />
                 </label>
@@ -1477,7 +1502,7 @@ onBeforeUnmount(() => {
                     :max="maxCount"
                     step="1"
                     :value="form.imageCount"
-                    :disabled="randomLocked"
+                    :disabled="locked"
                     @change="onImageCount"
                   />
                 </label>
@@ -1507,7 +1532,6 @@ onBeforeUnmount(() => {
               <li v-for="w in batchWarnings" :key="w">⚠ {{ w }}</li>
             </ul>
           </footer>
-          </div>
         </div>
 
         <!-- The images, newest first, a page of 60 at a time. -->
@@ -2292,7 +2316,6 @@ onBeforeUnmount(() => {
 
 /* The form's wrapper takes no box of its own: its sticky rows stay children of
    the scrolling column as far as layout is concerned. */
-.form-wrap { display: contents; }
 
 /* TextEditPopup centres its button against an input; beside a box it sits at
    the top and the box fills the row. */

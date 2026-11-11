@@ -5,6 +5,7 @@
       <TextEditPopup
         class="lle-name-wrap"
         title="LoRA name"
+        :disabled="readonly"
         :value="entry.name"
         @save="commitNameVal(i, $event)"
       >
@@ -12,6 +13,7 @@
           class="lle-name"
           type="text"
           :list="listId"
+          :readonly="readonly"
           :value="entry.name"
           @change="commitName(i, $event)"
         />
@@ -21,12 +23,16 @@
         type="number"
         step="0.05"
         title="Strength"
+        :readonly="readonly"
         :value="entry.strength"
         @change="commitStrength(i, $event)"
       />
-      <button class="lle-remove" type="button" title="Remove" @click="removeEntry(i)">✕</button>
+      <button v-if="!readonly" class="lle-remove" type="button" title="Remove" @click="removeEntry(i)">✕</button>
     </div>
-    <div v-if="drafting" class="lle-row">
+    <template v-if="readonly">
+      <div v-if="!entries.length" class="lle-none">none</div>
+    </template>
+    <div v-else-if="drafting" class="lle-row">
       <input
         ref="draftInput"
         class="lle-name"
@@ -65,9 +71,12 @@ import { nextTick, onMounted, ref } from 'vue'
 import TextEditPopup from './TextEditPopup.vue'
 import type { LoraEntry } from '../../types/storyboard'
 
+// `readonly`: the rows show their values (still selectable for copying) and
+// nothing can be added, removed or changed.
 const props = defineProps<{
   label: string
   entries: LoraEntry[]
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -192,6 +201,11 @@ function removeEntry(i: number): void {
 .lle-strength:focus {
   outline: none;
   border-color: var(--primary-color);
+}
+
+.lle-none {
+  font-size: 12px;
+  color: var(--text-color-secondary);
 }
 
 .lle-remove {
