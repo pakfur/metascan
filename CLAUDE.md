@@ -4,6 +4,14 @@
 
 Metascan is an AI-generated media browser with metadata extraction, similarity search, and ComfyUI-driven generation and upscaling. It uses a **client-server architecture**: a Python/FastAPI backend handles scanning, database, AI processing, and file serving, while a Vue 3 SPA provides the web UI.
 
+## Private Data — Hands Off
+
+The owner's library data on this PC is private. These rules override any task that seems to need it:
+
+- **Do not read or analyze private data without explicit instruction.** That covers prompt text, images, videos, generated prompts, hindsight briefs, writer-training data (examples, datasets, adapters, scorecards), taste labels and scores, and the databases, snapshots, logs and caches that hold them (`data/`, `logs/`, `~/.metascan/`, the configured scan folders and ComfyUI output roots, `config.json`). Code, tests and docs in the repo are fine to read; a log is fine only when the owner asks for it, and then only the lines the task needs.
+- **Private data never leaves this PC without the owner's explicit approval** — no upload, paste, web request, MCP tool, cloud service, artifact, issue, PR, commit or message carrying it. Approval for one item does not cover the next.
+- **Test with data you generate.** All prompt testing and image / video testing or analysis uses synthetic data made for the purpose (fixtures, generated images, invented prompts, temp databases), never the owner's library. If a task seems to need real data, stop and ask.
+
 ## Quick Reference
 
 ```bash
