@@ -173,7 +173,7 @@
     "class_type": "easy imageDetailTransfer",
     "inputs": {
       "target": [
-        "1",
+        "27",
         0
       ],
       "source": [
@@ -188,6 +188,40 @@
     },
     "_meta": {
       "title": "Tile tone fix: colour from the original, fine detail from the refine (blur_sigma = where they meet)"
+    }
+  },
+  "26": {
+    "class_type": "GetImageSize",
+    "inputs": {
+      "image": [
+        "20",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Refined size"
+    }
+  },
+  "27": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "upscale_method": "bicubic",
+      "width": [
+        "26",
+        0
+      ],
+      "height": [
+        "26",
+        1
+      ],
+      "crop": "disabled"
+    },
+    "_meta": {
+      "title": "Original at the refined size (bicubic) for the detail transfer"
     }
   },
   "30": {

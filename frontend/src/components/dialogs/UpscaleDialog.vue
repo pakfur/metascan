@@ -16,6 +16,7 @@ import {
   defaultPromptSource,
   defaultWorkflowId,
   sameModelFamily,
+  waitingTiles,
   workflowsFor,
   type PromptSource,
   type RefinePrompt,
@@ -89,6 +90,8 @@ const seedless = computed(() => workflow.value !== null && !workflow.value.has_s
 const single = computed(() => seedless.value || seedPolicy.value === 'fixed')
 const maxCount = computed(() => store.config?.max_count ?? 8)
 const busy = computed(() => store.jobs.size > 0 || store.sourceRuns.length > 0)
+// Results ComfyUI has no job for yet: uploading, or waiting for a slot.
+const waiting = computed(() => waitingTiles(store.sourceRuns, store.config?.window ?? 2))
 const paused = computed(() => {
   const state = background.processes.find((p) => p.id === 'upscale')?.state
   return state === 'paused' || state === 'held'
@@ -375,6 +378,14 @@ async function onDiscard(c: UpscaleCandidate) {
   }
 }
 
+async function onCancelRun(batchId: string) {
+  try {
+    await store.cancelRun(batchId)
+  } catch (e) {
+    toast.show(errorText(e), 'warn', 5000)
+  }
+}
+
 async function onCancelAll() {
   try {
     await store.cancelAll()
@@ -405,12 +416,25 @@ function onCountInput(e: Event) {
         <section class="up-side" aria-label="Results">
           <h4 class="sec-title">Results</h4>
           <div class="tiles">
+            <!-- Progress only: an upscale job has nothing to show when selected. -->
             <JobTile
               v-for="[jobId, chip] in store.jobs"
               :key="'job-' + jobId"
               :chip="chip"
+              :selectable="false"
+              hint="Upscaling in ComfyUI"
               @cancel="store.cancelJob(jobId)"
               @dismiss="store.dismissJob(jobId)"
+            />
+            <JobTile
+              v-for="w in waiting"
+              :key="'wait-' + w.key"
+              :chip="{ state: 'queued' }"
+              :selectable="false"
+              :text="w.label"
+              :hint="w.hint"
+              cancel-title="Cancel this run"
+              @cancel="onCancelRun(w.batchId)"
             />
             <div
               v-for="c in store.candidates"
@@ -432,7 +456,10 @@ function onCountInput(e: Event) {
               <span class="tile-label">{{ candidateLabel(c) }}</span>
               <span v-if="c.audio_lost" class="tile-warn">no audio</span>
             </div>
-            <p v-if="!store.candidates.length && !store.jobs.size" class="hint">
+            <p
+              v-if="!store.candidates.length && !store.jobs.size && !waiting.length"
+              class="hint"
+            >
               No results yet: they appear here.
             </p>
           </div>

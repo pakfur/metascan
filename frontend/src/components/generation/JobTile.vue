@@ -6,12 +6,40 @@ import { jobChipLabel, type JobChip } from '../../types/jobs'
 // queued / running with progress, or failed with the server's error text
 // shown verbatim. The ✕ cancels a live job and dismisses a failed one. A
 // click on the tile selects it (`select`), so the dialog can show what the
-// job was submitted with, read-only.
-const props = defineProps<{ chip: JobChip; selected?: boolean }>()
+// job was submitted with, read-only. With `selectable` false (Upscale) it
+// is a progress indicator only: no click, no focus, `hint` as its tooltip.
+const props = withDefaults(
+  defineProps<{
+    chip: JobChip
+    selected?: boolean
+    selectable?: boolean
+    hint?: string
+    // Replaces the state word ("waiting" for work not sent to ComfyUI yet).
+    text?: string
+    // The ✕'s tooltip for a live tile.
+    cancelTitle?: string
+  }>(),
+  {
+    selected: false,
+    selectable: true,
+    hint: undefined,
+    text: undefined,
+    cancelTitle: 'Cancel this job',
+  },
+)
 const emit = defineEmits<{ cancel: []; dismiss: []; select: [] }>()
 
 const failed = computed(() => props.chip.state === 'failed')
-const label = computed(() => jobChipLabel(props.chip))
+const label = computed(() => props.text ?? jobChipLabel(props.chip))
+const title = computed(() => {
+  if (failed.value) return props.chip.error ?? undefined
+  if (props.hint) return props.hint
+  return props.selectable ? 'Show what this job was submitted with' : undefined
+})
+
+function onSelect() {
+  if (props.selectable) emit('select')
+}
 
 function onClose() {
   if (failed.value) emit('dismiss')
@@ -22,19 +50,19 @@ function onClose() {
 <template>
   <div
     class="job-tile"
-    :class="{ failed, selected }"
-    role="button"
-    tabindex="0"
-    :aria-pressed="!!selected"
-    :title="failed ? (chip.error ?? undefined) : 'Show what this job was submitted with'"
-    @click="emit('select')"
-    @keydown.enter.prevent="emit('select')"
-    @keydown.space.prevent="emit('select')"
+    :class="{ failed, selected, inert: !selectable }"
+    :role="selectable ? 'button' : 'status'"
+    :tabindex="selectable ? 0 : undefined"
+    :aria-pressed="selectable ? !!selected : undefined"
+    :title="title"
+    @click="onSelect"
+    @keydown.enter.prevent="onSelect"
+    @keydown.space.prevent="onSelect"
   >
     <button
       type="button"
       class="job-x"
-      :title="failed ? 'Dismiss' : 'Cancel this job'"
+      :title="failed ? 'Dismiss' : cancelTitle"
       :disabled="!failed && !!chip.cancelling"
       @click.stop="onClose"
     >✕</button>
@@ -65,6 +93,14 @@ function onClose() {
 
 .job-tile:hover {
   border-color: var(--text-color-secondary);
+}
+
+.job-tile.inert {
+  cursor: default;
+}
+
+.job-tile.inert:not(.failed):hover {
+  border-color: #666;
 }
 
 .job-tile.selected {

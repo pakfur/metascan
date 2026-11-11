@@ -203,3 +203,34 @@ export function defaultWorkflowId(config: UpscaleConfig, media: Media): number |
     : config.default_image_preset_id
   return list.find((w) => w.id === wanted)?.id ?? list[0]?.id ?? null
 }
+
+// A placeholder for a result whose job ComfyUI does not have yet: the
+// source is still uploading, or the run waits for a free slot (a run keeps
+// `window` jobs in ComfyUI at a time). A submitted job gets its own tile.
+export interface WaitingTile {
+  key: string
+  batchId: string
+  label: string
+  hint: string
+}
+
+export function waitingTiles(runs: UpscaleRun[], window: number): WaitingTile[] {
+  const tiles: WaitingTile[] = []
+  for (const run of runs) {
+    const left = Math.max(0, run.total - run.queued)
+    for (let i = 0; i < left; i++) {
+      const uploading = run.phase === 'uploading' && i === 0
+      tiles.push({
+        key: `${run.batch_id}-${run.queued + i}`,
+        batchId: run.batch_id,
+        label: uploading ? 'uploading' : 'waiting',
+        hint: uploading
+          ? 'Sending the source to ComfyUI'
+          : run.phase === 'uploading'
+            ? 'Starts once the source is in ComfyUI'
+            : `Starts when a slot is free: ComfyUI gets ${window} of a run at a time`,
+      })
+    }
+  }
+  return tiles
+}

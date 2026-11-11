@@ -15,6 +15,10 @@ export interface JobChip {
   // Sampler progress from the comfy channel's job_progress event.
   value?: number
   max?: number
+  // Which progress run this is, 1-based: ComfyUI reports progress per
+  // sampler run, so a tiled refine starts again at 0 for every tile and a
+  // second model (SeedVR2) once more. Counted by nextPass.
+  pass?: number
   // The server's error text, shown verbatim on a failed tile.
   error?: string | null
 }
@@ -35,7 +39,8 @@ export function jobChipLabel(chip: JobChip): string {
     chip.max > 0
   ) {
     const pct = Math.round((chip.value / chip.max) * 100)
-    return `${Math.min(100, Math.max(0, pct))}%`
+    const shown = `${Math.min(100, Math.max(0, pct))}%`
+    return chip.pass !== undefined && chip.pass > 1 ? `pass ${chip.pass} · ${shown}` : shown
   }
   return chip.state
 }
@@ -64,6 +69,16 @@ export interface PendingJobRow {
   // null / '' shows as "—" (unknown, e.g. the server restarted since).
   value: string | null
   multiline?: boolean
+}
+
+/**
+ * The pass a new progress value belongs to: the previous chip's pass, plus
+ * one when the value went back down (the next sampler run started again at
+ * 0). The first progress of a job is pass 1.
+ */
+export function nextPass(prev: JobChip | undefined, value: number): number {
+  const pass = prev?.pass ?? 1
+  return typeof prev?.value === 'number' && value < prev.value ? pass + 1 : pass
 }
 
 /** "queued", "running 42%", "failed": a job tile's state for a heading. */

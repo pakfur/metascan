@@ -20,11 +20,12 @@ import {
   startUpscaleRun,
 } from '../api/upscale'
 import { useJobTracker } from '../composables/useJobTracker'
+import { pathKey } from '../utils/path'
 
-// POSIX/native tolerance: job rows store POSIX, Media paths are native.
-function norm(p: string): string {
-  return p.replace(/\\/g, '/')
-}
+// Job rows store POSIX paths (/mnt/d/...) and Media paths are native
+// (D:\...): pathKey gives both one key, as for I2V. Swapping slashes alone
+// never matched on Windows, so no job tile ever appeared.
+const norm = pathKey
 
 export const useUpscaleStore = defineStore('upscale', () => {
   // The open item's path. An accept or revert that changes the extension
@@ -106,6 +107,12 @@ export const useUpscaleStore = defineStore('upscale', () => {
     await refreshRuns().catch(() => {})
   }
 
+  // A waiting tile's ✕: the run stops, its jobs in ComfyUI are cancelled.
+  async function cancelRun(batchId: string): Promise<void> {
+    await cancelUpscaleRun(batchId)
+    await refreshRuns().catch(() => {})
+  }
+
   async function accept(id: number): Promise<string> {
     const { file_path } = await acceptCandidate(id)
     sourcePath.value = file_path
@@ -171,6 +178,7 @@ export const useUpscaleStore = defineStore('upscale', () => {
     close,
     run,
     cancelAll,
+    cancelRun,
     accept,
     revert,
     discard,

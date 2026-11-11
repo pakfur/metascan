@@ -9,8 +9,9 @@ Metascan upscales images and videos with ComfyUI workflows you register yourself
 1. Register a workflow in **Config → Upscale**.
 2. Right-click an image or video and choose **Upscale**, or select it and press **Ctrl+U**.
 3. Pick a workflow and press **Upscale**. Set **Count** above 1 to get several results to choose from.
-4. Results appear on the left. Click one and move the mouse across the picture to compare: the original is left of the line, the result is right of it.
-5. Press **Accept** on the one you like.
+4. While it runs, a dashed tile on the left stands for each result: **uploading** while the source goes to ComfyUI, **waiting** until ComfyUI takes it (two at a time by default), then **queued** and a percentage. A refine runs its sampler once per tile and SeedVR2 once more, so the percentage starts again for each and the tile counts them (**pass 3 · 62%**). Its ✕ cancels that result; a waiting tile's ✕ cancels the run.
+5. Results appear on the left. Click one and move the mouse across the picture to compare: the original is left of the line, the result is right of it.
+6. Press **Accept** on the one you like.
 
 Results are not in your library until you accept one. The others stay in the window until you discard them, or until you start a new run after accepting.
 
@@ -120,7 +121,7 @@ Run two strengths, or two seeds, and compare the results before accepting one. T
 
 **The prompt.** Every tile is redrawn with the same prompt, so a prompt that describes the whole scene pushes a tile showing only a cheek or a wall toward that scene. At 0.2–0.3 a short prompt about the detail you want works better, which is why the window starts on a [detail prompt](#detail-prompts) there. The image's own prompt matters again at 0.4 and above, where Moss redraws content.
 
-**No tile grid.** Each tile is redrawn on its own and drifts a little in colour, which showed as a faint grid on smooth skin. Both workflows end the refine with `easy imageDetailTransfer` (from [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use)): it keeps the original's colour and tone and takes only the fine detail from the refine. Its `blur_sigma` (4) is where the two meet: lower takes more from the original, higher keeps more of the refine's tone and with it more of the grid. On two refined images the seams measured no stronger than the rest of the image at 4, with 99 % of the fine detail kept. It also undoes any broad colour change the refine made, which at these strengths is the drift itself.
+**No tile grid.** Each tile is redrawn on its own and drifts a little in colour, which showed as a faint grid on smooth skin. Both workflows end the refine with `easy imageDetailTransfer` (from [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use)): it keeps the original's colour and tone and takes only the fine detail from the refine. The original is first scaled to the refined size with bicubic `Upscale Image` (sized by `Get Image Size` on the refine), which carries skin detail across better than the node's own bilinear resize. Its `blur_sigma` (4) is where the two meet: lower takes more from the original, higher keeps more of the refine's tone and with it more of the grid. On two refined images the seams measured no stronger than the rest of the image at 4, with 99 % of the fine detail kept. It also undoes any broad colour change the refine made, which at these strengths is the drift itself.
 
 **Refine + SeedVR2** refines at up to ×2, where Moss still draws well, then frees the GPU and runs one SeedVR2 pass to the chosen scale of the original, at most 16 megapixels. Use it for a large final size.
 

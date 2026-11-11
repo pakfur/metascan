@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import type { GenerationJob } from '../types/storyboard'
-import type { JobChip } from '../types/jobs'
+import { nextPass, type JobChip } from '../types/jobs'
 import { cancelJob as apiCancelJob, getJob, listJobs } from '../api/comfy'
 
 export interface JobTrackerOptions {
@@ -37,6 +37,8 @@ function chipFor(
     chip.value = progress.value
     chip.max = progress.max
   }
+  // The pass count outlives a state frame without progress (running again).
+  if (prev?.pass !== undefined) chip.pass = prev.pass
   if (prev?.cancelling) chip.cancelling = true
   return chip
 }
@@ -182,7 +184,7 @@ export function useJobTracker(options: JobTrackerOptions) {
     const prev = jobs.value.get(jobId)
     if (!prev || prev.state === 'failed') return
     if (typeof value === 'number' && typeof max === 'number' && Number.isFinite(value) && Number.isFinite(max)) {
-      setChip(jobId, chipFor('running', prev, { value, max }))
+      setChip(jobId, { ...chipFor('running', prev, { value, max }), pass: nextPass(prev, value) })
     } else if (prev.state !== 'running') {
       setChip(jobId, chipFor('running', prev))
     }
