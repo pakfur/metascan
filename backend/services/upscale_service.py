@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from metascan.core.phash_utils import compute_phash_for_file
 from metascan.core.upscale_defaults import generation_defaults
 from metascan.core.upscale_refine_prompts import default_store, guess_refine_prompt
+from metascan.core.upscale_runner import is_video
 from metascan.core.upscale_store import UpscaleError, UpscaleStore
 from metascan.utils.path_utils import to_native_path, to_posix_path
 
@@ -81,16 +82,25 @@ class UpscaleService:
         (``Scanner._process_media_file``), so this is the original's too."""
         scorecard = self.db.scorecard_for_path(posix)
         native = Path(to_native_path(posix))
+        video = is_video(native)
         out = generation_defaults(
             self.db.get_media(native),
             self.db.t2i_loras_for_path(posix),
             blind=bool(scorecard and scorecard["blind"]),
+            # An I2V clip's own prompt, preset model and LoRAs: a MiniMax
+            # refine drifts without them.
+            i2v=self.db.i2v_generation_for_path(posix) if video else None,
         )
         # The refine prompt for the image's subject (people, a scene or an
         # illustration), guessed from its tags; the dialog starts on it at a
-        # low denoise.
-        out["refine_prompt"] = guess_refine_prompt(
-            self.db.get_tags_for_file(native), default_store().prompts()
+        # low denoise. A video takes none: its refine redraws the whole clip
+        # with its own prompt, and a detail prompt would replace it.
+        out["refine_prompt"] = (
+            None
+            if video
+            else guess_refine_prompt(
+                self.db.get_tags_for_file(native), default_store().prompts()
+            )
         )
         return out
 
