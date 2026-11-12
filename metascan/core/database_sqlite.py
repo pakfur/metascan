@@ -3796,6 +3796,52 @@ class DatabaseManager:
             )
         return out
 
+    def i2v_generation_for_path(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """What an I2V clip was rendered with, for the upscale dialog's
+        pre-fill: ``{prompt, seed, loras, workflow}`` (the prompt sent, the
+        seed, the LoRA stack exactly as sent, and the preset's API graph,
+        None when the preset is gone or unreadable), or None when the path
+        is no I2V clip. A MiniMax refine needs the clip's own prompt, model
+        and LoRAs, and the model and baked LoRAs live only in the graph."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT v.prompt_used, v.seed, v.loras, p.workflow_json "
+                "FROM i2v_videos v LEFT JOIN workflow_presets p "
+                "ON p.id = v.preset_id WHERE v.file_path = ? LIMIT 1",
+                (file_path,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            raw = json.loads(row["loras"] or "[]")
+        except (TypeError, ValueError):
+            raw = []
+        loras: List[Dict[str, Any]] = []
+        for entry in raw if isinstance(raw, list) else []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            strength = entry.get("strength")
+            loras.append(
+                {
+                    "name": entry["name"],
+                    "strength": (
+                        float(strength) if isinstance(strength, (int, float)) else 1.0
+                    ),
+                }
+            )
+        workflow: Optional[Dict[str, Any]] = None
+        try:
+            parsed = json.loads(row["workflow_json"]) if row["workflow_json"] else None
+            workflow = parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            workflow = None
+        return {
+            "prompt": row["prompt_used"],
+            "seed": row["seed"],
+            "loras": loras,
+            "workflow": workflow,
+        }
+
     def list_all_upscale_candidate_files(self) -> List[str]:
         with self._get_connection() as conn:
             rows = conn.execute("SELECT file_path FROM upscale_candidates").fetchall()

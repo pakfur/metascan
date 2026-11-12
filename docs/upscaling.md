@@ -67,6 +67,8 @@ The model and LoRAs are filled in only when the workflow's model is in the same 
 
 A scorecard image that is not graded yet keeps its prompt hidden here too, as it does everywhere else.
 
+A video made in the I2V window starts with its own prompt and seed, the model its I2V workflow loads, and its LoRAs: the workflow's baked-in ones (a turbo workflow's 4-step LoRA) first, then the ones you chose for the clip. Other videos take what their metadata holds. A video refine redraws the clip with its prompt, so the window offers no detail prompts for a video and warns when the box is empty.
+
 ### Detail prompts
 
 At a low denoise a refine works better with a short prompt about the detail to add than with the image's own scene prompt (see [Refining generated images](#refining-generated-images)). For a workflow with a prompt, the **Prompt** menu offers the image's own prompt, a prompt written from the image once you have written one, and four detail prompts:
@@ -103,6 +105,7 @@ An upscaled item is described from its original. Nothing is saved until you run 
 | `upscale_video_seedvr2_7b_api.json` | Videos, best quality | SeedVR2 pack and 7B model |
 | `upscale_image_moss_refine_api.json` | Moss images: redraws detail and fixes generation flaws | Moss models, Ultimate SD Upscale pack, Remacri |
 | `upscale_image_moss_refine_seedvr2_api.json` | Moss images at large sizes: the refine, then SeedVR2 | All of the above, and the comfyui-unload-model pack |
+| `upscale_minimax_ultimate.json` | MiniMax H3 videos: redraws detail at the larger size, keeps the sound | MiniMax H3 models, MMH3 Ultimate Upscale, the H3 3D latent upscaler |
 
 ### Refining generated images
 
@@ -126,6 +129,19 @@ Run two strengths, or two seeds, and compare the results before accepting one. T
 **Refine + SeedVR2** refines at up to ×2, where Moss still draws well, then frees the GPU and runs one SeedVR2 pass to the chosen scale of the original, at most 16 megapixels. Use it for a large final size.
 
 **Setup.** Install `comfyui_ultimatesdupscale`, `comfyui-easy-use` and, for the second workflow, `comfyui-unload-model` with the ComfyUI Manager. The workflows load `moss\moss_image_sft_bf16.safetensors`, `qwen3.5_9b_bf16.safetensors` and `flux2-vae.safetensors`, as the Moss T2I workflows do; the window replaces the model with the image's own. Refining another model family needs its own copy of the workflow with that family's loaders.
+
+### Refining MiniMax H3 videos
+
+`upscale_minimax_ultimate.json` is the video counterpart of the Moss refine. H3 makes sound and picture together, so the workflow encodes the clip's frames and audio into one H3 latent, enlarges it with the H3 3D latent upscaler, and has [MMH3 Ultimate Upscale](https://comfyui-wiki.com/en/news/2026-08-25-mmh3-ultimate-upscale) redraw it in 85-frame chunks and tiles at a low denoise. The audio is carried through unchanged. It needs the clip's own prompt, diffusion model and LoRAs, which the window [fills in](#filled-in-from-the-image) for a video made in the I2V window; without them it drifts.
+
+- **Scale** multiplies both edges (×2 doubles them). The size is worked out from the clip itself: its width and height are snapped to multiples of 32, as H3 needs, and the aspect ratio is kept.
+- **Denoise** sets how much it may change, as for images: 0.2 cleans up, 0.3 adds detail. It runs 8 steps, which suits a turbo LoRA; a clip made without one may want a lower denoise.
+- **Seed** is the noise for every chunk and tile.
+- **Length.** H3 takes 17k + 5 frames, so up to 16 frames are cut from the end, and the sound with them. The clip is read at 24 fps.
+
+The tiles size themselves to a token budget (70,000, the `MMH3 Spatial Split Params` node); lower it if a run runs out of VRAM. It uses no negative prompt.
+
+**Setup.** Install `Comfyui-MMH3-UltimateUpscale` (or a pack that carries it, such as plaguekind-nodes, whose `H3UpscaleSizeLD` the workflow also uses), `LanPaint` (the H3 audio encoder), `ComfyUI-VideoHelperSuite`, `ComfyUI-JNodes`, `rgthree-comfy` and `ComfyUI-KJNodes` with the ComfyUI Manager. It loads `minmax\minimax_h3_fl2va_int8_convrot.safetensors`, `qwen3vl_32b_minimax_h3_int8_convrot.safetensors`, the H3 video and audio VAEs and `minimax_h3_latent_upscaler_3d_fp16.safetensors` (in `models/latent_upscale_models`); the window replaces the diffusion model with the clip's own. The source must have a sound track: H3 cannot encode a silent clip.
 
 **Setup.** Install [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) with the ComfyUI Manager. Its models go in `ComfyUI/models/SEEDVR2/` (`seedvr2_ema_7b_fp16.safetensors`, `ema_vae_fp16.safetensors`) and download on first use if they are missing. They were tested on a 32 GB card. On a smaller card, change the model and lower the size limits.
 

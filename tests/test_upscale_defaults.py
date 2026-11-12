@@ -7,6 +7,7 @@ from typing import Any
 
 from metascan.core.upscale_defaults import (
     generation_defaults,
+    i2v_generation,
     lora_file_name,
     model_family,
     same_family,
@@ -75,3 +76,91 @@ def test_model_families():
     assert not same_family("krea2\\a.safetensors", "moss\\b.safetensors")
     assert not same_family("a.safetensors", "b.safetensors")
     assert not same_family(None, "moss\\b.safetensors")
+
+
+def _preset_graph() -> dict:
+    """An I2V turbo preset: its model and turbo LoRA are baked in, the
+    owner's LoRAs ride MS_LORA_STACK."""
+    return {
+        "9": {
+            "class_type": "UNETLoader",
+            "_meta": {"title": "Load Diffusion Model"},
+            "inputs": {"unet_name": "minmax\\fl2va.safetensors"},
+        },
+        "10": {
+            "class_type": "LoraLoaderModelOnly",
+            "_meta": {"title": "Turbo"},
+            "inputs": {
+                "model": ["9", 0],
+                "lora_name": "minimax\\turbo.safetensors",
+                "strength_model": 1.0,
+            },
+        },
+        "11": {
+            "class_type": "Power Lora Loader (rgthree)",
+            "_meta": {"title": "MS_LORA_STACK"},
+            "inputs": {"model": ["10", 0]},
+        },
+    }
+
+
+def test_an_i2v_clip_gives_its_prompt_preset_model_and_every_lora():
+    i2v = {
+        "prompt": "a woman turns to the camera",
+        "seed": 77,
+        "loras": [{"name": "minimax\\style.safetensors", "strength": 0.7}],
+        "workflow": _preset_graph(),
+    }
+    out = generation_defaults(media(), None, blind=False, i2v=i2v)
+    assert out == {
+        "prompt": "a woman turns to the camera",
+        "negative": None,
+        "seed": 77,
+        "model": "minmax\\fl2va.safetensors",
+        "loras": [
+            {"name": "minimax\\turbo.safetensors", "strength": 1.0},
+            {"name": "minimax\\style.safetensors", "strength": 0.7},
+        ],
+        "blind": False,
+    }
+
+
+def test_an_i2v_clip_with_its_preset_gone_keeps_prompt_seed_and_stack():
+    out = i2v_generation(
+        {
+            "prompt": "  ",
+            "seed": -1,
+            "loras": [{"name": "a", "strength": 1.0}],
+            "workflow": None,
+        }
+    )
+    assert out == {
+        "prompt": None,
+        "seed": None,
+        "model": None,
+        "loras": [{"name": "a", "strength": 1.0}],
+    }
+
+
+def test_the_ms_model_node_wins_and_a_linked_lora_strength_is_left_out():
+    graph = _preset_graph()
+    graph["3"] = {
+        "class_type": "UNETLoader",
+        "_meta": {"title": "Other"},
+        "inputs": {"unet_name": "minmax\\first.safetensors"},
+    }
+    graph["9"]["_meta"]["title"] = "MS_MODEL"
+    graph["10"]["inputs"]["strength_model"] = ["4", 0]
+    out = i2v_generation({"prompt": "p", "seed": 1, "loras": [], "workflow": graph})
+    assert out["model"] == "minmax\\fl2va.safetensors"
+    assert out["loras"] == []
+
+
+def test_a_blind_i2v_clip_keeps_its_prompt_hidden():
+    out = generation_defaults(
+        None,
+        None,
+        blind=True,
+        i2v={"prompt": "p", "seed": 1, "loras": [], "workflow": None},
+    )
+    assert out["prompt"] is None and out["blind"] is True

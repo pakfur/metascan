@@ -3,6 +3,7 @@ under the same URL depends on."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -706,3 +707,52 @@ def test_config_names_the_prompt_style_of_each_workflow(config_env):
     )
     assert rows["moss-no-prompt"]["prompt_model"] is None
     assert rows["other"]["prompt_model"] is None
+
+
+def test_an_i2v_clip_prefills_its_own_prompt_model_and_loras(env):
+    graph = {
+        "9": {
+            "class_type": "UNETLoader",
+            "_meta": {"title": "Load Diffusion Model"},
+            "inputs": {"unet_name": "minmax\\fl2va.safetensors"},
+        },
+        "10": {
+            "class_type": "LoraLoaderModelOnly",
+            "_meta": {"title": "Turbo"},
+            "inputs": {
+                "lora_name": "minimax\\turbo.safetensors",
+                "strength_model": 1.0,
+            },
+        },
+    }
+    preset = env.db.create_workflow_preset("i2v", "ref2v", json.dumps(graph), "{}")
+    clip = env.tmp / "library" / "clip.mp4"
+    with env.db._get_connection() as conn:
+        conn.execute(
+            "INSERT INTO i2v_videos (source_path, file_path, prompt_used, seed, "
+            "loras, preset_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "src.png",
+                to_posix_path(clip),
+                "a woman turns to the camera",
+                77,
+                '[{"name": "minimax/style.safetensors", "strength": 0.7}]',
+                preset,
+            ),
+        )
+        conn.commit()
+    body = env.client.get("/api/upscale/state", params={"path": str(clip)}).json()
+    assert body["generation"] == {
+        "prompt": "a woman turns to the camera",
+        "negative": None,
+        "seed": 77,
+        "model": "minmax\\fl2va.safetensors",
+        "loras": [
+            {"name": "minimax\\turbo.safetensors", "strength": 1.0},
+            {"name": "minimax/style.safetensors", "strength": 0.7},
+        ],
+        "blind": False,
+        # A video refine redraws the clip with its own prompt: no detail prompt.
+        "refine_prompt": None,
+    }
+    assert env.db.i2v_generation_for_path("not/a/clip.mp4") is None

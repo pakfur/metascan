@@ -198,3 +198,55 @@ def test_the_shipped_refine_workflows_take_everything_the_dialog_sends(name):
         for key, value in n["inputs"].items():
             if isinstance(value, list):
                 assert value[0] in out, (node_id, key)
+
+
+MINIMAX = "upscale_minimax_ultimate.json"
+
+
+def test_the_shipped_minimax_refine_takes_everything_the_dialog_sends():
+    wf = json.loads((ROOT / MINIMAX).read_text(encoding="utf-8"))
+    assert not validate_workflow(wf, "upscale_video", None, None).findings
+    b = resolve_bindings(wf, "upscale_video")
+    for field in (
+        "positive",
+        "seed",
+        "scale",
+        "denoise",
+        "model",
+        "lora_stack",
+        "source_video",
+    ):
+        assert getattr(b, field) is not None, field
+    # No negative: MiniMax H3 is sampled with a positive-only guider.
+    assert b.negative is None
+    assert wf[b.source_video]["class_type"] == "VHS_LoadVideoFFmpeg"
+    assert b.source_video_widget == "video"
+    # The scale drives the computed upscale size, the denoise the scheduler.
+    size = next(n for n in wf.values() if n["class_type"] == "H3UpscaleSizeLD")
+    assert size["inputs"]["multiple"] == [b.scale, 0]
+    sched = next(n for n in wf.values() if n["class_type"] == "BasicScheduler")
+    assert sched["inputs"]["denoise"] == [b.denoise, 0]
+    assert baked_model(wf, b) == "minmax\\minimax_h3_fl2va_int8_convrot.safetensors"
+    out = apply_overrides(
+        wf,
+        b,
+        params(
+            positive="a woman turns to the camera",
+            seed=7,
+            scale=2.0,
+            denoise=0.25,
+            model="minmax\\minimax_h3_fl2va_pruned_bf16.safetensors",
+            loras=[{"name": "minimax\\turbo.safetensors", "strength": 1.0}],
+            source_video="in.mp4",
+        ),
+    )
+    assert out[b.seed]["inputs"]["noise_seed"] == 7
+    assert out[b.denoise]["inputs"]["value"] == 0.25
+    assert out[b.scale]["inputs"]["value"] == 2.0
+    assert out[b.source_video]["inputs"]["video"] == "in.mp4"
+    assert out[b.positive]["inputs"]["text"] == "a woman turns to the camera"
+    assert out[b.lora_stack]["inputs"]["lora_1"]["lora"] == "minimax\\turbo.safetensors"
+    for node_id, n in out.items():
+        for key, value in n["inputs"].items():
+            if isinstance(value, list):
+                assert value[0] in out, (node_id, key)

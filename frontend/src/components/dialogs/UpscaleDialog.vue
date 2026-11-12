@@ -119,7 +119,7 @@ const modelMismatch = computed(
 // read poorly in Moss). Unknown when the image names no model: not flagged.
 const promptProblem = computed<string | null>(() => {
   const w = workflow.value
-  if (!w?.has_prompt || !w.prompt_model) return null
+  if (!w?.has_prompt || !w.prompt_model || props.media.is_video) return null
   if (promptSource.value !== 'image') return null
   const g = generation.value
   if (g?.blind) return null
@@ -129,7 +129,21 @@ const promptProblem = computed<string | null>(() => {
   }
   return null
 })
-const refinePrompts = computed<RefinePrompt[]>(() => store.config?.refine_prompts ?? [])
+// "image" or "video", for the form's text.
+const itemWord = computed(() => (props.media.is_video ? 'video' : 'image'))
+// Detail prompts are for an image refine's tiles. A video refine (MiniMax)
+// redraws the clip with its own prompt, so it starts on that and offers none.
+const refinePrompts = computed<RefinePrompt[]>(() =>
+  props.media.is_video ? [] : (store.config?.refine_prompts ?? []),
+)
+// A video refine follows its prompt: one with none on record needs one.
+const videoPromptMissing = computed(
+  () =>
+    props.media.is_video &&
+    workflow.value?.has_prompt === true &&
+    ready.value &&
+    !prompt.value.trim(),
+)
 const imagePrompt = computed(() => generation.value?.prompt ?? null)
 const refineSource = computed(
   () => refinePrompts.value.find((p) => p.id === promptSource.value) ?? null,
@@ -488,10 +502,14 @@ function onCountInput(e: Event) {
           </p>
 
           <div v-if="hasGeneration && workflow" class="gen-row">
-            <span class="hint">Filled in from how this image was made.</span>
+            <span class="hint">Filled in from how this {{ itemWord }} was made.</span>
             <button
               class="btn small"
-              title="Put back the starting values: how the image was made, and the prompt for this denoise"
+              :title="
+                media.is_video
+                  ? 'Put back the starting values: how the video was made'
+                  : 'Put back the starting values: how the image was made, and the prompt for this denoise'
+              "
               @click="applyGeneration"
             >Reset</button>
           </div>
@@ -526,12 +544,19 @@ function onCountInput(e: Event) {
             <textarea
               v-model="prompt"
               rows="4"
-              placeholder="Optional"
+              :placeholder="media.is_video ? 'Describe the video: the refine follows it' : 'Optional'"
               :aria-label="refinePrompts.length ? 'Prompt text' : undefined"
             />
           </label>
+          <p v-if="videoPromptMissing" class="hint warn">
+            This video has no prompt on record. Describe it: the refine redraws the
+            clip with this prompt, and drifts without one.
+          </p>
 
-          <div v-if="workflow?.has_prompt && workflow.prompt_model" class="write-prompt">
+          <div
+            v-if="workflow?.has_prompt && workflow.prompt_model && !media.is_video"
+            class="write-prompt"
+          >
             <p v-if="promptProblem" class="hint warn">{{ promptProblem }}</p>
             <button
               class="btn small"
@@ -559,7 +584,7 @@ function onCountInput(e: Event) {
           </label>
 
           <p v-if="modelMismatch && !forceImageModel" class="hint warn">
-            This image was made with {{ imageModel }}<template v-if="workflow?.model">,
+            This {{ itemWord }} was made with {{ imageModel }}<template v-if="workflow?.model">,
               and this workflow loads {{ workflow.model }}</template>. Its model and
             LoRAs are left out.
             <button class="btn small" @click="useImageModelAnyway">Use them anyway</button>
