@@ -947,12 +947,14 @@ def render(
             # person, and the caption engine knows whose hair this is: say
             # their own instead.
             s = {**s, "hair": ""}
-            if member.hair and member.hair not in withs:
-                withs.append(member.hair)
+            own_hair = member.hair_trait or member.hair
+            if own_hair and own_hair not in withs:
+                withs.append(own_hair)
         if s["hair"] and member.hair and s["hair"] != member.hair:
-            # The caption spelled the hair out with its style; the drawn
-            # value says only the colour, so keep the fuller phrase alone.
-            withs = [t for t in withs if t != member.hair]
+            # The caption spelled the hair out with its style: keep its
+            # phrase alone, not the drawn colour or the drawn style beside it.
+            drawn = (member.hair, member.hair_trait)
+            withs = [t for t in withs if t not in drawn]
         withs += [fill(t) for t in s["features"]]
         if s["hair"]:
             withs.append(fill(s["hair"]))

@@ -53,6 +53,7 @@ from metascan.core.prompt_store import get_prompt_store
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
 from tests._fake_comfy_server import FakeComfy as FakeComfyServer
+from tests._t2i_appearance import write_list_files
 
 # ---- hand-written data ----------------------------------------------------
 
@@ -339,8 +340,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         self._write_csv(CSV_ROWS)
         lists_dir = self.root / "lists"
         lists_dir.mkdir()
-        for name, text in LISTS.items():
-            (lists_dir / name).write_text(text, encoding="utf-8")
+        write_list_files(lists_dir, LISTS)
         self.library = LibraryCache(lists_dir)
         self.captions = CaptionStore(self.csv_path)
 
@@ -870,8 +870,8 @@ class TestResolve(RunnerCase):
 
     async def test_resolve_follows_a_list_edit_without_a_restart(self) -> None:
         before = await self.runner.resolve(caption=CAPTION, seed=3, model="krea2")
-        path = self.root / "lists" / "hair.txt"
-        path.write_text("silver hair\n", encoding="utf-8")
+        write_list_files(self.root / "lists", {**LISTS, "hair.txt": "silver hair\n"})
+        path = self.root / "lists" / "person_appearance.yaml"
         stat = path.stat()
         os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
         after = await self.runner.resolve(caption=CAPTION, seed=3, model="krea2")

@@ -872,7 +872,7 @@ class T2iRunner:
             {"token": f"__{s.upper()}__", "kind": "slot", "note": "the owner's"}
             for s in cfg.token_slots
         ]
-        taken = set(cfg.slots) | set(cfg.token_slots)
+        taken = set(cfg.token_slots)
         wildcard_names = sorted({key.split(".", 1)[0] for key in library.lists} - taken)
         wildcards = [
             {"token": f"__{w.upper()}__", "kind": "wildcard", "note": "random pick"}

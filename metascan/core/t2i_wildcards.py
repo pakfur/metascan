@@ -1,14 +1,25 @@
-"""Loads and validates the t2i wildcard lists and ``characters.yml``.
+"""Loads and validates the t2i caption library.
 
-``data/t2i_captions/`` holds one plain-text list per slot -- ``hair.txt``,
-``body.female.txt``, ``setting.txt`` and so on (one value per line, blank
-lines and ``#`` comment lines ignored, duplicates dropped case-insensitively,
-file order preserved) -- plus an optional ``characters.yml`` that overrides
-the engine's names, nouns and slot layout. A missing ``characters.yml`` is
-not an error: every key has a built-in default.
+``data/t2i_captions/`` holds:
 
-Two guards run on every list line (spec 3.7). Rejected lines are reported
-as ``"<file>:<line>: <reason>"`` warnings, logged at WARNING, and left out:
+* ``person_appearance.yaml`` -- how a character looks
+  (:mod:`metascan.core.t2i_appearance`): parsed, validated and screened here.
+  A missing or broken file means characters are not described (and a
+  warning); :class:`LibraryCache` keeps serving the last good version when
+  an edit breaks it.
+* plain-text lists -- ``setting.txt``, ``breasts.female.txt`` and so on (one
+  value per line, blank lines and ``#`` comment lines ignored, duplicates
+  dropped case-insensitively, file order preserved) for plain wildcards and
+  for token slots the appearance does not draw.
+* an optional ``characters.yml`` that overrides the engine's names, nouns
+  and tokens. A missing ``characters.yml`` is not an error: every key has a
+  built-in default.
+
+Two guards run on every list line and every text of the appearance file
+(spec 3.7). Rejected lines are reported as ``"<file>:<line>: <reason>"``
+warnings (``"<file>: <attribute>.<value>...: rejected: <reason>"`` for the
+appearance, where a value left with no text is never drawn), logged at
+WARNING, and left out:
 
 * **Adult only.** In an ``age`` list any integer under 18, or a spelled-out
   age of thirteen to seventeen, is rejected. In every list a line containing
@@ -33,6 +44,8 @@ from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import yaml  # type: ignore[import-untyped]
 
+from metascan.core.t2i_appearance import FILENAME as APPEARANCE_FILENAME
+from metascan.core.t2i_appearance import Appearance, AppearanceError, parse
 from metascan.core.t2i_characters import CharacterConfig, Library
 
 # The number vocabulary lives in t2i_ages so the caption engine reads ages the
@@ -67,12 +80,12 @@ _GENDERS = ("female", "male")
 _KNOWN_KEYS = (
     "names",
     "nouns",
-    "slots",
-    "intro",
     "token_slots",
     "token_gender",
     "body_hair_prefixes",
 )
+# The layout of a description moved to person_appearance.yaml's engine.
+_MOVED_KEYS = ("slots", "intro")
 
 _NAME_RE = re.compile(r"^[A-Z][A-Z0-9]*$")
 _IDENT_RE = re.compile(r"^[a-z][a-z0-9]*$")
@@ -291,45 +304,17 @@ def _gender_map(
     return tuple(pairs)
 
 
-def _intro_updates(
-    value: Any,
-    slots: Tuple[str, ...],
-    token_slots: Tuple[str, ...],
-    warnings: List[str],
-) -> Dict[str, Any]:
-    if not isinstance(value, dict):
-        warnings.append(_config_warning("'intro' must map head and with to lists"))
-        return {}
-    known = set(slots) | set(token_slots)
-    updates: Dict[str, Any] = {}
-    for key, field in (("head", "head_slots"), ("with", "with_slots")):
-        if key not in value:
-            continue
-        found = _identifiers(value[key], f"intro.{key}", warnings)
-        if found is None:
-            continue
-        for slot in found:
-            if slot not in known:
-                warnings.append(
-                    _config_warning(
-                        f"'intro.{key}' names unknown slot '{slot}'; skipped"
-                    )
-                )
-        updates[field] = tuple(slot for slot in found if slot in known)
-    return updates
-
-
 def _word_list_updates(data: Mapping[str, Any], warnings: List[str]) -> Dict[str, Any]:
-    """slots, token_slots, token_gender and body_hair_prefixes."""
+    """token_slots, token_gender and body_hair_prefixes."""
     updates: Dict[str, Any] = {}
-    for key in ("slots", "token_slots"):
-        if key not in data:
-            continue
-        found = _identifiers(data[key], key, warnings)
+    if "token_slots" in data:
+        found = _identifiers(data["token_slots"], "token_slots", warnings)
         if found:
-            updates[key] = found
+            updates["token_slots"] = found
         elif found is not None:
-            warnings.append(_config_warning(f"'{key}' is empty; using the default"))
+            warnings.append(
+                _config_warning("'token_slots' is empty; using the default")
+            )
     if "token_gender" in data:
         pairs = _gender_map(data["token_gender"], warnings)
         if pairs is not None:
@@ -345,7 +330,14 @@ def _word_list_updates(data: Mapping[str, Any], warnings: List[str]) -> Dict[str
 
 def _config_updates(data: Mapping[str, Any], warnings: List[str]) -> Dict[str, Any]:
     for key in data:
-        if key not in _KNOWN_KEYS:
+        if key in _MOVED_KEYS:
+            warnings.append(
+                _config_warning(
+                    f"'{key}' moved to {APPEARANCE_FILENAME} (its engine section); "
+                    "ignored"
+                )
+            )
+        elif key not in _KNOWN_KEYS:
             warnings.append(_config_warning(f"unknown key '{key}' ignored"))
     updates: Dict[str, Any] = {}
     if "names" in data:
@@ -353,16 +345,6 @@ def _config_updates(data: Mapping[str, Any], warnings: List[str]) -> Dict[str, A
     if "nouns" in data:
         updates.update(_noun_updates(data["nouns"], warnings))
     updates.update(_word_list_updates(data, warnings))
-    if "intro" in data:
-        base = CharacterConfig()
-        updates.update(
-            _intro_updates(
-                data["intro"],
-                updates.get("slots", base.slots),
-                updates.get("token_slots", base.token_slots),
-                warnings,
-            )
-        )
     return updates
 
 
@@ -476,8 +458,53 @@ def _read_list(path: Path, slot: str, warnings: List[str]) -> Optional[Tuple[str
     return tuple(values)
 
 
+def _appearance_warning(message: str) -> str:
+    return f"{APPEARANCE_FILENAME}: {message}"
+
+
+def _screen(slot: str, text: str) -> Optional[str]:
+    reason = _reject_reason(slot, " ".join(text.split()))
+    return reason
+
+
+def load_appearance(path: Path, warnings: List[str]) -> Optional[Appearance]:
+    """The parsed ``person_appearance.yaml``; None when it is missing (the
+    resolver warns when a caption names a character), None and a warning
+    when it is unusable. Every text goes through the adult-only screen."""
+    if not path.is_file():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}" if mark is not None else ""
+        problem = getattr(exc, "problem", None) or "invalid syntax"
+        warnings.append(_appearance_warning(f"malformed YAML{where}: {problem}"))
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        warnings.append(
+            _appearance_warning(f"could not be read ({exc.__class__.__name__})")
+        )
+        return None
+    try:
+        appearance, found = parse(data, _screen)
+    except AppearanceError as exc:
+        warnings.append(_appearance_warning(f"not usable: {exc}"))
+        return None
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        warnings.append(
+            _appearance_warning(f"not usable: {exc.__class__.__name__}: {exc}")
+        )
+        return None
+    for message in found:
+        logger.warning("t2i appearance text %s", message)
+    warnings.extend(found)
+    return appearance
+
+
 def load_library(directory: Path) -> Tuple[Library, List[str]]:
-    """Read ``characters.yml`` and every ``*.txt`` list in ``directory``.
+    """Read ``characters.yml``, ``person_appearance.yaml`` and every
+    ``*.txt`` list in ``directory``.
 
     Returns ``(library, warnings)``. Never raises on bad data.
     """
@@ -487,6 +514,7 @@ def load_library(directory: Path) -> Tuple[Library, List[str]]:
         warnings.append(f"list directory not found: {directory}")
         return Library(default_library_config(), {}), warnings
     config = _load_config(directory / CONFIG_FILENAME, warnings)
+    appearance = load_appearance(directory / APPEARANCE_FILENAME, warnings)
     lists: Dict[str, Tuple[str, ...]] = {}
     for path in sorted(directory.glob("*.txt")):
         if not path.is_file():
@@ -507,7 +535,7 @@ def load_library(directory: Path) -> Tuple[Library, List[str]]:
         if not values:
             warnings.append(f"{path.name}: no usable lines")
         lists[key] = values
-    return Library(config, lists), warnings
+    return Library(config, lists, appearance), warnings
 
 
 # --- cache ------------------------------------------------------------------
@@ -532,7 +560,10 @@ class LibraryCache:
     def _signature_now(self) -> Tuple[Any, ...]:
         if not self._directory.is_dir():
             return ("missing",)
-        entries = [self._directory / CONFIG_FILENAME]
+        entries = [
+            self._directory / CONFIG_FILENAME,
+            self._directory / APPEARANCE_FILENAME,
+        ]
         entries.extend(sorted(self._directory.glob("*.txt")))
         signature: List[Tuple[str, int, int]] = []
         for path in entries:
@@ -548,7 +579,23 @@ class LibraryCache:
             try:
                 signature = self._signature_now()
                 if signature != self._signature:
-                    self._library, self._warnings = load_library(self._directory)
+                    library, warnings = load_library(self._directory)
+                    previous = self._library.appearance
+                    if (
+                        library.appearance is None
+                        and previous is not None
+                        and (self._directory / APPEARANCE_FILENAME).is_file()
+                    ):
+                        # An edit broke the file: keep drawing people from
+                        # the last version that worked.
+                        library = replace(library, appearance=previous)
+                        warnings.append(
+                            _appearance_warning(
+                                "keeping the last version that loaded until "
+                                "the file is fixed"
+                            )
+                        )
+                    self._library, self._warnings = library, warnings
                     self._signature = signature
             except Exception as exc:  # never raise into a request or a batch
                 logger.exception("t2i list reload failed; keeping the previous lists")

@@ -31,10 +31,11 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from metascan.core.t2i_ages import stated_age
+from metascan.core.t2i_appearance import Appearance
 
 IDENTITY_STYLES: Tuple[str, ...] = ("ref", "noun", "name")
 DEFAULT_IDENTITY_STYLE = "ref"
@@ -53,23 +54,14 @@ _MALE = "male"
 
 @dataclass(frozen=True)
 class CharacterConfig:
-    """Names, nouns and slot layout; ``characters.yml`` overrides any field."""
+    """Names, nouns and tokens; ``characters.yml`` overrides any field. What
+    a character looks like, and how a first mention is laid out, comes from
+    ``person_appearance.yaml`` (:attr:`Library.appearance`)."""
 
     female_names: Tuple[str, ...] = ("ALICE", "BELLA", "CLARA", "DIANNA", "EMMA")
     male_names: Tuple[str, ...] = ("ADAM", "BOB")
     noun_female: str = "woman"
     noun_male: str = "man"
-    slots: Tuple[str, ...] = (
-        "age",
-        "ethnicity",
-        "skin",
-        "eyes",
-        "face",
-        "hair",
-        "body",
-    )
-    head_slots: Tuple[str, ...] = ("age", "ethnicity")
-    with_slots: Tuple[str, ...] = ("skin", "eyes", "face", "hair", "body")
     token_slots: Tuple[str, ...] = ("hair", "breasts", "vagina", "penis")
     token_gender: Tuple[Tuple[str, str], ...] = (
         ("breasts", "female"),
@@ -92,9 +84,13 @@ class CharacterConfig:
 @dataclass(frozen=True)
 class Library:
     config: CharacterConfig
-    # Keys: "<slot>", "<slot>.female", "<slot>.male" and any other lowercase
-    # token name (plain wildcard lists). Values are already cleaned/validated.
+    # Plain wildcard lists, and lists for the token slots the appearance does
+    # not draw (__BREASTS__ ...). Keys: "<name>", "<name>.female",
+    # "<name>.male". Values are already cleaned/validated.
     lists: Mapping[str, Tuple[str, ...]]
+    # The people: person_appearance.yaml. None means characters get no
+    # description (and a warning).
+    appearance: Optional[Appearance] = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +98,9 @@ class ResolvedCaption:
     text: str
     characters: Dict[str, Dict[str, str]]  # NAME -> {slot: drawn value}
     warnings: List[str]
+    # NAME -> {attribute: value id} as sampled from person_appearance.yaml
+    # (several ids joined with "; ").
+    attributes: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -125,6 +124,10 @@ class CastMember:
     # bare "the woman" when the cast shares a hair value.
     handle: str
     handle_has_hair: bool
+    # The trait among ``traits`` that describes the hair in full (its style),
+    # when the appearance draws one: a reply that says the hair itself
+    # replaces it.
+    hair_trait: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -546,7 +549,9 @@ class _Planner:
                 f"wrote the plain word '{slot}'",
             )
             return bare
-        if not _values(self.library, slot, self.genders[owner]):
+        appearance = self.library.appearance
+        drawn = appearance is not None and slot in appearance.engine.slots
+        if not drawn and not _values(self.library, slot, self.genders[owner]):
             _warn(
                 self.warnings,
                 f"no list for __{token}__ ({slot}.txt); wrote the plain word",
@@ -611,51 +616,68 @@ def _draw_cast(
     library: Library,
     referenced: Mapping[str, Set[str]],
     warnings: List[str],
-) -> Tuple[Dict[str, Dict[str, str]], Set[str]]:
-    """Draw every character's slots; returns (characters, ambiguous names).
+) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]], Set[str]]:
+    """Draw every character; returns (slot texts, attributes, ambiguous names).
 
-    ``key`` is the caption's (see ``_caption_key``). ``hair`` is forced
-    distinct across the cast (canonical order, so stable). A name is
-    *ambiguous* when it shares hair with another character, and its ``ref``
-    handle then falls back to the plain noun.
+    ``key`` is the caption's (see ``_caption_key``). A character is one
+    person sampled from ``library.appearance``; its engine slots are the
+    texts. The appearance's ``distinct`` slot (hair) is kept different across
+    the cast (canonical order, so stable). Token slots the appearance does
+    not draw come from the lists, only when a token spells them out. A name
+    is *ambiguous* when it shares hair with another character, and its
+    ``ref`` handle then falls back to the plain noun.
     """
     cfg = library.config
+    appearance = library.appearance
+    distinct = appearance.engine.distinct if appearance is not None else "hair"
     characters: Dict[str, Dict[str, str]] = {}
+    attributes: Dict[str, Dict[str, str]] = {}
     hair_owners: Dict[str, List[str]] = {}
     ambiguous: Set[str] = set()
+    if appearance is None and cast:
+        _warn(
+            warnings,
+            "no usable person_appearance.yaml; characters are not described",
+        )
     for name in cast:
         gender = genders[name]
-        extra = [
-            s
-            for s in cfg.token_slots
-            if s in referenced.get(name, ()) and s not in cfg.slots
-        ]
         drawn: Dict[str, str] = {}
-        for slot in (*cfg.slots, *extra):
+        if appearance is not None:
+            person = appearance.person(key, name, gender, set(hair_owners))
+            if person is None:
+                _warn(
+                    warnings,
+                    "person_appearance.yaml drew no valid person; "
+                    "a character is not described",
+                )
+            else:
+                drawn = dict(person.slots)
+                attributes[name] = dict(person.attributes)
+                for message in person.warnings:
+                    _warn(warnings, message)
+        for slot in cfg.token_slots:
+            if slot in drawn or slot not in referenced.get(name, ()):
+                continue
             options = _values(library, slot, gender)
             if not options:
-                if slot in cfg.slots:
-                    _warn(
-                        warnings,
-                        f"no '{slot}' list for {gender} characters; left out of descriptions",
-                    )
                 continue
-            if slot == "hair":
-                value, clashed = _draw_distinct(key, name, slot, options, hair_owners)
-                owners = hair_owners.setdefault(value.casefold(), [])
-                owners.append(name)
-                if clashed:
-                    ambiguous.update(owners)
-                    _warn(
-                        warnings,
-                        "the hair list has too few distinct values for this many "
-                        "characters; some share hair and are called by their noun",
-                    )
+            if slot == distinct:
+                value, _ = _draw_distinct(key, name, slot, options, hair_owners)
             else:
                 value = options[_draw(key, name, slot, 0, len(options))]
             drawn[slot] = value
+        if distinct and drawn.get(distinct):
+            owners = hair_owners.setdefault(drawn[distinct].casefold(), [])
+            owners.append(name)
+            if len(owners) > 1:
+                ambiguous.update(owners)
+                _warn(
+                    warnings,
+                    "two characters drew the same hair; they are called by "
+                    "their noun",
+                )
         characters[name] = drawn
-    return characters, ambiguous
+    return characters, attributes, ambiguous
 
 
 # --- Rendering (pass 2) -----------------------------------------------------
@@ -686,6 +708,30 @@ class _Renderer:
         self.characters = characters
         self.ambiguous = ambiguous
         self.deferred: List[Tuple[str, List[Tuple[str, str]]]] = []
+        engine = library.appearance.engine if library.appearance else None
+        self.head_slots: Tuple[str, ...] = engine.head if engine else ()
+        self.with_slots: Tuple[str, ...] = engine.with_ if engine else ()
+        self.spells: Mapping[str, Tuple[str, ...]] = engine.spells if engine else {}
+
+    def head(self, name: str) -> str:
+        """``a 31-year-old Ghanaian woman``: the head slots and the noun."""
+        drawn = self.characters[name]
+        head = " ".join(
+            [drawn[s] for s in self.head_slots if s in drawn] + [self.head_noun(name)]
+        )
+        return f"{_article(head)} {head}"
+
+    def details(self, name: str) -> List[Tuple[str, str]]:
+        """The with-slots the caption does not spell out itself: a token
+        (``__HAIR__``) drops its own slot and every slot it ``spells``."""
+        drawn = self.characters[name]
+        spelled: Set[str] = set()
+        for token in self.plan.referenced.get(name, set()):
+            spelled.add(token)
+            spelled.update(self.spells.get(token, ()))
+        return [
+            (s, drawn[s]) for s in self.with_slots if s in drawn and s not in spelled
+        ]
 
     def noun(self, name: str) -> str:
         female = self.genders[name] == _FEMALE
@@ -752,20 +798,10 @@ class _Renderer:
         prev: Optional["re.Match[str]"],
         prev_is_char: bool,
     ) -> str:
-        drawn = self.characters[name]
-        head = " ".join(
-            [drawn[s] for s in self.cfg.head_slots if s in drawn]
-            + [self.head_noun(name)]
-        )
-        head = f"{_article(head)} {head}"
+        head = self.head(name)
         if self.style == "name":
             head += f" named {name.capitalize()}"
-        spelled = self.plan.referenced.get(name, set())
-        details = [
-            (s, drawn[s])
-            for s in self.cfg.with_slots
-            if s in drawn and s not in spelled
-        ]
+        details = self.details(name)
         if not details:
             return head
         if self.inline_ok(match, prev, prev_is_char):
@@ -867,14 +903,17 @@ def resolve_caption(
     genders = _name_genders(library.config)
     plan = _Planner(caption, matches, library, genders, warnings).run()
     cast = [name for name in genders if name in plan.named or name in plan.defaults]
-    characters, ambiguous = _draw_cast(
+    characters, attributes, ambiguous = _draw_cast(
         _caption_key(caption), cast, genders, library, plan.referenced, warnings
     )
     renderer = _Renderer(
         caption, seed, style, library, genders, plan, characters, ambiguous
     )
     return ResolvedCaption(
-        text=renderer.render(), characters=characters, warnings=warnings
+        text=renderer.render(),
+        characters=characters,
+        warnings=warnings,
+        attributes=attributes,
     )
 
 
@@ -893,7 +932,7 @@ def mark_caption(caption: str, seed: int, library: Library) -> MarkedCaption:
     cast_names = [
         name for name in genders if name in plan.named or name in plan.defaults
     ]
-    characters, ambiguous = _draw_cast(
+    characters, _, ambiguous = _draw_cast(
         _caption_key(caption), cast_names, genders, library, plan.referenced, warnings
     )
     renderer = _Renderer(
@@ -912,26 +951,22 @@ def mark_caption(caption: str, seed: int, library: Library) -> MarkedCaption:
     for ref in plan.refs:
         if ref.kind == "char" and ref.name not in order:
             order.append(ref.name)
-    cfg = library.config
+    hair_slots = set(renderer.spells.get("hair", ()))
     members: List[CastMember] = []
     for name in order:
         drawn = characters.get(name, {})
-        head = " ".join(
-            [drawn[s] for s in cfg.head_slots if s in drawn]
-            + [renderer.head_noun(name)]
-        )
-        spelled = plan.referenced.get(name, set())
+        details = renderer.details(name)
+        hair_trait = next((v for s, v in details if s in hair_slots), None)
         members.append(
             CastMember(
                 name=name,
                 noun=renderer.noun(name),
-                identity=f"{_article(head)} {head}",
-                traits=tuple(
-                    drawn[s] for s in cfg.with_slots if s in drawn and s not in spelled
-                ),
+                identity=renderer.head(name),
+                traits=tuple(v for _, v in details),
                 hair=drawn.get("hair"),
                 handle=renderer.handle(name),
                 handle_has_hair=renderer.handle_carries_hair(name),
+                hair_trait=hair_trait,
             )
         )
     return MarkedCaption(

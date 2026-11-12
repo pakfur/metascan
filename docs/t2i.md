@@ -86,32 +86,51 @@ Batch state lives in memory. If the server restarts mid-run, steps that were not
 A token is a name in capitals between double underscores.
 
 - **Characters** — `__ALICE__ __BELLA__ __CLARA__ __DIANNA__ __EMMA__` (female) and `__ADAM__ __BOB__` (male). The first time a character appears it is replaced by a generated description; later mentions become a short handle tied to the same character. The description depends on the caption text alone.
-- **Body-part tokens** — `__HAIR__ __BREASTS__ __VAGINA__ __PENIS__` stand in for the word itself and belong to a character (`her __HAIR__`). They resolve from a list of the same name.
+- **Body-part tokens** — `__HAIR__ __BREASTS__ __VAGINA__ __PENIS__` stand in for the word itself and belong to a character (`her __HAIR__`). `__HAIR__` is the owner's drawn hair colour (`her long __HAIR__` → *her long copper red hair*); the others resolve from a list of the same name.
 - **Anything else** — `__TOKEN__` resolves from `token.txt` if that list exists, as one value used everywhere in the caption, picked by the seed; otherwise it becomes the plain lowercase word.
 
 Malformed underscores (`____ALICE____`) are tolerated. A caption with no tokens passes through unchanged.
 
 **Typing tokens.** In the Caption box, type `__` and a list of the tokens opens under it, narrowing as you type (`__al` → `__ALICE__`): Up / Down choose, Enter or Tab inserts, Escape closes. Use the character tokens in your own captions when a picture has two or more people: with MOSS-Image they switch on the structured writer (below), which keeps each person's traits apart.
 
+### What a character looks like: `person_appearance.yaml`
+
+Each named character is one person sampled from `person_appearance.yaml`. Its attributes (gender, apparent age, ancestry, skin tone and undertone, hair texture, colour, greying, length, hairline, style and colour treatment, facial hair, eyes, face shape, build, skin details) are drawn in file order, each weighted by the ones above it, so combinations stay plausible: an ancestry's population profile drives skin, hair and eye colour, age drives greying and wrinkles, and so on. The file's header explains the format; `python scripts/sample_person.py` samples people from it, and `--validate` checks it.
+
+The name decides the gender (`__ALICE__` is a woman, `__ADAM__` a man). The person is drawn from the caption text alone, so one caption always gets the same people whatever the seed. **Editing the file can change who a given caption draws.** Two people in one caption are drawn again, with the same ancestry, until their hair colours differ, so the short handles stay distinct.
+
+The file's `engine` section says what the caption uses:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `genders` | `{female: woman, male: man}` | The gender value a name draws. |
+| `slots` | `age`, `ethnicity`, `skin`, `eyes`, `face`, `hairstyle`, `beard`, `body`, `hair` | Each slot is a template over the attributes and composed phrases, e.g. `age: "{apparent_age.years}-year-old"`. |
+| `head` | `[age, ethnicity]` | Slots in front of the noun: *a 31-year-old Ghanaian woman*. |
+| `with` | `[skin, eyes, face, hairstyle, beard, body]` | Slots after `with`. Empty slots are left out (a clean-shaven man has no beard detail). |
+| `spells` | `{hair: [hairstyle]}` | A caption that writes `__HAIR__` itself drops these slots, so the hair is not described twice. |
+| `distinct` | `hair` | The slot kept different across a cast. |
+
+The `hair` slot is what `__HAIR__` becomes and what the later-mention handle is built from, so it must end in ` hair` (*the copper-red-haired woman*); for a bald character it is empty, the handle is the plain noun and `__HAIR__` is the plain word. Write `with` slots so they read after `with`. Keep a number in the `age` slot: the age wording below reads it.
+
+The file reloads automatically when it changes. If an edit breaks it, a warning names the problem and the last version that loaded keeps being used until the file is fixed. Without the file, characters are only their noun (*a woman*).
+
 ### Lists
 
-Each characteristic is a text file with one value per line; blank lines and `#` comments are ignored and duplicates are dropped.
+Other wildcards are text files with one value per line; blank lines and `#` comments are ignored and duplicates are dropped.
 
 | File | Used for |
 |---|---|
-| `age.txt`, `ethnicity.txt`, `skin.txt`, `eyes.txt`, `face.txt`, `hair.txt`, `body.txt` | The character description. |
-| `<name>.female.txt` / `<name>.male.txt` | Override `<name>.txt` for that gender. The shipped body lists are `body.female.txt` and `body.male.txt`. |
+| `<token>.txt` | A plain wildcard `__TOKEN__`. |
+| `<name>.female.txt` / `<name>.male.txt` | Override `<name>.txt` for that gender. |
 | `breasts.txt`, `vagina.txt`, `penis.txt` | Body-part tokens. **Not shipped** — supply your own. A missing list makes the token its plain word. |
-
-Write values so they read after `with`: `an oval face`, `green eyes`, `olive skin`, `an athletic build`. Write every `age` value with its number (`45-year-old`): the age wording above reads it. Hair values must end in ` hair` (`auburn hair`) — the short handle for a later mention is built from it (`the auburn-haired woman`).
 
 Lists reload automatically when a file changes. **Editing or reordering a list changes which value a given caption picks.**
 
-**Adult only.** Any line in an `age` list containing a number under 18, in digits or spelled out (`twelve-year-old`), is rejected. Any line in any list containing a minor-indicating word, phrase or word family (`teen…`, `child…`, `loli…`, `school girl`, plurals included) or an age under 18 (`14-year-old`, `aged 12`) is rejected. The `nouns` and `names` in `characters.yml` are screened the same way. It is a word screen for careless edits, not a promise about what a list can express: keep your lists adult. A line containing a parenthesis is rejected too, because parentheses never belong in a generated prompt. Rejections are logged and listed in the `wildcards.warnings` of `GET /api/t2i/config`.
+**Adult only.** Every text in `person_appearance.yaml` is screened when it loads: a text with a minor-indicating word, phrase or word family (`teen…`, `child…`, `loli…`, `school girl`, plurals included), a stated age under 18 (`14-year-old`, `aged 12`) or a parenthesis is dropped, a value left with no text is never drawn, an `apparent_age` value whose `years` start under 18 is never drawn, and a `compose` or `engine` text that fails refuses the whole file. Every drawn slot is screened again before it reaches a caption. In the lists, any line in an `age` list containing a number under 18, in digits or spelled out (`twelve-year-old`), is rejected, and so is any line with a minor-indicating term, an age under 18 or a parenthesis. The `nouns` and `names` in `characters.yml` are screened the same way. It is a word screen for careless edits, not a promise about what a file can express: keep your files adult. Rejections are logged and listed in the `wildcards.warnings` of `GET /api/t2i/config`.
 
 ### `characters.yml`
 
-Optional; defaults are built in. It sets the names, the noun for each gender, which slots are drawn and in what order, which slots read as `<age> <ethnicity> woman` versus `with …`, which tokens belong to characters, and which words before `hair` mean body hair (`pubic`, `body`, …), where the plain word is used.
+Optional; defaults are built in. It sets the names, the noun for each gender, which tokens belong to characters, and which words before `hair` mean body hair (`pubic`, `body`, …), where the plain word is used. The description's layout moved to `person_appearance.yaml`; an old `slots` or `intro` key is ignored with a warning.
 
 ### How a description is placed
 
@@ -122,7 +141,7 @@ Optional; defaults are built in. It sets the names, the noun for each gender, wh
 
 ### Age wording
 
-A bare *woman* or *man* makes image models draw the subject younger than the number, so a first mention also names the age bracket in words: from **40** the noun becomes *middle aged woman* / *middle aged man* (*A 52-year-old Nordic middle aged man with …*), and **over 70** it becomes *old woman* / *old man* (a 70-year-old is still middle aged). The age is the first number in the drawn `age` value, in digits or spelled out (`45-year-old`, `forty-five-year-old`, `in her 50s`); a value with no number (`elderly`) is left alone, and so is a character with no `age` list. Later mentions keep the plain noun. The two cut-offs are the constants `MIDDLE_AGED_FROM` and `OLD_FROM` in `metascan/core/t2i_characters.py`.
+A bare *woman* or *man* makes image models draw the subject younger than the number, so a first mention also names the age bracket in words: from **40** the noun becomes *middle aged woman* / *middle aged man* (*A 52-year-old Nordic middle aged man with …*), and **over 70** it becomes *old woman* / *old man* (a 70-year-old is still middle aged). The age is the first number in the drawn `age` slot, in digits or spelled out (`45-year-old`, `forty-five-year-old`, `in her 50s`); a slot with no number (`elderly`) is left alone, and so is a character with no `age` slot. Later mentions keep the plain noun. The two cut-offs are the constants `MIDDLE_AGED_FROM` and `OLD_FROM` in `metascan/core/t2i_characters.py`.
 
 ### Later mentions
 

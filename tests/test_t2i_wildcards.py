@@ -1,8 +1,9 @@
 """Tests for the t2i wildcard loader (spec sections 3.6 and 3.7).
 
 The guard tests write their own small list files with hand-written lines.
-The last two classes load a copy of the starter files that ship in
-``data/t2i_captions/`` (never the real caption CSV, never user lists).
+The last classes load a copy of the starter files that ship in
+``data/t2i_captions/`` (``characters.yml`` and ``person_appearance.yaml``;
+never the real caption CSV, never user lists).
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 from unittest import mock
+
+import yaml
 
 from metascan.core import t2i_wildcards
 from metascan.core.t2i_characters import CharacterConfig, Library, resolve_caption
@@ -27,8 +30,10 @@ from metascan.core.t2i_wildcards import (
 )
 
 SHIPPED_DIR = Path(__file__).resolve().parents[1] / "data" / "t2i_captions"
-STARTER_FILES = (
-    "characters.yml",
+STARTER_FILES = ("characters.yml", "person_appearance.yaml")
+APPEARANCE = "person_appearance.yaml"
+# The per-slot lists person_appearance.yaml replaced: they must not come back.
+RETIRED_LISTS = (
     "age.txt",
     "ethnicity.txt",
     "skin.txt",
@@ -417,8 +422,6 @@ class CharactersYmlTests(TempDirCase):
             "characters.yml",
             "names:\n  female: [zoe, Mia]\n  male: [Max]\n"
             "nouns: {female: lady, male: gentleman}\n"
-            "slots: [age, hair, body]\n"
-            "intro:\n  head: [age]\n  with: [hair, body]\n"
             "token_slots: [hair, chest]\n"
             "token_gender: {chest: male}\n"
             "body_hair_prefixes: [Pubic, Facial]\n",
@@ -432,9 +435,6 @@ class CharactersYmlTests(TempDirCase):
                 male_names=("MAX",),
                 noun_female="lady",
                 noun_male="gentleman",
-                slots=("age", "hair", "body"),
-                head_slots=("age",),
-                with_slots=("hair", "body"),
                 token_slots=("hair", "chest"),
                 token_gender=(("chest", "male"),),
                 body_hair_prefixes=("pubic", "facial"),
@@ -450,17 +450,17 @@ class CharactersYmlTests(TempDirCase):
     def test_bad_fields_warn_and_keep_the_other_fields(self) -> None:
         self.write(
             "characters.yml",
-            "names: 5\nnouns: {female: lady, other: x}\nslots: []\n"
+            "names: 5\nnouns: {female: lady, other: x}\ntoken_slots: []\n"
             "token_gender: {breasts: neither, penis: male}\nmystery: 1\n",
         )
         library, warnings = load_library(self.dir)
         config = library.config
         self.assertEqual(config.female_names, CharacterConfig().female_names)
         self.assertEqual(config.noun_female, "lady")
-        self.assertEqual(config.slots, CharacterConfig().slots)
+        self.assertEqual(config.token_slots, CharacterConfig().token_slots)
         self.assertEqual(config.token_gender, (("penis", "male"),))
         text = "\n".join(warnings)
-        for needle in ("names", "nouns.other", "slots", "breasts", "mystery"):
+        for needle in ("names", "nouns.other", "token_slots", "breasts", "mystery"):
             self.assertIn(needle, text)
 
     def test_names_are_uppercased_validated_and_deduplicated(self) -> None:
@@ -502,17 +502,16 @@ class CharactersYmlTests(TempDirCase):
         self.assertIn("LOLITA", text)
         self.assertIn("KIDDO", text)
 
-    def test_unknown_intro_slots_are_dropped_with_a_warning(self) -> None:
+    def test_the_old_layout_keys_say_where_they_moved(self) -> None:
         self.write(
             "characters.yml",
-            "intro:\n  head: [age, nonsense]\n  with: [hair, skin, bogus]\n",
+            "slots: [age, hair]\nintro:\n  head: [age]\n  with: [hair]\n",
         )
         library, warnings = load_library(self.dir)
-        self.assertEqual(library.config.head_slots, ("age",))
-        self.assertEqual(library.config.with_slots, ("hair", "skin"))
-        text = "\n".join(warnings)
-        self.assertIn("nonsense", text)
-        self.assertIn("bogus", text)
+        self.assertEqual(library.config, CharacterConfig())
+        self.assertEqual(len(warnings), 2)
+        for warning in warnings:
+            self.assertIn("moved to person_appearance.yaml", warning)
 
     def test_the_config_reaches_the_engine(self) -> None:
         self.write("characters.yml", "names: {female: [ZOE], male: [MAX]}\n")
@@ -627,29 +626,145 @@ class LibraryCacheTests(TempDirCase):
         self.assertEqual(len({id(library) for library in results}), 1)
 
 
-class GuardEndToEndTests(TempDirCase):
-    """Ordinary careless list edits must not reach a resolved caption.
+def shipped_appearance() -> Dict[str, Any]:
+    data = yaml.safe_load((SHIPPED_DIR / APPEARANCE).read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    return data
 
-    The starters plus one bad line each in an age list, a body list and the
-    ``characters.yml`` noun: every one is reported, none is ever drawn.
+
+def many_captions(count: int) -> List[str]:
+    return [
+        f"__ALICE__, __BELLA__, __CLARA__ and __ADAM__ pose by stall {i}."
+        for i in range(count)
+    ]
+
+
+class AppearanceFileTests(TempDirCase):
+    """person_appearance.yaml: loading, the adult-only screen and reloads.
+    Each test writes a copy of the shipped file, edited where it says so."""
+
+    def write_appearance(self, data: Dict[str, Any]) -> None:
+        self.write(APPEARANCE, yaml.safe_dump(data, sort_keys=False))
+
+    def test_a_missing_file_is_no_load_warning_but_a_resolve_warning(self) -> None:
+        library, warnings = load_library(self.dir)
+        self.assertIsNone(library.appearance)
+        self.assertEqual(warnings, [])
+        result = resolve_caption("__ALICE__ waves.", 1, "ref", library)
+        self.assertEqual(result.text, "A woman waves.")
+        self.assertTrue(any(APPEARANCE in w for w in result.warnings))
+
+    def test_malformed_or_invalid_yaml_is_one_warning_and_no_people(self) -> None:
+        broken = shipped_appearance()
+        broken["attributes"]["hair_color"]["mult"] = None
+        broken["attributes"]["eye_color"]["values"]["blue"]["mult"] = {
+            "nonsense": {"x": 2}
+        }
+        for text in ("attributes: [", yaml.safe_dump(broken)):
+            with self.subTest(text=text[:20]):
+                self.write(APPEARANCE, text)
+                library, warnings = load_library(self.dir)
+                self.assertIsNone(library.appearance)
+                self.assertEqual(len(warnings), 1, warnings)
+                self.assertTrue(warnings[0].startswith(APPEARANCE), warnings[0])
+
+    def test_a_rejected_text_is_dropped_and_a_value_left_without_text_is_never_drawn(
+        self,
+    ) -> None:
+        data = shipped_appearance()
+        body = data["attributes"]["body_type"]["values"]
+        body["slim"] = {"weight": 10_000, "text": ["a teenaged figure", "a slim build"]}
+        body["average"] = {"weight": 10_000, "text": "a schoolgirl figure"}
+        self.write_appearance(data)
+        library, warnings = load_library(self.dir)
+        self.assertIsNotNone(library.appearance)
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assertTrue(all("rejected" in w for w in warnings))
+        for caption in many_captions(60):
+            result = resolve_caption(caption, 1, "ref", library)
+            self.assertNotRegex(result.text.lower(), r"teen|school")
+            self.assertIn("a slim build", result.text)
+
+    def test_an_age_range_under_18_disables_its_value(self) -> None:
+        data = shipped_appearance()
+        ages = data["attributes"]["apparent_age"]["values"]
+        ages["early_20s"] = {
+            "weight": 10_000,
+            "text": "early twenties",
+            "years": [16, 22],
+        }
+        self.write_appearance(data)
+        library, warnings = load_library(self.dir)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("age under 18", warnings[0])
+        for caption in many_captions(60):
+            for drawn in resolve_caption(
+                caption, 1, "ref", library
+            ).characters.values():
+                self.assertGreaterEqual(int(drawn["age"][:2]), 21, drawn["age"])
+
+    def test_a_compose_or_engine_text_that_fails_the_screen_refuses_the_file(
+        self,
+    ) -> None:
+        for where in ("compose", "engine"):
+            data = shipped_appearance()
+            if where == "compose":
+                data["compose"]["eyes"] = [{"text": "{eye_color} childlike eyes"}]
+            else:
+                data["engine"]["slots"]["eyes"] = "{eyes} (detailed)"
+            with self.subTest(where=where):
+                self.write_appearance(data)
+                library, warnings = load_library(self.dir)
+                self.assertIsNone(library.appearance)
+                self.assertEqual(len(warnings), 1, warnings)
+
+    def test_the_cache_keeps_the_last_good_appearance_when_an_edit_breaks_it(
+        self,
+    ) -> None:
+        self.write_appearance(shipped_appearance())
+        cache = LibraryCache(self.dir)
+        good, _ = cache.get()
+        self.assertIsNotNone(good.appearance)
+        self.write(APPEARANCE, "attributes: [")
+        library, warnings = cache.get()
+        self.assertIs(library.appearance, good.appearance)
+        self.assertTrue(any("keeping the last version" in w for w in warnings))
+        # Fixed again: the new file is read.
+        data = shipped_appearance()
+        data["engine"]["head"] = ["ethnicity"]
+        self.write_appearance(data)
+        library, warnings = cache.get()
+        self.assertEqual(warnings, [])
+        self.assertEqual(library.appearance.engine.head, ("ethnicity",))
+
+
+class GuardEndToEndTests(TempDirCase):
+    """Ordinary careless edits must not reach a resolved caption.
+
+    The starters plus one bad text each in the appearance's ages and body
+    types and the ``characters.yml`` noun: every one is reported, none is
+    ever drawn.
     """
 
     def test_no_minor_cue_survives_into_a_resolved_caption(self) -> None:
-        for name in STARTER_FILES:
-            if name != "characters.yml":
-                shutil.copy(SHIPPED_DIR / name, self.dir / name)
-        with (self.dir / "age.txt").open("a", encoding="utf-8") as handle:
-            handle.write("twelve-year-old\n")
-        with (self.dir / "body.female.txt").open("a", encoding="utf-8") as handle:
-            handle.write("a teenaged figure\n")
+        data = shipped_appearance()
+        data["attributes"]["apparent_age"]["values"]["kid"] = {
+            "weight": 10_000,
+            "text": "early twenties",
+            "years": [12, 14],
+        }
+        data["attributes"]["body_type"]["values"]["lean"]["text"] = "a teenaged figure"
+        data["attributes"]["body_type"]["values"]["lean"]["weight"] = 10_000
+        self.write(APPEARANCE, yaml.safe_dump(data, sort_keys=False))
         self.write("characters.yml", "nouns:\n  female: 'teen girl (petite)'\n")
         library, warnings = load_library(self.dir)
         self.assertEqual(len(warnings), 3, warnings)
-        caption = "__ALICE__ and __ADAM__ sit on a bench. __BELLA__ waves."
-        for seed in range(400):
+        for caption in many_captions(100):
             for style in ("ref", "noun", "name"):
-                text = resolve_caption(caption, seed, style, library).text.lower()
-                self.assertNotRegex(text, r"twelve|teen|[()]", (seed, style, text))
+                text = resolve_caption(caption, 1, style, library).text.lower()
+                self.assertNotRegex(
+                    text, r"twelve|teen|\b1[0-7]-year|[()]", (caption, style, text)
+                )
 
 
 class ShippedStarterTests(TempDirCase):
@@ -660,74 +775,52 @@ class ShippedStarterTests(TempDirCase):
         for name in STARTER_FILES:
             shutil.copy(SHIPPED_DIR / name, self.dir / name)
 
-    def test_the_starter_files_exist_in_the_repo(self) -> None:
+    def test_the_starter_files_exist_and_the_old_lists_are_gone(self) -> None:
         for name in STARTER_FILES:
             self.assertTrue((SHIPPED_DIR / name).is_file(), name)
+        for name in RETIRED_LISTS:
+            self.assertFalse((SHIPPED_DIR / name).exists(), name)
 
-    def test_load_library_reports_no_warnings_and_every_slot_has_values(self) -> None:
+    def test_load_library_reports_no_warnings(self) -> None:
         library, warnings = load_library(self.dir)
         self.assertEqual(warnings, [])
         self.assertEqual(library.config, default_library_config())
-        for key in (
-            "age",
-            "ethnicity",
-            "skin",
-            "eyes",
-            "face",
-            "hair",
-            "body.female",
-            "body.male",
-        ):
-            with self.subTest(key=key):
-                self.assertTrue(library.lists[key], key)
+        self.assertIsNotNone(library.appearance)
+        self.assertEqual(dict(library.lists), {})
 
-    def test_each_list_has_between_15_and_30_unique_values(self) -> None:
-        library, _ = load_library(self.dir)
-        for key, values in library.lists.items():
-            with self.subTest(key=key):
-                self.assertGreaterEqual(len(values), 15)
-                self.assertLessEqual(len(values), 30)
-                self.assertEqual(len({v.casefold() for v in values}), len(values))
+    def test_every_age_is_adult(self) -> None:
+        values = shipped_appearance()["attributes"]["apparent_age"]["values"]
+        for vid, value in values.items():
+            with self.subTest(value=vid):
+                self.assertGreaterEqual(min(value["years"]), 21)
 
-    def test_ages_are_adult_and_formatted_like_27_year_old(self) -> None:
-        library, _ = load_library(self.dir)
-        ages = library.lists["age"]
-        for value in ages:
-            match = re.fullmatch(r"(\d\d)-year-old", value)
-            self.assertIsNotNone(match, value)
-            assert match is not None
-            self.assertGreaterEqual(int(match.group(1)), 21)
-            self.assertLessEqual(int(match.group(1)), 58)
-        self.assertEqual(min(int(a[:2]) for a in ages), 21)
-        self.assertEqual(max(int(a[:2]) for a in ages), 58)
-
-    def test_every_hair_value_ends_in_hair(self) -> None:
-        library, _ = load_library(self.dir)
-        for value in library.lists["hair"]:
-            self.assertTrue(value.endswith(" hair"), value)
-
-    def test_values_are_plain_phrases_without_punctuation_that_breaks_prose(
-        self,
-    ) -> None:
-        library, _ = load_library(self.dir)
-        for key, values in library.lists.items():
-            for value in values:
-                with self.subTest(key=key, value=value):
-                    self.assertEqual(value, value.strip())
-                    self.assertNotRegex(value, r"[(),;:.]")
-                    if key not in ("age", "ethnicity", "hair"):
-                        self.assertNotIn(" with ", f" {value} ")
-
-    def test_starter_lists_carry_no_anatomy_terms(self) -> None:
+    def test_drawn_slots_are_plain_adult_phrases(self) -> None:
         library, _ = load_library(self.dir)
         banned = re.compile(
             r"\b(breast|breasts|vagina|vulva|penis|genital|genitals|nipple|nipples"
             r"|anus|buttock|buttocks|nude|naked)\b",
             re.IGNORECASE,
         )
-        for key, values in library.lists.items():
-            for value in values:
-                self.assertIsNone(banned.search(value), (key, value))
+        for caption in many_captions(150):
+            result = resolve_caption(caption, 1, "ref", library)
+            for name, drawn in result.characters.items():
+                for slot, value in drawn.items():
+                    with self.subTest(caption=caption, name=name, slot=slot):
+                        self.assertEqual(value, value.strip())
+                        self.assertNotRegex(value, r"[();:.{}]|__")
+                        self.assertIsNone(banned.search(value), value)
+                        self.assertIsNone(t2i_wildcards._reject_reason(slot, value))
+                self.assertRegex(drawn["age"], r"^\d\d-year-old$")
+                if "hair" in drawn:
+                    self.assertTrue(drawn["hair"].endswith(" hair"), drawn["hair"])
+
+    def test_a_name_fixes_the_gender_it_draws(self) -> None:
+        library, _ = load_library(self.dir)
+        for caption in many_captions(40):
+            result = resolve_caption(caption, 1, "ref", library)
+            for name in ("ALICE", "BELLA", "CLARA"):
+                self.assertEqual(result.attributes[name]["gender"], "woman")
+            self.assertEqual(result.attributes["ADAM"]["gender"], "man")
 
     def test_resolve_caption_smoke_against_the_starters(self) -> None:
         library, _ = load_library(self.dir)
@@ -737,26 +830,35 @@ class ShippedStarterTests(TempDirCase):
         self.assertEqual(result.warnings, [])
         self.assertIn("-year-old", result.text)
         self.assertNotIn("__", result.text)
-        for name in ("ALICE", "ADAM"):
-            drawn = result.characters[name]
-            self.assertEqual(
-                list(drawn),
-                ["age", "ethnicity", "skin", "eyes", "face", "hair", "body"],
-            )
-        self.assertIn(result.characters["ALICE"]["hair"], library.lists["hair"])
-        self.assertIn(result.characters["ALICE"]["body"], library.lists["body.female"])
-        self.assertIn(result.characters["ADAM"]["body"], library.lists["body.male"])
+        self.assertNotIn("{", result.text)
+        alice = result.characters["ALICE"]
+        self.assertIn(f"Her long {alice['hair']} is loose.", result.text)
+        # Her hair is spelled out, so her drawn style is not described too.
+        if "hairstyle" in alice:
+            self.assertNotIn(alice["hairstyle"], result.text)
 
-    def test_starter_lists_resolve_without_warnings_across_many_seeds(self) -> None:
+    def test_the_cast_keeps_its_hair_apart(self) -> None:
         library, _ = load_library(self.dir)
-        caption = (
-            "__ALICE__, __BELLA__, __CLARA__ and __ADAM__ pose. Her __HAIR__ shines."
-        )
-        for seed in range(200):
-            for style in ("ref", "noun", "name"):
-                result = resolve_caption(caption, seed, style, library)
-                self.assertEqual(result.warnings, [], (seed, style))
-                self.assertNotIn("(", result.text)
+        clashes = 0
+        captions = many_captions(300)
+        for caption in captions:
+            result = resolve_caption(caption, 1, "ref", library)
+            hair = [d.get("hair") for d in result.characters.values() if d.get("hair")]
+            clashes += len(hair) != len(set(hair))
+            self.assertNotIn("(", result.text)
+        self.assertLessEqual(clashes, len(captions) // 50)
+
+    def test_the_cast_depends_on_the_caption_alone(self) -> None:
+        library, _ = load_library(self.dir)
+        caption = "__ALICE__ meets __ADAM__ in a cafe."
+        first = resolve_caption(caption, 0, "ref", library)
+        for seed in (1, 99, 2**31 - 1):
+            again = resolve_caption(caption, seed, "ref", library)
+            self.assertEqual(again.characters, first.characters)
+            self.assertEqual(again.attributes, first.attributes)
+            self.assertEqual(again.text, first.text)
+        other = resolve_caption(caption + " ", 0, "ref", library)
+        self.assertNotEqual(other.characters, first.characters)
 
 
 if __name__ == "__main__":

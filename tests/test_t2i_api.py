@@ -40,6 +40,7 @@ from metascan.core.t2i_runner import (
     T2iUnavailableError,
 )
 from metascan.core.t2i_wildcards import LibraryCache
+from tests._t2i_appearance import write_list_files
 from metascan.core.vlm_client import VlmError
 from metascan.core.vlm_select import VlmSelectError
 
@@ -181,8 +182,7 @@ class T2iApiCase(unittest.TestCase):
         self._write_csv()
         lists = self.data_dir / "lists"
         lists.mkdir()
-        for name, text in LISTS.items():
-            (lists / name).write_text(text, encoding="utf-8")
+        write_list_files(lists, LISTS)
         self.captions = CaptionStore(self.csv_path)
         self.library = LibraryCache(lists)
         self.runner = FakeRunner(self.captions, self.library)
@@ -435,8 +435,8 @@ class TestConfig(T2iApiCase):
 
     def test_wildcards_list_the_slots_that_have_lists(self) -> None:
         wildcards = self.client.get("/api/t2i/config").json()["wildcards"]
-        # Config slots first, in their order, then the rest by name; gendered
-        # files count once under the slot.
+        # The appearance's slots first, in their order, then the lists by
+        # name; gendered files count once under the slot.
         self.assertEqual(wildcards["slots"], ["age", "hair", "body", "sky"])
         self.assertEqual(wildcards["warnings"], [])
 
@@ -570,6 +570,7 @@ class TestCaptions(T2iApiCase):
             {
                 "resolved_caption": "A 34-year-old woman reads.",
                 "characters": {"ALICE": {"age": "34-year-old", "hair": "auburn hair"}},
+                "attributes": {},
                 "warnings": ["no list for __BREASTS__"],
             },
         )

@@ -1161,7 +1161,7 @@ onBeforeUnmount(() => {
                     </dl>
                     <p class="token-help-note">
                       A character's first mention gets the full description; later mentions get a short handle
-                      (“the auburn-haired woman”). Names and lists live in <code>data/t2i_captions/</code>.
+                      (“the auburn-haired woman”). Looks are drawn from <code>person_appearance.yaml</code>; names and lists live beside it in <code>data/t2i_captions/</code>.
                     </p>
                   </div>
                 </span>

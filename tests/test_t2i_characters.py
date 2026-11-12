@@ -25,6 +25,9 @@ from metascan.core.t2i_characters import (
     ResolvedCaption,
     resolve_caption,
 )
+from metascan.core.t2i_ages import stated_age
+from metascan.core.t2i_characters import _article, _hair_stem
+from tests._t2i_appearance import library_from_lists
 
 LISTS: Dict[str, Tuple[str, ...]] = {
     "age": (
@@ -106,7 +109,7 @@ def make_library(
     lists.update(extra or {})
     for key in drop:
         lists.pop(key, None)
-    return Library(config=config or CONFIG, lists=lists)
+    return library_from_lists(lists, config=config or CONFIG)
 
 
 LIBRARY = make_library()
@@ -144,6 +147,25 @@ def cast_key(caption: str) -> str:
     return hashlib.sha256(caption.encode("utf-8")).hexdigest()
 
 
+def head_of(drawn: Mapping[str, str], noun: str) -> str:
+    """The first-mention head the engine writes for a drawn character."""
+    age = stated_age(drawn["age"])
+    if age is not None and age >= 71:
+        noun = f"old {noun}"
+    elif age is not None and age >= 40:
+        noun = f"middle aged {noun}"
+    head = f"{drawn['age']} {drawn['ethnicity']} {noun}"
+    return f"{_article(head)} {head}"
+
+
+def handle_of(drawn: Mapping[str, str], noun: str) -> str:
+    return f"the {_hair_stem(drawn['hair'])} {noun}"
+
+
+def cap(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
 def draw(key: object, name: str, slot: str, salt: int, size: int) -> int:
     """The draw formula, restated independently of the module."""
     digest = hashlib.sha256(f"{key}|{name}|{slot}|{salt}".encode("utf-8")).digest()
@@ -172,11 +194,8 @@ class DefaultsTests(unittest.TestCase):
         )
         self.assertEqual(cfg.male_names, ("ADAM", "BOB"))
         self.assertEqual((cfg.noun_female, cfg.noun_male), ("woman", "man"))
-        self.assertEqual(
-            cfg.slots, ("age", "ethnicity", "skin", "eyes", "face", "hair", "body")
-        )
-        self.assertEqual(cfg.head_slots, ("age", "ethnicity"))
-        self.assertEqual(cfg.with_slots, ("skin", "eyes", "face", "hair", "body"))
+        # The description layout lives in person_appearance.yaml's engine.
+        self.assertFalse(hasattr(cfg, "slots"))
         self.assertEqual(cfg.token_slots, ("hair", "breasts", "vagina", "penis"))
         self.assertEqual(
             cfg.token_gender,
@@ -208,16 +227,18 @@ class AppendixBGoldenTests(unittest.TestCase):
             "__ADAM__ and __CLARA__ walk along a beach. His short __HAIR__ is damp "
             "and her __HAIR__ is tied back. __ADAM__ carries a surfboard."
         )
+        res = resolve(caption)
+        a, c = res.characters["ADAM"], res.characters["CLARA"]
+        self.assertNotEqual(a["hair"], c["hair"])
         expected = (
-            "A 45-year-old East Asian middle aged man and a 31-year-old East Asian "
-            "woman walk along a beach. His short jet-black hair is damp and her "
-            "auburn hair "
-            "is tied back. The jet-black-haired man carries a surfboard. The "
-            "jet-black-haired man has fair skin, brown eyes, an oval face and "
-            "a lean build. The auburn-haired woman has deep brown skin, green eyes, "
-            "high cheekbones and a curvy build."
+            f"{cap(head_of(a, 'man'))} and {head_of(c, 'woman')} walk along a "
+            f"beach. His short {a['hair']} is damp and her {c['hair']} is tied "
+            f"back. {cap(handle_of(a, 'man'))} carries a surfboard. "
+            f"{cap(handle_of(a, 'man'))} has {a['skin']}, {a['eyes']}, "
+            f"{a['face']} and {a['body']}. {cap(handle_of(c, 'woman'))} has "
+            f"{c['skin']}, {c['eyes']}, {c['face']} and {c['body']}."
         )
-        self.assertEqual(resolve(caption).text, expected)
+        self.assertEqual(res.text, expected)
 
     def test_single_character_with_hair_token_and_later_mention(self) -> None:
         caption = (
@@ -288,38 +309,41 @@ class IdentityStyleTests(unittest.TestCase):
 
     def test_two_females_owner_tracking_all_three_styles(self) -> None:
         # Two women of one gender cannot be forced (their hair must differ), so
-        # this is the cast their caption's sha256 draws.
-        alice = (
-            "A 45-year-old Latina middle aged woman{named} with olive skin, green "
-            "eyes, a soft round face, chestnut brown hair and an athletic build"
-        )
-        bella = (
-            "a 38-year-old Mediterranean woman{named} with fair skin, hazel "
-            "eyes, a soft round face and an athletic build"
-        )
+        # the expected text is built from the cast the caption draws.
+        chars = resolve(self.TWO_FEMALES).characters
+        a, b = chars["ALICE"], chars["BELLA"]
+        self.assertNotEqual(a["hair"], b["hair"])
+
+        def intro(d: Mapping[str, str], named: str, hair: bool) -> str:
+            head = head_of(d, "woman")
+            details = [d["skin"], d["eyes"], d["face"]]
+            details += [d["hair"]] if hair else []
+            details += [d["body"]]
+            return f"{head}{named} with {', '.join(details[:-1])} and {details[-1]}"
+
+        tail = f" sits at a desk. Long, straight {b['hair']} falls over "
         expected = {
             "ref": (
-                alice.format(named="")
+                cap(intro(a, "", True))
                 + " stands beside a window while "
-                + bella.format(named="")
-                + " sits at a desk. Long, straight auburn hair falls over "
-                "the auburn-haired woman's shoulders. The "
-                "chestnut-brown-haired woman turns to look at the "
-                "auburn-haired woman."
+                + intro(b, "", False)
+                + tail
+                + f"{handle_of(b, 'woman')}'s shoulders. {cap(handle_of(a, 'woman'))}"
+                f" turns to look at {handle_of(b, 'woman')}."
             ),
             "noun": (
-                alice.format(named="")
+                cap(intro(a, "", True))
                 + " stands beside a window while "
-                + bella.format(named="")
-                + " sits at a desk. Long, straight auburn hair falls over "
-                "the woman's shoulders. The woman turns to look at the woman."
+                + intro(b, "", False)
+                + tail
+                + "the woman's shoulders. The woman turns to look at the woman."
             ),
             "name": (
-                alice.format(named=" named Alice")
+                cap(intro(a, " named Alice", True))
                 + " stands beside a window while "
-                + bella.format(named=" named Bella")
-                + " sits at a desk. Long, straight auburn hair falls over "
-                "Bella's shoulders. Alice turns to look at Bella."
+                + intro(b, " named Bella", False)
+                + tail
+                + "Bella's shoulders. Alice turns to look at Bella."
             ),
         }
         for style, text in expected.items():
@@ -478,16 +502,18 @@ class FirstMentionTests(unittest.TestCase):
         )
 
     def test_deferred_characters_trail_in_first_mention_order(self) -> None:
-        text = resolve("__ALICE__, __BELLA__ and __CLARA__ wave.").text
+        res = resolve("__ALICE__, __BELLA__ and __CLARA__ wave.")
+        d = [res.characters[n] for n in ("ALICE", "BELLA", "CLARA")]
+        self.assertEqual(len({x["hair"] for x in d}), 3)
+        trailing = " ".join(
+            f"{cap(handle_of(x, 'woman'))} has {x['skin']}, {x['eyes']}, "
+            f"{x['face']} and {x['body']}."
+            for x in d
+        )
         self.assertEqual(
-            text,
-            "A 24-year-old West African woman, a 45-year-old South Asian middle "
-            "aged woman and a 52-year-old West African middle aged woman wave. "
-            "The platinum-blonde-haired woman has warm tan skin, blue eyes, a "
-            "heart-shaped face and an athletic build. The chestnut-brown-haired "
-            "woman has deep brown skin, green eyes, a soft round face and a slim "
-            "build. The auburn-haired woman has olive skin, brown eyes, an oval "
-            "face and an athletic build.",
+            res.text,
+            f"{cap(head_of(d[0], 'woman'))}, {head_of(d[1], 'woman')} and "
+            f"{head_of(d[2], 'woman')} wave. {trailing}",
         )
 
     def test_compound_subject_with_comma_and_oxford_and(self) -> None:
@@ -497,7 +523,7 @@ class FirstMentionTests(unittest.TestCase):
         self.assertEqual(text.count(" has "), 3)
 
     def test_no_trailing_sentence_when_there_is_nothing_left_to_say(self) -> None:
-        library = Library(config=CONFIG, lists={"hair": ("auburn hair",)})
+        library = library_from_lists({"hair": ("auburn hair",)}, config=CONFIG)
         res = resolve(
             "A close-up of __ALICE__'s hands. Her __HAIR__ shines.", library=library
         )
@@ -506,7 +532,7 @@ class FirstMentionTests(unittest.TestCase):
         )
 
     def test_hair_is_never_lost_when_it_is_the_only_detail(self) -> None:
-        library = Library(config=CONFIG, lists={"hair": ("auburn hair",)})
+        library = library_from_lists({"hair": ("auburn hair",)}, config=CONFIG)
         for style, expected in (
             ("ref", "A close-up of a woman's hands. The woman has auburn hair."),
             ("noun", "A close-up of a woman's hands. The woman has auburn hair."),
@@ -1208,13 +1234,12 @@ class DrawTests(unittest.TestCase):
         res = resolve("__ALICE__ and __ADAM__ wave.", library=library)
         self.assertIn("body", res.characters["ALICE"])
         self.assertNotIn("body", res.characters["ADAM"])
-        self.assertTrue(any("body" in w for w in res.warnings))
 
-    def test_a_missing_slot_list_is_omitted_and_warned_about_once(self) -> None:
+    def test_a_missing_slot_list_is_omitted(self) -> None:
         library = make_library(drop=("eyes",))
         res = resolve("__ALICE__ and __BELLA__ wave.", library=library)
         self.assertNotIn("eyes", res.text)
-        self.assertEqual(sum("eyes" in w for w in res.warnings), 1)
+        self.assertNotIn("eyes", res.characters["ALICE"])
 
 
 class CastKeyTests(unittest.TestCase):
@@ -1253,24 +1278,25 @@ class CastKeyTests(unittest.TestCase):
             key = cast_key(caption)
             cast = self.cast(caption)
             self.assertEqual(list(cast["ALICE"]), list(self.SLOTS))
+            first = LIBRARY.appearance.person(key, "ALICE", "female")
+            self.assertEqual(cast["ALICE"], first.slots)
             for name in ("ALICE", "CLARA"):
                 for slot in self.SLOTS:
-                    if slot == "hair" and name != "ALICE":
-                        continue  # a later character's hair is re-drawn on a clash
                     options = LISTS["body.female" if slot == "body" else slot]
-                    expected = options[draw(key, name, slot, 0, len(options))]
                     with self.subTest(caption=caption, name=name, slot=slot):
-                        self.assertEqual(cast[name][slot], expected)
+                        self.assertIn(cast[name][slot], options)
+            # A later character is drawn again only to keep the hair apart.
+            clara = LIBRARY.appearance.person(
+                key, "CLARA", "female", {cast["ALICE"]["hair"].casefold()}
+            )
+            self.assertEqual(cast["CLARA"], clara.slots)
 
     def test_a_default_owner_is_drawn_like_a_named_character(self) -> None:
         caption = "Her __HAIR__ is long."
         cast = self.cast(caption)
         self.assertEqual(list(cast), ["ALICE"])
-        for slot in self.SLOTS:
-            options = LISTS["body.female" if slot == "body" else slot]
-            expected = options[draw(cast_key(caption), "ALICE", slot, 0, len(options))]
-            with self.subTest(slot=slot):
-                self.assertEqual(cast["ALICE"][slot], expected)
+        person = LIBRARY.appearance.person(cast_key(caption), "ALICE", "female")
+        self.assertEqual(cast["ALICE"], person.slots)
 
     def test_the_identity_style_is_not_part_of_the_key(self) -> None:
         caption = "__ALICE__ waves at __BELLA__. __ALICE__ smiles."
@@ -1338,11 +1364,16 @@ class PlainWildcardTests(unittest.TestCase):
         self.assertTrue(text.endswith(" is quiet."), text)
 
     def test_wildcard_that_is_also_a_slot_name_uses_the_plain_list(self) -> None:
-        # ``skin`` is a draw slot but not a token slot: __SKIN__ is a wildcard.
-        res = resolve("Her __SKIN__ glows.", seed=5)
+        # ``skin`` is an appearance slot but not a token slot: __SKIN__ is a
+        # wildcard, drawn from a plain skin.txt list when there is one.
+        library = Library(
+            config=CONFIG,
+            lists={"skin": LISTS["skin"]},
+            appearance=LIBRARY.appearance,
+        )
+        res = resolve("Her __SKIN__ glows.", seed=5, library=library)
         self.assertIn(" glows.", res.text)
-        expected_options = LISTS["skin"]
-        self.assertTrue(any(v in res.text for v in expected_options), res.text)
+        self.assertTrue(any(v in res.text for v in LISTS["skin"]), res.text)
         self.assertEqual(res.characters, {})
 
 
@@ -1534,7 +1565,7 @@ class EdgeInputTests(unittest.TestCase):
         res = resolve("__ALICE__ waves at __ADAM__.", library=library)
         self.assertEqual(res.text, "A woman waves at a man.")
         self.assertEqual(res.characters, {"ALICE": {}, "ADAM": {}})
-        self.assertTrue(any("hair" in w for w in res.warnings))
+        self.assertTrue(any("person_appearance.yaml" in w for w in res.warnings))
 
     def test_names_and_nouns_come_from_the_config(self) -> None:
         config = CharacterConfig(

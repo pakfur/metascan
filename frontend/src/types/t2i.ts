@@ -443,6 +443,8 @@ export interface T2iPromptResult {
 export interface T2iResolveResult {
   resolved_caption: string
   characters: Record<string, Record<string, string>>
+  /** NAME -> {attribute: value id} sampled from person_appearance.yaml. */
+  attributes: Record<string, Record<string, string>>
   warnings: string[]
 }
 

@@ -1,0 +1,1004 @@
+# =============================================================================
+# person_appearance.yaml
+# Plausibility-constrained appearance sampler config for templated t2i prompts
+# =============================================================================
+#
+# HOW IT WORKS
+# ------------
+# Attributes are sampled IN THE ORDER THEY APPEAR under `attributes:`.
+# An attribute may only be conditioned on attributes that appear above it.
+#
+# Each candidate value's weight is computed as:
+#
+#   base weight
+#     x every matching `mult` factor
+#     x every matching `adjust` factor
+#     -> 0 if any `requires` condition fails
+#
+# BASE WEIGHT comes from one of three sources (first that applies):
+#   weights_from: ancestry      -> profiles.<sampled ancestry>.<this attribute>
+#                                  (falls back to profiles._default.<attribute>)
+#                                  values missing from the table get weight 0
+#   weights_by: {attr: X, table: {...}}
+#                               -> row of `table` whose key matches attribute X
+#                                  (key may be a value id or a group name)
+#                                  values missing from the row get weight 0
+#   weight: N                   -> on the value itself (default 1)
+#
+# CONDITIONS (used by mult / requires / adjust / compose `when`)
+#   Keys are attribute names. Values are lists of value ids OR group names
+#   (see each attribute's `groups:`). `_unset` matches an attribute that was
+#   skipped via `applies_when`.
+#
+#   mult:    {attr: {id_or_group: factor, ...}}         multiply when matched
+#   requires:{attr: [id_or_group, ...]}                  zero unless matched
+#   adjust:  [{when: {attr: [...], attr2: [...]}, factor: N}]
+#                                                        compound (AND) condition
+#
+# MULTI-PICK: `pick: {min: 2, max: 3}` samples without replacement.
+#   `excludes: [ids]` on a value removes those ids once it is picked
+#   (checked in both directions).
+#
+# APPLIES_WHEN: attribute-level condition. If it fails the attribute is
+#   `_unset` and renders as "".
+#
+# TEXT: a value's `text` may be
+#   - a string
+#   - a list (one is chosen at random per sample)
+#   - a map keyed by the values/groups of `text_by` (default: gender),
+#     with an optional `default` key; each entry may itself be a list.
+#
+# PLACEHOLDERS (in value text, compose rules and templates):
+#   {attr}          chosen text of the sampled value (multi-pick joined "a, b and c")
+#   {attr.field}    another field of the sampled value; lists -> random choice,
+#                   2-item numeric `range`-style lists -> random int in range
+#   {composed}      any field defined under `compose:`
+#   {x|cap}         capitalise the first letter of any of the above
+#   {x|a}           prefix with the right indefinite article (a/an)
+#
+# MIXED ANCESTRY: a value with `blend:` samples N parent ancestries and
+#   averages their (normalised) profile tables. Attributes listed in
+#   `blend.ordinal` are instead sampled once per parent and the midpoint of
+#   the two positions (+/- jitter) is taken: intermediate tones, not bimodal.
+#   For condition matching, a mixed person matches `mixed` AND each parent id.
+#
+# Weights are relative, not percentages. They are approximate population
+# tendencies meant to keep combinations plausible, NOT rules about any
+# individual; every profile deliberately keeps a tail of less common traits.
+# Tune freely.
+# =============================================================================
+
+version: 1
+
+attributes:
+
+  # ---------------------------------------------------------------------------
+  gender:
+    values:
+      woman:       {weight: 48, text: woman,  poss: her,   subj: she}
+      man:         {weight: 48, text: man,    poss: his,   subj: he}
+      androgynous: {weight: 4,  text: androgynous person, poss: their, subj: they}
+
+  # ---------------------------------------------------------------------------
+  # Apparent (visual) age. Adults only; floor is 21 so models don't drift young.
+  apparent_age:
+    groups:
+      twenties:       [early_20s, mid_20s, late_20s]
+      thirties:       [early_30s, late_30s]
+      forties:        [early_40s, late_40s]
+      fifties:        [early_50s, late_50s]
+      sixties:        [early_60s, late_60s]
+      seventies_plus: [seventies, eighties]
+    values:
+      early_20s: {weight: 7, text: early twenties, years: [21, 23]}
+      mid_20s:   {weight: 7, text: mid-twenties,   years: [24, 26]}
+      late_20s:  {weight: 8, text: late twenties,  years: [27, 29]}
+      early_30s: {weight: 9, text: early thirties, years: [30, 34]}
+      late_30s:  {weight: 9, text: late thirties,  years: [35, 39]}
+      early_40s: {weight: 9, text: early forties,  years: [40, 44]}
+      late_40s:  {weight: 8, text: late forties,   years: [45, 49]}
+      early_50s: {weight: 8, text: early fifties,  years: [50, 54]}
+      late_50s:  {weight: 7, text: late fifties,   years: [55, 59]}
+      early_60s: {weight: 6, text: early sixties,  years: [60, 64]}
+      late_60s:  {weight: 5, text: late sixties,   years: [65, 69]}
+      seventies: {weight: 6, text: seventies,      years: [70, 79]}
+      eighties:  {weight: 3, text: eighties,       years: [80, 88]}
+
+  # ---------------------------------------------------------------------------
+  # Population profile. Drives skin, hair colour/texture, eyes (see profiles:).
+  ancestry:
+    groups:
+      african_descent:      [west_african, east_african, horn_african, southern_central_african,
+                             afro_latin_caribbean, african_american]
+      later_graying:        [west_african, east_african, horn_african, southern_central_african,
+                             afro_latin_caribbean, african_american, east_asian, southeast_asian]
+      lower_beard_density:  [east_asian, southeast_asian, indigenous_american]
+      lower_baldness_rate:  [east_asian, southeast_asian, indigenous_american]
+    values:
+      west_african:             {weight: 5, text: [West African, Nigerian, Ghanaian, Senegalese, Ivorian]}
+      east_african:             {weight: 3, text: [East African, Kenyan, Tanzanian, Ugandan]}
+      horn_african:             {weight: 3, text: [Ethiopian, Eritrean, Somali]}
+      southern_central_african: {weight: 3, text: [Congolese, Zambian, Zulu, Angolan]}
+      north_african:            {weight: 4, text: [North African, Moroccan, Algerian, Tunisian, Egyptian]}
+      middle_eastern:           {weight: 5, text: [Lebanese, Syrian, Jordanian, Iraqi, Palestinian, Turkish]}
+      persian:                  {weight: 3, text: [Iranian, Persian, Kurdish]}
+      south_asian:              {weight: 7, text: [Indian, Pakistani, Bangladeshi, Sri Lankan]}
+      east_asian:               {weight: 7, text: [Chinese, Japanese, Korean, Taiwanese]}
+      southeast_asian:          {weight: 5, text: [Filipino, Vietnamese, Thai, Indonesian, Malaysian]}
+      central_asian:            {weight: 2, text: [Kazakh, Uzbek, Kyrgyz, Mongolian]}
+      polynesian:               {weight: 2, text: [Samoan, Tongan, Māori, Native Hawaiian]}
+      melanesian:               {weight: 1, text: [Papua New Guinean, Solomon Islander, Fijian, ni-Vanuatu]}
+      aboriginal_australian:    {weight: 1, text: [Aboriginal Australian]}
+      indigenous_american:      {weight: 3, text: [Native American, First Nations, Navajo, Quechua, Maya]}
+      latin_american:
+        weight: 6
+        text:
+          woman:   [Mexican, Colombian, Salvadoran, Guatemalan, Latina]
+          man:     [Mexican, Colombian, Salvadoran, Guatemalan, Latino]
+          default: [Mexican, Colombian, Salvadoran, Guatemalan]
+      afro_latin_caribbean:     {weight: 4, text: [Jamaican, Haitian, Afro-Caribbean, Afro-Brazilian, Afro-Dominican]}
+      african_american:         {weight: 5, text: [African American, Black American]}
+      northern_european:        {weight: 4, text: [Swedish, Norwegian, Danish, Finnish, Icelandic]}
+      celtic:                   {weight: 3, text: [Irish, Scottish, Welsh]}
+      western_european:         {weight: 5, text: [English, German, Dutch, French, Belgian]}
+      southern_european:        {weight: 5, text: [Italian, Spanish, Portuguese, Greek]}
+      eastern_european:         {weight: 5, text: [Polish, Ukrainian, Russian, Czech, Lithuanian]}
+      mixed:
+        weight: 6
+        text: "mixed {a} and {b}"      # {a}/{b} = parent texts
+        blend:
+          count: 2
+          ordinal: [skin_tone]         # intermediate tone between the parents
+          ordinal_jitter: 1            # midpoint of the parents' tones, +/- this many steps
+
+  # ---------------------------------------------------------------------------
+  # Ordered light -> deep (order matters for mixed-ancestry blending).
+  # Roughly aligned with the 10-step Monk Skin Tone scale.
+  skin_tone:
+    weights_from: ancestry
+    groups:
+      light_tones: [porcelain, fair, light]
+      mid_tones:   [light_medium, medium, tan]
+      dark_tones:  [medium_brown, brown, deep_brown, very_deep]
+    values:
+      porcelain:    {text: [pale porcelain, very pale]}
+      fair:         {text: fair}
+      light:        {text: light}
+      light_medium: {text: [light-medium, light beige]}
+      medium:       {text: [medium, medium beige]}
+      tan:          {text: [tan, golden-brown]}
+      medium_brown: {text: medium brown}
+      brown:        {text: [brown, rich brown]}
+      deep_brown:   {text: [deep brown, dark brown]}
+      very_deep:    {text: [very deep brown, deep ebony]}
+
+  undertone:
+    weights_from: ancestry
+    text_by: skin_tone                # wording varies with depth of tone
+    values:
+      cool:
+        text: {dark_tones: [cool undertones, "cool, blue-red undertones"], default: [cool pink undertones, cool undertones]}
+        mult: {skin_tone: {dark_tones: 0.7}}
+      neutral: {text: neutral undertones}
+      warm:    {text: [warm golden undertones, warm undertones]}
+      olive:   {text: olive undertones, mult: {skin_tone: {porcelain: 0.2, dark_tones: 0.3}}}
+
+  # ---------------------------------------------------------------------------
+  hair_texture:
+    weights_from: ancestry
+    values:
+      straight: {text: [straight, fine straight], mult: {ancestry: {mixed: 0.7}}}
+      wavy:     {text: [wavy, softly wavy],       mult: {ancestry: {mixed: 1.3}}}
+      curly:    {text: [curly, springy curly],    mult: {ancestry: {mixed: 1.8}}}
+      coily:    {text: [coily, tightly coiled]}
+
+  # Natural pigment colour. Greying and dye are layered on later.
+  hair_color:
+    weights_from: ancestry
+    values:
+      black:             {text: [jet black, black]}
+      soft_black:        {text: [soft black, off-black]}
+      dark_brown:        {text: dark brown}
+      chestnut:          {text: [chestnut brown, medium brown]}
+      light_brown:       {text: light brown}
+      dark_blonde:       {text: [dark blonde, dirty blonde],      mult: {ancestry: {mixed: 0.4}}}
+      blonde:            {text: [golden blonde, honey blonde],    mult: {ancestry: {mixed: 0.3}}}
+      platinum_blonde:   {text: [natural platinum blonde, white-blonde], mult: {ancestry: {mixed: 0.2}}}
+      strawberry_blonde: {text: strawberry blonde, mult: {ancestry: {mixed: 0.3}}}
+      auburn:            {text: auburn, mult: {ancestry: {mixed: 0.5}}}
+      red:
+        text: [copper red, ginger]
+        mult: {ancestry: {mixed: 0.3}}
+        adjust:
+          - {when: {ancestry: [mixed], skin_tone: [dark_tones]}, factor: 0.3}
+
+  graying:
+    weights_by:
+      attr: apparent_age
+      table:
+        twenties:       {none: 95, few_grays: 5}
+        thirties:       {none: 70, few_grays: 22, temples: 8}
+        forties:        {none: 40, few_grays: 28, temples: 15, salt_pepper: 15, gray: 2}
+        fifties:        {none: 18, few_grays: 17, temples: 15, salt_pepper: 35, gray: 10, silver: 5}
+        sixties:        {none: 6,  few_grays: 6,  temples: 8,  salt_pepper: 30, gray: 30, silver: 15, white: 5}
+        seventies_plus: {none: 2,  few_grays: 2,  temples: 3,  salt_pepper: 15, gray: 35, silver: 23, white: 20}
+    values:
+      none:        {text: "", mult: {ancestry: {later_graying: 1.4}}}
+      few_grays:   {text: a few strands of gray}
+      temples:     {text: graying at the temples, mult: {gender: {man: 1.8, woman: 0.6}}}
+      salt_pepper: {text: salt-and-pepper, mult: {ancestry: {later_graying: 0.8}}}
+      gray:        {text: gray,            mult: {ancestry: {later_graying: 0.7}}}
+      silver:      {text: [silver, steel-gray], mult: {ancestry: {later_graying: 0.7}}}
+      white:       {text: [white, snow-white],  mult: {ancestry: {later_graying: 0.6}}}
+
+  # ---------------------------------------------------------------------------
+  hair_length:
+    weights_by:
+      attr: gender
+      table:
+        woman:       {bald: 0.02, buzzed: 0.2, very_short: 0.5, short: 1.2, chin: 2,   shoulder: 3,   mid_back: 2.5,  waist: 0.7}
+        man:         {bald: 1,    buzzed: 2,   very_short: 3.5, short: 3,   chin: 0.7, shoulder: 0.5, mid_back: 0.15, waist: 0.05}
+        androgynous: {bald: 0.3,  buzzed: 1.5, very_short: 2,   short: 2.5, chin: 2,   shoulder: 1.2, mid_back: 0.4,  waist: 0.1}
+    values:
+      bald:
+        text: ""
+        mult:
+          apparent_age: {twenties: 0.4, thirties: 0.8, forties: 1.4, fifties: 2.0, sixties: 2.6, seventies_plus: 3.0}
+          ancestry: {lower_baldness_rate: 0.6}
+      buzzed:     {text: buzzed}
+      very_short: {text: very short, mult: {apparent_age: {sixties: 1.3, seventies_plus: 1.5}}}
+      short:      {text: short,      mult: {apparent_age: {sixties: 1.4, seventies_plus: 1.7}}}
+      chin:       {text: chin-length, mult: {apparent_age: {sixties: 1.2, seventies_plus: 1.2}}}
+      shoulder:   {text: shoulder-length}
+      mid_back:   {text: [long, mid-back-length], mult: {apparent_age: {sixties: 0.6, seventies_plus: 0.35}, hair_texture: {coily: 0.6}}}
+      waist:      {text: [very long, waist-length], mult: {apparent_age: {fifties: 0.7, sixties: 0.4, seventies_plus: 0.25}, hair_texture: {coily: 0.3}}}
+
+  hairline:
+    applies_when: {gender: [man], hair_length: [buzzed, very_short, short, chin, shoulder, mid_back, waist]}
+    weights_by:
+      attr: apparent_age
+      table:
+        twenties:       {full: 80, slightly_receding: 15, receding: 5}
+        thirties:       {full: 55, slightly_receding: 25, receding: 13, thinning_crown: 7}
+        forties:        {full: 38, slightly_receding: 25, receding: 22, thinning_crown: 15}
+        fifties:        {full: 25, slightly_receding: 22, receding: 30, thinning_crown: 23}
+        sixties:        {full: 20, slightly_receding: 20, receding: 32, thinning_crown: 28}
+        seventies_plus: {full: 18, slightly_receding: 18, receding: 34, thinning_crown: 30}
+    values:
+      full:              {text: "", mult: {ancestry: {lower_baldness_rate: 1.4, african_descent: 1.2}}}
+      slightly_receding: {text: a slightly receding hairline}
+      receding:          {text: a receding hairline, mult: {ancestry: {lower_baldness_rate: 0.6, african_descent: 0.8}}}
+      thinning_crown:    {text: a thinning crown,    mult: {ancestry: {lower_baldness_rate: 0.6, african_descent: 0.8}}}
+
+  # ---------------------------------------------------------------------------
+  # Style text is a full phrase. Placeholders:
+  #   {hair_length} {hair_texture} {hair_shade}  (hair_shade = colour after greying/dye)
+  # Every (length x texture) pair has at least one gender-neutral fallback
+  # (shaved_head, buzz_cut, crew_cut, tousled/twa, loose_down).
+  hair_style:
+    values:
+      # --- bald ---
+      shaved_head:      {weight: 3, requires: {hair_length: [bald]}, text: [a clean-shaven head, a smooth shaved head]}
+      bald_crown:
+        weight: 2
+        requires: {hair_length: [bald], gender: [man]}
+        text: a bald crown with closely cropped {hair_shade} sides
+        mult: {apparent_age: {twenties: 0.2, thirties: 0.6, sixties: 1.5, seventies_plus: 2}}
+      # --- buzzed ---
+      buzz_cut:         {weight: 3, requires: {hair_length: [buzzed]}, text: "{hair_shade|a} buzz cut"}
+      buzz_fade:
+        weight: 2
+        requires: {hair_length: [buzzed]}
+        text: "{hair_shade|a} buzz cut with a skin fade"
+        mult: {apparent_age: {fifties: 0.5, sixties: 0.3, seventies_plus: 0.2}}
+      # --- very short ---
+      crew_cut:         {weight: 3, requires: {hair_length: [very_short]}, text: "a short {hair_shade} crew cut", mult: {gender: {woman: 0.3}}}
+      caesar_cut:
+        weight: 1.5
+        requires: {hair_length: [very_short], hair_texture: [straight, wavy, curly]}
+        text: "{hair_shade|a} Caesar cut with a short forward-brushed fringe"
+        mult: {gender: {woman: 0.2}}
+      waves_360:
+        weight: 3
+        requires: {hair_length: [very_short], hair_texture: [coily, curly]}
+        text: "{hair_shade} 360 waves"
+        mult: {gender: {woman: 0.2}, apparent_age: {sixties: 0.5, seventies_plus: 0.3}}
+      twa:
+        weight: 3
+        requires: {hair_length: [very_short, short], hair_texture: [coily, curly]}
+        text: a short {hair_texture} {hair_shade} natural afro
+        mult: {gender: {woman: 1.5}}
+      tapered_natural:
+        weight: 2
+        requires: {hair_length: [very_short, short], hair_texture: [coily]}
+        text: a tapered {hair_shade} natural cut
+        mult: {gender: {woman: 1.5, man: 0.5}}
+      pixie:
+        weight: 3
+        requires: {hair_length: [very_short, short], hair_texture: [straight, wavy, curly]}
+        text: "{hair_texture|a} {hair_shade} pixie cut"
+        mult: {gender: {man: 0.02}, apparent_age: {sixties: 1.5, seventies_plus: 1.8}}
+      # --- short ---
+      textured_crop:
+        weight: 3
+        requires: {hair_length: [short], hair_texture: [straight, wavy, curly]}
+        text: a textured {hair_shade} crop with a short fringe
+        mult: {gender: {woman: 0.2}, apparent_age: {fifties: 0.6, sixties: 0.4, seventies_plus: 0.3}}
+      side_part:
+        weight: 3
+        requires: {hair_length: [short], hair_texture: [straight, wavy]}
+        text: short {hair_shade} hair neatly combed with a side part
+        mult: {gender: {woman: 0.4}, apparent_age: {fifties: 1.4, sixties: 1.6, seventies_plus: 1.8}}
+      quiff:
+        weight: 2
+        requires: {hair_length: [short], hair_texture: [straight, wavy]}
+        text: "{hair_shade|a} quiff, short on the sides and swept up in front"
+        mult: {gender: {woman: 0.1}, apparent_age: {sixties: 0.4, seventies_plus: 0.3}}
+      curly_top_fade:
+        weight: 3
+        requires: {hair_length: [short], hair_texture: [wavy, curly, coily]}
+        text: short {hair_texture} {hair_shade} hair on top with a taper fade
+        mult: {gender: {woman: 0.3}, apparent_age: {sixties: 0.5, seventies_plus: 0.4}}
+      high_top_fade:
+        weight: 1
+        requires: {hair_length: [short], hair_texture: [coily]}
+        text: "{hair_shade|a} high-top fade"
+        mult: {gender: {woman: 0.2}, apparent_age: {thirties: 0.7, forties: 0.4, fifties: 0.2, sixties: 0.1, seventies_plus: 0.1}}
+      comb_over:
+        weight: 1
+        requires: {hair_length: [short], hair_texture: [straight, wavy], gender: [man], hairline: [receding, thinning_crown]}
+        text: thin {hair_shade} hair in a comb-over
+        mult: {apparent_age: {twenties: 0, thirties: 0.1, forties: 0.4, sixties: 1.6, seventies_plus: 2}}
+      # --- short / chin ---
+      undercut:
+        weight: 2
+        requires: {hair_length: [short, chin], hair_texture: [straight, wavy]}
+        text: "{hair_texture} {hair_shade} hair in an undercut, longer on top"
+        mult: {gender: {woman: 0.4}, apparent_age: {fifties: 0.4, sixties: 0.2, seventies_plus: 0.1}}
+      slicked_back:
+        weight: 2
+        requires: {hair_length: [short, chin], hair_texture: [straight, wavy]}
+        text: "{hair_shade} hair slicked back"
+        mult: {gender: {woman: 0.4}}
+      tousled:
+        weight: 3
+        requires: {hair_length: [short, chin], hair_texture: [straight, wavy, curly]}
+        text: tousled {hair_length} {hair_texture} {hair_shade} hair
+      mullet:
+        weight: 0.7
+        requires: {hair_length: [short, chin], hair_texture: [straight, wavy, curly]}
+        text: "{hair_shade|a} {hair_texture} mullet"
+        mult: {apparent_age: {thirties: 0.6, forties: 0.3, fifties: 0.15, sixties: 0.1, seventies_plus: 0.05}}
+      # --- chin ---
+      bob:
+        weight: 4
+        requires: {hair_length: [chin], hair_texture: [straight, wavy]}
+        text: ["a chin-length {hair_shade} bob", "a blunt {hair_shade} bob"]
+        mult: {gender: {man: 0.03, androgynous: 0.8}}
+      textured_bob:
+        weight: 3
+        requires: {hair_length: [chin, shoulder], hair_texture: [wavy, curly, coily]}
+        text: "{hair_texture|a} {hair_shade} bob"
+        mult: {gender: {man: 0.05}}
+      shag:
+        weight: 2
+        requires: {hair_length: [chin, shoulder], hair_texture: [straight, wavy, curly]}
+        text: "{hair_length|a} {hair_texture} {hair_shade} shag with feathered layers"
+        mult: {gender: {man: 0.4}, apparent_age: {sixties: 0.6, seventies_plus: 0.4}}
+      wolf_cut:
+        weight: 1
+        requires: {hair_length: [chin, shoulder], hair_texture: [straight, wavy]}
+        text: a choppy {hair_shade} wolf cut
+        mult: {apparent_age: {thirties: 0.6, forties: 0.3, fifties: 0.1, sixties: 0.05, seventies_plus: 0.02}}
+      afro:
+        weight: 3
+        requires: {hair_length: [chin, shoulder], hair_texture: [coily, curly]}
+        text: a full, rounded {hair_shade} afro
+      swept_back:
+        weight: 2
+        requires: {hair_length: [chin, shoulder], hair_texture: [straight, wavy, curly]}
+        text: "{hair_length} {hair_texture} {hair_shade} hair swept back from the face"
+        mult: {gender: {woman: 0.3}}
+      tucked_behind_ears:
+        weight: 2
+        requires: {hair_length: [chin, shoulder], hair_texture: [straight, wavy, curly]}
+        text: "{hair_length} {hair_texture} {hair_shade} hair tucked behind the ears"
+      # --- chin+ ---
+      loose_down:
+        weight: 6
+        requires: {hair_length: [chin, shoulder, mid_back, waist]}
+        text: "{hair_length} {hair_texture} {hair_shade} hair worn loose"
+      curtain_bangs:
+        weight: 2
+        requires: {hair_length: [chin, shoulder, mid_back], hair_texture: [straight, wavy]}
+        text: "{hair_length} {hair_texture} {hair_shade} hair with curtain bangs"
+        mult: {gender: {man: 0.2}}
+      blunt_bangs:
+        weight: 1.5
+        requires: {hair_length: [chin, shoulder, mid_back], hair_texture: [straight]}
+        text: "{hair_length} straight {hair_shade} hair with blunt bangs"
+        mult: {gender: {man: 0.05}}
+      defined_curls:
+        weight: 3
+        requires: {hair_length: [chin, shoulder, mid_back], hair_texture: [curly]}
+        text: "{hair_length} defined {hair_shade} curls"
+      defined_coils:
+        weight: 3
+        requires: {hair_length: [chin, shoulder, mid_back], hair_texture: [coily]}
+        text: "{hair_length} defined {hair_shade} coils"
+      puff:
+        weight: 2
+        requires: {hair_length: [chin, shoulder, mid_back], hair_texture: [coily, curly]}
+        text: "{hair_texture} {hair_shade} hair gathered into a high puff"
+        mult: {gender: {man: 0.1}}
+      two_strand_twists:
+        weight: 2.5
+        requires: {hair_length: [chin, shoulder, mid_back], hair_texture: [coily]}
+        text: "{hair_length} {hair_shade} two-strand twists"
+      bantu_knots:
+        weight: 1
+        requires: {hair_length: [chin, shoulder], hair_texture: [coily, curly]}
+        text: "{hair_shade} hair in Bantu knots"
+        mult: {gender: {man: 0.05}, apparent_age: {forties: 0.5, fifties: 0.3, sixties: 0.2, seventies_plus: 0.1}}
+      box_braids:
+        weight: 4
+        requires: {hair_length: [chin, shoulder, mid_back, waist], hair_texture: [coily, curly]}
+        text: "{hair_length} {hair_shade} box braids"
+        mult: {gender: {man: 0.2}}
+      cornrows:
+        weight: 3
+        requires: {hair_length: [short, chin, shoulder, mid_back], hair_texture: [coily, curly]}
+        text: "{hair_shade} cornrows braided straight back"
+      locs:
+        weight: 4
+        requires: {hair_length: [chin, shoulder, mid_back, waist], hair_texture: [coily, curly]}
+        text: "{hair_length} {hair_shade} locs"
+      # --- shoulder+ ---
+      ponytail:
+        weight: 4
+        requires: {hair_length: [shoulder, mid_back, waist]}
+        text: "{hair_texture} {hair_shade} hair pulled back into a ponytail"
+        mult: {gender: {man: 0.5}}
+      low_bun:
+        weight: 3
+        requires: {hair_length: [shoulder, mid_back, waist]}
+        text: "{hair_texture} {hair_shade} hair in a neat low bun"
+        mult: {gender: {man: 0.2}, apparent_age: {sixties: 1.4, seventies_plus: 1.6}}
+      messy_bun:
+        weight: 3
+        requires: {hair_length: [shoulder, mid_back, waist]}
+        text: "{hair_shade} hair in a messy bun with loose strands"
+        mult: {gender: {man: 0.2}}
+      top_knot:
+        weight: 2
+        requires: {hair_length: [shoulder, mid_back]}
+        text: "{hair_shade} hair tied up in a top knot"
+        mult: {gender: {woman: 0.3}, apparent_age: {fifties: 0.5, sixties: 0.3, seventies_plus: 0.2}}
+      half_up:
+        weight: 2.5
+        requires: {hair_length: [shoulder, mid_back, waist]}
+        text: "{hair_length} {hair_texture} {hair_shade} hair in a half-up, half-down style"
+        mult: {gender: {man: 0.3}}
+      single_braid:
+        weight: 2
+        requires: {hair_length: [shoulder, mid_back, waist], hair_texture: [straight, wavy, curly]}
+        text: "{hair_shade} hair in a single braid over one shoulder"
+        mult: {gender: {man: 0.2}}
+      dutch_braids:
+        weight: 1.5
+        requires: {hair_length: [shoulder, mid_back, waist], hair_texture: [straight, wavy, curly]}
+        text: "{hair_shade} hair in two Dutch braids"
+        mult: {gender: {man: 0.05}, apparent_age: {fifties: 0.5, sixties: 0.3, seventies_plus: 0.2}}
+      silk_press:
+        weight: 2
+        requires: {hair_length: [shoulder, mid_back], hair_texture: [coily, curly]}
+        text: "{hair_length} sleek silk-pressed {hair_shade} hair"
+        mult: {gender: {man: 0.02}}
+      beach_waves:
+        weight: 2.5
+        requires: {hair_length: [shoulder, mid_back], hair_texture: [straight, wavy]}
+        text: "{hair_length} {hair_shade} hair in loose beach waves"
+        mult: {gender: {man: 0.1}}
+      sleek_center_part:
+        weight: 3
+        requires: {hair_length: [shoulder, mid_back, waist], hair_texture: [straight, wavy]}
+        text: "{hair_length} sleek, straight {hair_shade} hair with a center part"
+        mult: {gender: {man: 0.3}}
+      long_layers:
+        weight: 2
+        requires: {hair_length: [mid_back, waist], hair_texture: [straight, wavy, curly]}
+        text: "{hair_length} {hair_texture} {hair_shade} hair in long layers"
+        mult: {gender: {man: 0.2}}
+
+  # ---------------------------------------------------------------------------
+  # Colour treatment layered over natural colour + greying (see compose:).
+  hair_treatment:
+    values:
+      natural: {weight: 80, text: ""}
+      cover_gray:
+        weight: 25
+        requires:
+          graying: [few_grays, temples, salt_pepper, gray, silver, white]
+          hair_length: [buzzed, very_short, short, chin, shoulder, mid_back, waist]
+        mult: {gender: {man: 0.3}}
+        text: ""
+      highlights:
+        weight: 7
+        requires:
+          graying: [none, few_grays, temples]
+          hair_length: [short, chin, shoulder, mid_back, waist]
+        text: [caramel highlights, honey highlights, subtle face-framing highlights]
+        mult: {gender: {man: 0.2}}
+      balayage:
+        weight: 5
+        requires:
+          graying: [none, few_grays, temples]
+          hair_length: [shoulder, mid_back, waist]
+        text: [a honey balayage, a caramel balayage, an ash-blonde balayage]
+        mult: {gender: {man: 0.05}}
+      bleached:
+        weight: 3
+        requires: {hair_length: [buzzed, very_short, short, chin, shoulder, mid_back, waist]}
+        text: [bleached platinum, icy bleached-blonde]
+        mult: {apparent_age: {twenties: 1.5, forties: 0.6, fifties: 0.4, sixties: 0.3, seventies_plus: 0.2}}
+      vivid:
+        weight: 2.5
+        requires: {hair_length: [buzzed, very_short, short, chin, shoulder, mid_back, waist]}
+        text: [pastel pink, lavender, teal, electric blue, cherry red, seafoam green, deep burgundy]
+        mult: {apparent_age: {twenties: 2, forties: 0.5, fifties: 0.3, sixties: 0.15, seventies_plus: 0.1}}
+
+  # ---------------------------------------------------------------------------
+  facial_hair:
+    applies_when: {gender: [man]}
+    values:
+      clean_shaven: {weight: 35, text: clean-shaven, mult: {ancestry: {lower_beard_density: 1.5}}}
+      stubble:      {weight: 20, text: "{beard_shade} stubble", mult: {apparent_age: {seventies_plus: 0.6}}}
+      short_beard:  {weight: 15, text: "a short, neatly trimmed {beard_shade} beard", mult: {ancestry: {lower_beard_density: 0.6}}}
+      full_beard:   {weight: 12, text: "a full {beard_shade} beard", mult: {ancestry: {lower_beard_density: 0.35}}}
+      goatee:       {weight: 6,  text: "{beard_shade|a} goatee"}
+      mustache:     {weight: 4,  text: "{beard_shade|a} mustache", mult: {apparent_age: {fifties: 1.6, sixties: 2, seventies_plus: 2.2}}}
+      long_beard:   {weight: 3,  text: "a long {beard_shade} beard", mult: {ancestry: {lower_beard_density: 0.3}}}
+
+  # ---------------------------------------------------------------------------
+  eye_color:
+    weights_from: ancestry
+    values:
+      dark_brown:  {text: [dark brown, deep brown]}
+      brown:       {text: [brown, warm brown]}
+      light_brown: {text: [amber, light brown]}
+      hazel:       {text: hazel}
+      green:       {text: green, mult: {ancestry: {mixed: 0.4}}}
+      gray:        {text: [gray, gray-blue], mult: {ancestry: {mixed: 0.4}}}
+      blue:        {text: [blue, pale blue, deep blue], mult: {ancestry: {mixed: 0.35}}}
+
+  eye_shape:
+    weights_from: ancestry
+    values:
+      almond:    {text: almond-shaped}
+      round:     {text: round}
+      hooded:    {text: hooded, mult: {apparent_age: {forties: 1.5, fifties: 2, sixties: 2.5, seventies_plus: 3}}}
+      monolid:   {text: monolid}
+      upturned:  {text: upturned, mult: {apparent_age: {sixties: 0.6, seventies_plus: 0.5}}}
+      downturned: {text: downturned, mult: {apparent_age: {fifties: 1.3, sixties: 1.5, seventies_plus: 1.6}}}
+      deep_set:  {text: deep-set}
+
+  face_shape:
+    values:
+      oval:    {weight: 30, text: an oval face}
+      round:   {weight: 15, text: a round face}
+      square:  {weight: 15, text: a square face with a strong jaw, mult: {gender: {man: 1.8, woman: 0.6}}}
+      heart:   {weight: 12, text: a heart-shaped face, mult: {gender: {woman: 1.5, man: 0.5}}}
+      oblong:  {weight: 10, text: "a long, oblong face"}
+      diamond: {weight: 10, text: a diamond-shaped face with high cheekbones}
+
+  # ---------------------------------------------------------------------------
+  body_type:
+    values:
+      slim:       {weight: 10, text: {woman: [a slim build, a slender build], default: a slim build},
+                   mult: {apparent_age: {twenties: 1.2}}}
+      petite:     {weight: 4,  requires: {gender: [woman, androgynous]}, text: a petite frame}
+      lean:       {weight: 7,  text: a lean build}
+      wiry:       {weight: 2,  text: a wiry build,
+                   mult: {gender: {woman: 0.4}, apparent_age: {twenties: 0.5, sixties: 1.5, seventies_plus: 2}}}
+      athletic:   {weight: 9,  text: ["an athletic, toned build", "an athletic build"],
+                   mult: {apparent_age: {fifties: 0.7, sixties: 0.5, seventies_plus: 0.35}}}
+      muscular:   {weight: 4,  text: {woman: "a strong, muscular build", default: a muscular build},
+                   mult: {gender: {woman: 0.4}, apparent_age: {fifties: 0.6, sixties: 0.4, seventies_plus: 0.2}}}
+      average:    {weight: 18, text: an average build}
+      broad:      {weight: 6,  requires: {gender: [man]}, text: "a broad-shouldered, sturdy build"}
+      curvy:      {weight: 8,  requires: {gender: [woman]}, text: ["a curvy build", "a curvy, hourglass figure"]}
+      soft:       {weight: 10, text: "a soft, slightly rounded build",
+                   mult: {apparent_age: {forties: 1.3, fifties: 1.5, sixties: 1.6, seventies_plus: 1.5}}}
+      stocky:     {weight: 5,  text: a stocky build,
+                   mult: {gender: {woman: 0.5}, apparent_age: {forties: 1.2, fifties: 1.3, sixties: 1.3}}}
+      plus_size:  {weight: 10, text: {woman: a plus-size figure, man: a heavyset build, default: a plus-size build},
+                   mult: {apparent_age: {forties: 1.2, fifties: 1.3, sixties: 1.3}}}
+      tall_lanky: {weight: 4,  text: "a tall, lanky build",
+                   mult: {apparent_age: {twenties: 1.5, sixties: 0.6, seventies_plus: 0.5}}}
+
+  # ---------------------------------------------------------------------------
+  # 2-3 visible skin details, driven by apparent age, then filtered/boosted
+  # by skin tone, hair colour, ancestry and gender.
+  skin_condition:
+    pick: {min: 2, max: 3}
+    weights_by:
+      attr: apparent_age
+      table:
+        twenties:
+          {smooth_clear: 20, dewy: 12, visible_pores: 15, light_freckles: 8, heavy_freckles: 3,
+           mild_blemishes: 12, acne_scars: 5, rosy_cheeks: 5, oily_tzone: 6, under_eye_shadows: 4,
+           hyperpigmentation: 4, beauty_mark: 4, moles: 3, vitiligo: 0.5}
+        thirties:
+          {smooth_clear: 10, dewy: 7, visible_pores: 15, light_freckles: 7, heavy_freckles: 2,
+           mild_blemishes: 5, acne_scars: 5, rosy_cheeks: 5, oily_tzone: 4, under_eye_shadows: 8,
+           laugh_lines: 10, fine_lines: 8, forehead_lines: 4, crows_feet: 3, hyperpigmentation: 5,
+           melasma: 3, beauty_mark: 4, moles: 3, vitiligo: 0.5}
+        forties:
+          {smooth_clear: 3, visible_pores: 12, light_freckles: 6, heavy_freckles: 2, mild_blemishes: 1,
+           acne_scars: 4, rosy_cheeks: 6, under_eye_shadows: 9, laugh_lines: 12, fine_lines: 12,
+           forehead_lines: 9, crows_feet: 10, sun_weathered: 3, hyperpigmentation: 5, melasma: 4,
+           raised_dark_spots: 3, age_spots: 2, beauty_mark: 3, moles: 4, vitiligo: 0.5}
+        fifties:
+          {visible_pores: 10, light_freckles: 5, heavy_freckles: 2, rosy_cheeks: 6, under_eye_shadows: 10,
+           laugh_lines: 12, fine_lines: 8, forehead_lines: 12, crows_feet: 14, deep_wrinkles: 4,
+           softened_jawline: 7, sun_weathered: 5, age_spots: 6, hyperpigmentation: 4, melasma: 2,
+           raised_dark_spots: 5, moles: 4, vitiligo: 0.5}
+        sixties:
+          {visible_pores: 6, light_freckles: 3, rosy_cheeks: 5, under_eye_shadows: 10, laugh_lines: 10,
+           forehead_lines: 12, crows_feet: 14, deep_wrinkles: 14, softened_jawline: 12, sun_weathered: 7,
+           age_spots: 12, raised_dark_spots: 6, crepey: 3, moles: 4, vitiligo: 0.5}
+        seventies_plus:
+          {under_eye_shadows: 8, laugh_lines: 6, forehead_lines: 8, crows_feet: 10, deep_wrinkles: 25,
+           softened_jawline: 14, sun_weathered: 7, age_spots: 16, raised_dark_spots: 6, crepey: 14,
+           moles: 4, vitiligo: 0.5}
+    values:
+      smooth_clear:
+        text: ["a smooth, clear complexion", "clear, even skin"]
+        excludes: [dewy, visible_pores, mild_blemishes, acne_scars, deep_wrinkles, sun_weathered, crepey, oily_tzone]
+      dewy:            {text: ["a dewy, healthy glow", "naturally glowing skin"], excludes: [sun_weathered, crepey]}
+      visible_pores:   {text: [natural skin texture with visible pores, realistic skin texture]}
+      light_freckles:
+        text: [a light dusting of freckles across the nose, faint freckles across the cheeks]
+        requires: {skin_tone: [light_tones, light_medium, medium]}
+        mult:
+          hair_color: {red: 3, strawberry_blonde: 3, auburn: 2}
+          ancestry: {celtic: 2, northern_european: 1.5}
+        excludes: [heavy_freckles]
+      heavy_freckles:
+        text: [dense freckles across the face, heavily freckled skin]
+        requires: {skin_tone: [porcelain, fair, light]}
+        mult:
+          hair_color: {red: 5, strawberry_blonde: 4, auburn: 2.5}
+          ancestry: {celtic: 2.5}
+      mild_blemishes:  {text: [a few small blemishes, a couple of small breakouts]}
+      acne_scars:      {text: faint acne scarring on the cheeks}
+      rosy_cheeks:
+        text: ["naturally flushed, rosy cheeks", "ruddy cheeks"]
+        requires: {skin_tone: [light_tones, light_medium]}
+        mult: {ancestry: {celtic: 1.8, northern_european: 1.4}}
+      oily_tzone:      {text: a slightly shiny T-zone}
+      under_eye_shadows: {text: [soft under-eye shadows, faint under-eye bags]}
+      laugh_lines:     {text: laugh lines}
+      fine_lines:      {text: [fine lines around the eyes, subtle fine lines], excludes: [deep_wrinkles]}
+      forehead_lines:  {text: horizontal forehead lines}
+      crows_feet:      {text: crow's feet}
+      deep_wrinkles:   {text: [deep-set wrinkles, deeply lined skin]}
+      softened_jawline: {text: [a softened jawline, slight jowls]}
+      sun_weathered:   {text: ["sun-weathered skin", "weathered, outdoorsy skin"], excludes: [dewy]}
+      age_spots:
+        text: [age spots on the temples and cheeks, scattered sunspots]
+        mult: {skin_tone: {light_tones: 1.8, dark_tones: 0.3}}
+      hyperpigmentation:
+        text: [mild uneven pigmentation, a slightly uneven skin tone]
+        mult: {skin_tone: {light_tones: 0.5, mid_tones: 1.3, dark_tones: 1.5}}
+      melasma:
+        text: faint melasma patches on the cheeks
+        requires: {skin_tone: [light_medium, medium, tan, medium_brown, brown]}
+        mult: {gender: {man: 0.1}}
+      raised_dark_spots:            # dermatosis papulosa nigra
+        text: small raised dark spots across the cheekbones
+        requires: {skin_tone: [tan, dark_tones]}
+      crepey:          {text: ["thin, crepey skin", "delicate papery skin"], excludes: [dewy, smooth_clear]}
+      vitiligo:        {text: [patches of vitiligo, small vitiligo patches around the eyes and mouth]}
+      beauty_mark:     {text: [a small beauty mark, a beauty mark near the lip]}
+      moles:           {text: a few small moles}
+
+# -----------------------------------------------------------------------------
+# Population profiles: weight tables for attributes marked `weights_from: ancestry`.
+# Missing tables inherit from _default.
+#
+# skin_tone order: porcelain fair light light_medium medium tan medium_brown brown deep_brown very_deep
+# -----------------------------------------------------------------------------
+profiles:
+  _default:
+    undertone: {cool: 30, neutral: 35, warm: 30, olive: 5}
+    eye_shape: {almond: 35, round: 18, hooded: 12, upturned: 10, downturned: 10, deep_set: 15}
+
+  west_african:
+    skin_tone:    {medium_brown: 6, brown: 24, deep_brown: 40, very_deep: 30}
+    undertone:    {warm: 45, neutral: 35, cool: 20}
+    hair_color:   {black: 75, soft_black: 20, dark_brown: 5}
+    hair_texture: {coily: 88, curly: 11, wavy: 1}
+    eye_color:    {dark_brown: 88, brown: 11, light_brown: 1}
+    eye_shape:    {almond: 38, round: 22, hooded: 10, upturned: 10, downturned: 10, deep_set: 10}
+  east_african:
+    skin_tone:    {medium_brown: 8, brown: 30, deep_brown: 40, very_deep: 22}
+    undertone:    {warm: 45, neutral: 35, cool: 20}
+    hair_color:   {black: 75, soft_black: 20, dark_brown: 5}
+    hair_texture: {coily: 82, curly: 16, wavy: 2}
+    eye_color:    {dark_brown: 88, brown: 11, light_brown: 1}
+    eye_shape:    {almond: 40, round: 20, hooded: 10, upturned: 10, downturned: 10, deep_set: 10}
+  horn_african:
+    skin_tone:    {tan: 5, medium_brown: 30, brown: 40, deep_brown: 20, very_deep: 5}
+    undertone:    {warm: 55, neutral: 30, cool: 10, olive: 5}
+    hair_color:   {black: 70, soft_black: 22, dark_brown: 8}
+    hair_texture: {coily: 35, curly: 45, wavy: 18, straight: 2}
+    eye_color:    {dark_brown: 80, brown: 17, light_brown: 3}
+    eye_shape:    {almond: 50, round: 15, hooded: 10, upturned: 12, downturned: 8, deep_set: 5}
+  southern_central_african:
+    skin_tone:    {medium_brown: 10, brown: 30, deep_brown: 35, very_deep: 25}
+    undertone:    {warm: 45, neutral: 35, cool: 20}
+    hair_color:   {black: 75, soft_black: 20, dark_brown: 5}
+    hair_texture: {coily: 90, curly: 10}
+    eye_color:    {dark_brown: 88, brown: 11, light_brown: 1}
+    eye_shape:    {almond: 38, round: 22, hooded: 10, upturned: 10, downturned: 10, deep_set: 10}
+  north_african:
+    skin_tone:    {fair: 5, light: 15, light_medium: 30, medium: 28, tan: 17, medium_brown: 5}
+    undertone:    {olive: 40, warm: 35, neutral: 18, cool: 7}
+    hair_color:   {black: 45, soft_black: 27, dark_brown: 22, chestnut: 4, light_brown: 1, auburn: 1}
+    hair_texture: {straight: 22, wavy: 38, curly: 30, coily: 10}
+    eye_color:    {dark_brown: 45, brown: 30, light_brown: 8, hazel: 10, green: 5, blue: 2}
+    eye_shape:    {almond: 42, deep_set: 18, round: 15, hooded: 12, downturned: 8, upturned: 5}
+  middle_eastern:
+    skin_tone:    {fair: 6, light: 26, light_medium: 34, medium: 24, tan: 10}
+    undertone:    {olive: 45, warm: 30, neutral: 18, cool: 7}
+    hair_color:   {black: 42, soft_black: 27, dark_brown: 25, chestnut: 4, light_brown: 1, auburn: 1}
+    hair_texture: {straight: 30, wavy: 42, curly: 24, coily: 4}
+    eye_color:    {dark_brown: 45, brown: 30, light_brown: 8, hazel: 10, green: 5, blue: 2}
+    eye_shape:    {almond: 42, deep_set: 18, round: 15, hooded: 12, downturned: 8, upturned: 5}
+  persian:
+    skin_tone:    {fair: 10, light: 32, light_medium: 34, medium: 18, tan: 6}
+    undertone:    {olive: 40, warm: 30, neutral: 22, cool: 8}
+    hair_color:   {black: 35, soft_black: 27, dark_brown: 28, chestnut: 6, light_brown: 2, auburn: 2}
+    hair_texture: {straight: 30, wavy: 45, curly: 22, coily: 3}
+    eye_color:    {dark_brown: 35, brown: 30, light_brown: 10, hazel: 13, green: 8, gray: 1, blue: 3}
+    eye_shape:    {almond: 42, deep_set: 18, round: 15, hooded: 12, downturned: 8, upturned: 5}
+  south_asian:
+    skin_tone:    {light: 4, light_medium: 12, medium: 24, tan: 24, medium_brown: 22, brown: 11, deep_brown: 3}
+    undertone:    {warm: 45, olive: 25, neutral: 25, cool: 5}
+    hair_color:   {black: 68, soft_black: 26, dark_brown: 6}
+    hair_texture: {straight: 35, wavy: 45, curly: 18, coily: 2}
+    eye_color:    {dark_brown: 70, brown: 22, light_brown: 4, hazel: 3, green: 1}
+    eye_shape:    {almond: 45, round: 18, hooded: 12, upturned: 8, downturned: 9, deep_set: 8}
+  east_asian:
+    skin_tone:    {porcelain: 5, fair: 25, light: 42, light_medium: 23, medium: 5}
+    undertone:    {warm: 40, neutral: 35, cool: 15, olive: 10}
+    hair_color:   {black: 68, soft_black: 26, dark_brown: 6}
+    hair_texture: {straight: 85, wavy: 13, curly: 2}
+    eye_color:    {dark_brown: 85, brown: 14, light_brown: 1}
+    eye_shape:    {monolid: 40, almond: 30, hooded: 12, upturned: 10, downturned: 5, round: 3}
+  southeast_asian:
+    skin_tone:    {light: 10, light_medium: 28, medium: 30, tan: 25, medium_brown: 7}
+    undertone:    {warm: 50, neutral: 25, olive: 20, cool: 5}
+    hair_color:   {black: 68, soft_black: 26, dark_brown: 6}
+    hair_texture: {straight: 70, wavy: 24, curly: 6}
+    eye_color:    {dark_brown: 85, brown: 14, light_brown: 1}
+    eye_shape:    {monolid: 15, almond: 40, hooded: 15, round: 15, upturned: 10, downturned: 5}
+  central_asian:
+    skin_tone:    {fair: 12, light: 35, light_medium: 33, medium: 17, tan: 3}
+    undertone:    {warm: 40, neutral: 35, cool: 15, olive: 10}
+    hair_color:   {black: 52, soft_black: 25, dark_brown: 18, chestnut: 2, light_brown: 2, auburn: 1}
+    hair_texture: {straight: 78, wavy: 19, curly: 3}
+    eye_color:    {dark_brown: 55, brown: 25, light_brown: 6, hazel: 8, green: 3, blue: 3}
+    eye_shape:    {monolid: 30, almond: 35, hooded: 15, upturned: 10, downturned: 5, round: 5}
+  polynesian:
+    skin_tone:    {light_medium: 5, medium: 25, tan: 38, medium_brown: 27, brown: 5}
+    undertone:    {warm: 55, neutral: 30, olive: 10, cool: 5}
+    hair_color:   {black: 60, soft_black: 28, dark_brown: 12}
+    hair_texture: {straight: 22, wavy: 40, curly: 32, coily: 6}
+    eye_color:    {dark_brown: 80, brown: 18, light_brown: 2}
+    eye_shape:    {almond: 45, round: 20, hooded: 12, upturned: 10, downturned: 8, deep_set: 5}
+  melanesian:                 # natural blond hair occurs at a few % in parts of Melanesia
+    skin_tone:    {medium_brown: 15, brown: 35, deep_brown: 35, very_deep: 15}
+    undertone:    {warm: 45, neutral: 35, cool: 20}
+    hair_color:   {black: 70, soft_black: 15, dark_brown: 6, dark_blonde: 3, blonde: 6}
+    hair_texture: {coily: 60, curly: 35, wavy: 5}
+    eye_color:    {dark_brown: 85, brown: 14, light_brown: 1}
+    eye_shape:    {almond: 30, round: 20, hooded: 10, upturned: 8, downturned: 12, deep_set: 20}
+  aboriginal_australian:
+    skin_tone:    {medium_brown: 20, brown: 40, deep_brown: 30, very_deep: 10}
+    undertone:    {warm: 45, neutral: 35, cool: 20}
+    hair_color:   {black: 50, soft_black: 25, dark_brown: 18, light_brown: 4, dark_blonde: 3}
+    hair_texture: {wavy: 40, curly: 40, straight: 12, coily: 8}
+    eye_color:    {dark_brown: 85, brown: 14, light_brown: 1}
+    eye_shape:    {deep_set: 35, almond: 25, hooded: 12, round: 10, downturned: 10, upturned: 8}
+  indigenous_american:
+    skin_tone:    {light: 5, light_medium: 18, medium: 34, tan: 30, medium_brown: 13}
+    undertone:    {warm: 55, neutral: 25, olive: 15, cool: 5}
+    hair_color:   {black: 80, soft_black: 18, dark_brown: 2}
+    hair_texture: {straight: 85, wavy: 13, curly: 2}
+    eye_color:    {dark_brown: 90, brown: 10}
+    eye_shape:    {almond: 35, hooded: 20, monolid: 8, upturned: 10, round: 12, downturned: 8, deep_set: 7}
+  latin_american:
+    skin_tone:    {fair: 5, light: 18, light_medium: 28, medium: 25, tan: 18, medium_brown: 6}
+    undertone:    {warm: 45, olive: 28, neutral: 22, cool: 5}
+    hair_color:   {black: 40, soft_black: 25, dark_brown: 25, chestnut: 6, light_brown: 3, auburn: 1}
+    hair_texture: {straight: 38, wavy: 40, curly: 18, coily: 4}
+    eye_color:    {dark_brown: 50, brown: 28, light_brown: 8, hazel: 8, green: 3, blue: 3}
+    eye_shape:    {almond: 40, round: 18, hooded: 14, upturned: 10, downturned: 10, deep_set: 8}
+  afro_latin_caribbean:
+    skin_tone:    {light_medium: 2, medium: 5, tan: 10, medium_brown: 28, brown: 30, deep_brown: 20, very_deep: 5}
+    undertone:    {warm: 50, neutral: 35, cool: 10, olive: 5}
+    hair_color:   {black: 70, soft_black: 22, dark_brown: 7, auburn: 1}
+    hair_texture: {coily: 55, curly: 35, wavy: 10}
+    eye_color:    {dark_brown: 75, brown: 20, light_brown: 3, hazel: 2}
+    eye_shape:    {almond: 38, round: 22, hooded: 10, upturned: 10, downturned: 10, deep_set: 10}
+  african_american:
+    skin_tone:    {light_medium: 4, medium: 7, tan: 13, medium_brown: 30, brown: 26, deep_brown: 15, very_deep: 5}
+    undertone:    {warm: 50, neutral: 35, cool: 10, olive: 5}
+    hair_color:   {black: 68, soft_black: 24, dark_brown: 6, auburn: 1, light_brown: 1}
+    hair_texture: {coily: 62, curly: 32, wavy: 6}
+    eye_color:    {dark_brown: 75, brown: 20, light_brown: 3, hazel: 2}
+    eye_shape:    {almond: 38, round: 22, hooded: 10, upturned: 10, downturned: 10, deep_set: 10}
+  northern_european:
+    skin_tone:    {porcelain: 25, fair: 50, light: 25}
+    undertone:    {cool: 40, neutral: 35, warm: 25}
+    hair_color:   {dark_brown: 10, chestnut: 12, light_brown: 22, dark_blonde: 26, blonde: 20,
+                   platinum_blonde: 3, strawberry_blonde: 3, auburn: 2, red: 2}
+    hair_texture: {straight: 60, wavy: 34, curly: 6}
+    eye_color:    {brown: 10, light_brown: 3, hazel: 10, green: 10, gray: 10, blue: 57}
+  celtic:
+    skin_tone:    {porcelain: 40, fair: 45, light: 15}
+    undertone:    {cool: 45, neutral: 33, warm: 22}
+    hair_color:   {soft_black: 3, dark_brown: 22, chestnut: 15, light_brown: 14, dark_blonde: 11, blonde: 7,
+                   strawberry_blonde: 6, auburn: 10, red: 12}
+    hair_texture: {straight: 48, wavy: 42, curly: 10}
+    eye_color:    {brown: 15, hazel: 12, green: 16, gray: 7, blue: 50}
+  western_european:
+    skin_tone:    {porcelain: 10, fair: 38, light: 40, light_medium: 12}
+    undertone:    {cool: 33, neutral: 37, warm: 25, olive: 5}
+    hair_color:   {soft_black: 5, dark_brown: 26, chestnut: 20, light_brown: 20, dark_blonde: 15, blonde: 9,
+                   strawberry_blonde: 2, auburn: 2, red: 1}
+    hair_texture: {straight: 48, wavy: 42, curly: 10}
+    eye_color:    {dark_brown: 8, brown: 25, light_brown: 5, hazel: 15, green: 10, gray: 5, blue: 32}
+  southern_european:
+    skin_tone:    {fair: 10, light: 38, light_medium: 35, medium: 15, tan: 2}
+    undertone:    {olive: 35, warm: 30, neutral: 25, cool: 10}
+    hair_color:   {black: 15, soft_black: 22, dark_brown: 35, chestnut: 17, light_brown: 7, dark_blonde: 3, auburn: 1}
+    hair_texture: {straight: 35, wavy: 45, curly: 18, coily: 2}
+    eye_color:    {dark_brown: 35, brown: 30, light_brown: 7, hazel: 13, green: 7, gray: 2, blue: 6}
+  eastern_european:
+    skin_tone:    {porcelain: 15, fair: 50, light: 30, light_medium: 5}
+    undertone:    {cool: 38, neutral: 37, warm: 22, olive: 3}
+    hair_color:   {soft_black: 3, dark_brown: 20, chestnut: 15, light_brown: 30, dark_blonde: 19, blonde: 10,
+                   auburn: 2, red: 1}
+    hair_texture: {straight: 58, wavy: 36, curly: 6}
+    eye_color:    {brown: 20, light_brown: 5, hazel: 15, green: 12, gray: 13, blue: 35}
+
+# -----------------------------------------------------------------------------
+# Derived phrases. For each field the FIRST rule whose `when` matches wins.
+# A rule with no `when` always matches (use it last as the fallback).
+# -----------------------------------------------------------------------------
+compose:
+  # Colour actually visible on the head
+  hair_shade:
+    - when: {hair_treatment: [vivid, bleached]}
+      text: "{hair_treatment}"
+    - when: {hair_treatment: [cover_gray]}
+      text: "{hair_color}"
+    - when: {graying: [salt_pepper, gray, silver, white]}
+      text: "{graying}"
+    - text: "{hair_color}"
+
+  # Trailing clause after the style phrase
+  hair_suffix:
+    - when: {hair_length: [bald]}
+      text: ""
+    - when: {hair_treatment: [highlights, balayage]}
+      text: ", with {hair_treatment}"
+    - when: {hair_treatment: [natural], graying: [few_grays]}
+      text: ", with {graying}"
+    - when: {hair_treatment: [natural], graying: [temples]}
+      text: ", {graying}"
+    - text: ""
+
+  hairline_clause:
+    - when: {hairline: [_unset, full]}
+      text: ""
+    - text: ", with {hairline}"
+
+  hair:
+    - text: "{hair_style}{hair_suffix}{hairline_clause}"
+
+  # Beards follow natural colour + greying, never the dye
+  beard_shade:
+    - when: {graying: [gray, silver, white]}
+      text: "{graying}"
+    - when: {graying: [salt_pepper]}
+      text: salt-and-pepper
+    - text: "{hair_color}"
+
+  facial_hair_clause:
+    - when: {facial_hair: [_unset]}
+      text: ""
+    - when: {hair_length: [bald], facial_hair: [clean_shaven]}
+      text: ""
+    - text: ", {facial_hair}"
+
+  # The caption engine's own fields (see engine: below).
+  # hair_token is what __HAIR__ becomes and what the "the auburn-haired woman"
+  # handle is built from: colour only, ending in " hair". Bald -> no handle.
+  hair_token:
+    - when: {hair_length: [bald]}
+      text: ""
+    - text: "{hair_shade} hair"
+
+  # A beard as its own detail; clean-shaven says nothing.
+  beard:
+    - when: {facial_hair: [_unset, clean_shaven]}
+      text: ""
+    - text: "{facial_hair}"
+
+  eyes:
+    - text: "{eye_shape} {eye_color} eyes"
+
+  skin:
+    - text: "{skin_tone} skin with {undertone}, {skin_condition}"
+
+  subject:
+    - text: "{ancestry} {gender} in {gender.poss} {apparent_age}"
+
+# -----------------------------------------------------------------------------
+# What the T2I caption engine takes from a sampled person
+# (metascan/core/t2i_appearance.py). Each named character (__ALICE__ ...) is
+# one person drawn from the caption text, so one caption always draws the same
+# cast. Its first mention reads
+#   "a <head slots> <noun> with <with slots>"
+# e.g. "a 31-year-old Ghanaian woman with deep brown skin, ..." (a drawn age of
+# 40+ also says "middle aged", 71+ "old"). Empty slots are left out.
+#
+#   genders:  a name's gender (characters.yml) -> the gender value it draws
+#   slots:    slot -> template (any attribute, field or composed phrase)
+#   head:     slots in front of the noun
+#   with:     slots after "with"
+#   spells:   a token the caption writes (__HAIR__) -> the with-slots it
+#             replaces, so the hair is never described twice
+#   distinct: a slot kept different across the cast (the handles name it)
+#
+# Every text here and above passes the adult-only screen at load time; a
+# drawn slot is screened again before it reaches a prompt.
+# -----------------------------------------------------------------------------
+engine:
+  genders: {female: woman, male: man}
+  slots:
+    age:       "{apparent_age.years}-year-old"
+    ethnicity: "{ancestry}"
+    skin:      "{skin_tone} skin"
+    eyes:      "{eyes}"
+    face:      "{face_shape}"
+    hairstyle: "{hair}"
+    beard:     "{beard}"
+    body:      "{body_type}"
+    hair:      "{hair_token}"
+  head: [age, ethnicity]
+  with: [skin, eyes, face, hairstyle, beard, body]
+  spells: {hair: [hairstyle]}
+  distinct: hair
+
+# -----------------------------------------------------------------------------
+# Example templates (sample_person.py --template). Not used by the caption
+# engine. Any attribute or composed field can be referenced.
+# -----------------------------------------------------------------------------
+templates:
+  portrait: >-
+    portrait photograph of {subject|a}, {body_type}, {face_shape}, {eyes},
+    {skin}, {hair}{facial_hair_clause}
+
+  numeric_age: >-
+    a {apparent_age.years}-year-old {ancestry} {gender} with {face_shape} and {eyes},
+    {skin_tone} skin, {hair}{facial_hair_clause}, {body_type}
+
+  natural_language: >-
+    A candid photo of an adult {subject}. {gender.subj|cap} has {body_type}, {face_shape}
+    and {eyes}. {gender.poss|cap} {skin_tone} skin has {undertone} and shows {skin_condition}.
+    {gender.poss|cap} hair: {hair}{facial_hair_clause}.

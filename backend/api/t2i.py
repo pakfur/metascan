@@ -218,11 +218,13 @@ class BatchBody(BaseModel):
 
 
 def _list_slots(library: Library) -> List[str]:
-    """Names of the lists that exist, one per slot (``body.female`` and
-    ``body.male`` are both ``body``): the configured slots in their order,
-    then any other list by name."""
+    """What characters and wildcards can draw: the appearance's engine
+    slots in their order (``person_appearance.yaml``), then every list by
+    name, one per slot (``breasts.female`` and ``breasts.male`` are both
+    ``breasts``)."""
+    appearance = library.appearance
+    ordered = list(appearance.engine.slots) if appearance is not None else []
     present = {key.split(".")[0] for key, values in library.lists.items() if values}
-    ordered = [slot for slot in library.config.slots if slot in present]
     return ordered + sorted(present - set(ordered))
 
 
@@ -340,6 +342,7 @@ async def resolve_caption(body: CaptionRequest) -> Dict[str, Any]:
     return {
         "resolved_caption": resolved.text,
         "characters": resolved.characters,
+        "attributes": resolved.attributes,
         "warnings": resolved.warnings,
     }
 
