@@ -4,6 +4,7 @@ Upscale), and the shipped refine workflows."""
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict
 
@@ -221,9 +222,11 @@ def test_the_shipped_minimax_refine_takes_everything_the_dialog_sends():
     assert b.negative is None
     assert wf[b.source_video]["class_type"] == "VHS_LoadVideoFFmpeg"
     assert b.source_video_widget == "video"
-    # The scale drives the computed upscale size, the denoise the scheduler.
+    # The scale drives the computed upscale size (through the MS_MAX_SIZE
+    # cap), the denoise the scheduler.
     size = next(n for n in wf.values() if n["class_type"] == "H3UpscaleSizeLD")
-    assert size["inputs"]["multiple"] == [b.scale, 0]
+    capped = wf[size["inputs"]["multiple"][0]]
+    assert capped["inputs"]["values.a"] == [b.scale, 0]
     sched = next(n for n in wf.values() if n["class_type"] == "BasicScheduler")
     assert sched["inputs"]["denoise"] == [b.denoise, 0]
     assert baked_model(wf, b) == "minmax\\minimax_h3_fl2va_int8_convrot.safetensors"
@@ -250,3 +253,99 @@ def test_the_shipped_minimax_refine_takes_everything_the_dialog_sends():
         for key, value in n["inputs"].items():
             if isinstance(value, list):
                 assert value[0] in out, (node_id, key)
+
+
+# ---- MS_STEPS and MS_MAX_SIZE: a video refine's cost controls ---------------
+
+
+def test_max_size_binds_a_primitive_value():
+    wf = graph(**{"3": node("PrimitiveInt", "MS_MAX_SIZE", value=2560)})
+    b = resolve_bindings(wf, "upscale_image")
+    assert b.max_size == "3"
+    out = apply_overrides(wf, b, params(max_size=1920))
+    assert out["3"]["inputs"]["value"] == 1920
+    # 0 is "no limit", not a refusal
+    assert apply_overrides(wf, b, params(max_size=0))["3"]["inputs"]["value"] == 0
+    with pytest.raises(BindingError, match="negative"):
+        apply_overrides(wf, b, params(max_size=-1))
+
+
+def test_max_size_and_steps_without_a_binding_are_refused():
+    wf = graph()
+    b = resolve_bindings(wf, "upscale_image")
+    with pytest.raises(BindingError, match="MS_MAX_SIZE"):
+        apply_overrides(wf, b, params(max_size=1920))
+    with pytest.raises(BindingError, match="MS_STEPS"):
+        apply_overrides(wf, b, params(steps=4))
+
+
+def test_max_size_is_known_to_validation():
+    wf = graph(**{"3": node("PrimitiveInt", "MS_MAX_SIZE", value=2560)})
+    report = validate_workflow(wf, "upscale_image", None, None)
+    assert not [f for f in report.findings if f.code == "unknown_title"]
+
+
+def test_an_older_snapshot_has_no_max_size():
+    old = {"positive": None, "seed": None, "seed_widget": None, "latent": None}
+    b = Bindings.from_json(json.dumps({**old, "save": "2"}))
+    assert (b.max_size, b.steps) == (None, None)
+
+
+def _eval(expression: str, **values: float) -> float:
+    """ComfyMathExpression's own functions, over plain Python."""
+    names = {"min": min, "max": max, "floor": math.floor, "sqrt": math.sqrt}
+    return float(eval(expression, {"__builtins__": {}}, {**names, **values}))
+
+
+def _math_inputs(wf: Dict[str, Any], node_id: str) -> Dict[str, Any]:
+    inputs = wf[node_id]["inputs"]
+    return {k[7:]: v for k, v in inputs.items() if k.startswith("values.")}
+
+
+def test_the_minimax_refine_caps_its_scale_at_the_max_size():
+    wf = json.loads((ROOT / MINIMAX).read_text(encoding="utf-8"))
+    b = resolve_bindings(wf, "upscale_video")
+    assert b.steps is not None and b.max_size is not None
+    assert wf[b.steps]["class_type"] == "BasicScheduler"
+    out = apply_overrides(wf, b, params(steps=4, max_size=1920))
+    assert out[b.steps]["inputs"]["steps"] == 4
+    assert out[b.max_size]["inputs"]["value"] == 1920
+    size = next(n for n in wf.values() if n["class_type"] == "H3UpscaleSizeLD")
+    capped_id = size["inputs"]["multiple"][0]
+    assert wf[capped_id]["class_type"] == "ComfyMathExpression"
+    links = _math_inputs(wf, capped_id)
+    assert links["a"] == [b.scale, 0] and links["d"] == [b.max_size, 0]
+    expr = wf[capped_id]["inputs"]["expression"]
+    # a: the scale; b, c: the source width and height; d: the cap.
+    assert _eval(expr, a=2, b=1184, c=672, d=0) == 2  # no limit
+    assert _eval(expr, a=2, b=1184, c=672, d=2560) == 2  # fits already
+    assert _eval(expr, a=2, b=2368, c=1344, d=2560) == pytest.approx(2560 / 2368)
+    assert _eval(expr, a=2, b=1344, c=2368, d=2560) == pytest.approx(2560 / 2368)
+    assert _eval(expr, a=2, b=2368, c=1344, d=1920) == 1  # never below the source
+    # Small tiles: attention grows with the square of the tokens per call, so
+    # more, smaller tiles do the same frame in less time.
+    tiles = next(n for n in wf.values() if n["class_type"] == "MMH3SpatialSplitParams")
+    assert tiles["inputs"]["token_budget"] <= 30000
+
+
+def test_the_seedvr2_video_upscale_caps_its_long_edge():
+    raw = (ROOT / "upscale_video_seedvr2_7b_api.json").read_text(encoding="utf-8")
+    wf = json.loads(raw)
+    assert not validate_workflow(wf, "upscale_video", None, None).findings
+    b = resolve_bindings(wf, "upscale_video")
+    assert b.max_size is not None
+    # SeedVR2 is a one-step model: there is no step count to choose.
+    assert b.steps is None
+    upscaler = next(n for n in wf.values() if n["class_type"] == "SeedVR2VideoUpscaler")
+    target_id = upscaler["inputs"]["resolution"][0]
+    expr = wf[target_id]["inputs"]["expression"]
+    assert _math_inputs(wf, target_id)["d"] == [b.max_size, 0]
+
+    def short_edge(scale: float, w: int, h: int, cap: int) -> float:
+        return _eval(expr, a=scale, b=w, c=h, d=cap)
+
+    assert short_edge(2, 640, 360, 0) == 720
+    assert short_edge(2, 640, 360, 2560) == 720
+    assert short_edge(2, 1920, 1080, 2560) == 1440  # long edge 2560
+    assert short_edge(2, 1920, 1080, 1280) == 1080  # never below the source
+    assert short_edge(4, 1920, 1080, 0) == 1442  # the 3.7 MP cap still holds

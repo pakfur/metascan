@@ -11,6 +11,11 @@ export interface UpscaleWorkflow {
   has_loras: boolean
   has_denoise: boolean
   has_model: boolean
+  // MS_STEPS: the sampler's step count, and the count the graph has baked in.
+  has_steps: boolean
+  steps: number | null
+  // MS_MAX_SIZE: a cap on the output's long edge.
+  has_max_size: boolean
   // The model the graph loads (MS_MODEL), null when it has none.
   model: string | null
   // The T2I model profile a prompt for this graph is written in ('moss'),
@@ -96,6 +101,9 @@ export interface UpscaleConfig {
   default_denoise: number
   // At or below this denoise the dialog starts on a refine prompt.
   refine_prompt_max_denoise: number
+  // Longest output edges offered with MS_MAX_SIZE; 0 means no limit.
+  max_sizes: number[]
+  default_max_size: number
   image_workflows: UpscaleWorkflow[]
   video_workflows: UpscaleWorkflow[]
   refine_prompts: RefinePrompt[]
@@ -158,6 +166,8 @@ export interface UpscaleRunBody {
   loras: UpscaleLora[] | null
   denoise: number | null
   model: string | null
+  steps: number | null
+  max_size: number | null
 }
 
 export function candidateLabel(c: UpscaleCandidate): string {

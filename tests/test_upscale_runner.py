@@ -365,3 +365,44 @@ async def test_values_a_workflow_cannot_take_are_refused(env):
     refine = await env.comfy.register_preset("r", "upscale_image", refine_workflow())
     with pytest.raises(UpscaleRequestError, match="between 0 and 1"):
         await env.runner.start_run(env.request(refine, denoise=1.5))
+
+
+def stepped_workflow() -> dict:
+    return {
+        "1": node("LoadImage", "MS_SOURCE_IMAGE", image="baked.png"),
+        "2": node("BasicScheduler", "MS_STEPS", steps=8, denoise=0.2),
+        "3": node("PrimitiveInt", "MS_MAX_SIZE", value=2560),
+        "4": node("SaveImage", "MS_SAVE", images=["1", 0], filename_prefix="up"),
+    }
+
+
+async def test_steps_and_max_size_reach_the_graph(env, fake_comfy):  # noqa: F811
+    pid = await env.comfy.register_preset("s", "upscale_image", stepped_workflow())
+    await env.runner.start_run(env.request(pid, steps=4, max_size=1920))
+    await finished(env)
+    graph = fake_comfy.submitted[-1]["body"]["prompt"]
+    assert graph["2"]["inputs"]["steps"] == 4
+    assert graph["3"]["inputs"]["value"] == 1920
+
+
+async def test_none_keeps_the_graphs_steps_and_size(env, fake_comfy):  # noqa: F811
+    pid = await env.comfy.register_preset("s", "upscale_image", stepped_workflow())
+    await env.runner.start_run(env.request(pid))
+    await finished(env)
+    graph = fake_comfy.submitted[-1]["body"]["prompt"]
+    assert graph["2"]["inputs"]["steps"] == 8
+    assert graph["3"]["inputs"]["value"] == 2560
+
+
+async def test_steps_or_a_size_the_workflow_cannot_take_are_refused(env):
+    plain = await env.comfy.register_preset("up", "upscale_image", image_workflow())
+    with pytest.raises(UpscaleRequestError, match="step count"):
+        await env.runner.start_run(env.request(plain, steps=4))
+    with pytest.raises(UpscaleRequestError, match="maximum size"):
+        await env.runner.start_run(env.request(plain, max_size=1920))
+    pid = await env.comfy.register_preset("s", "upscale_image", stepped_workflow())
+    for bad in (0, 101):
+        with pytest.raises(UpscaleRequestError, match="Steps must be"):
+            await env.runner.start_run(env.request(pid, steps=bad))
+    with pytest.raises(UpscaleRequestError, match="negative"):
+        await env.runner.start_run(env.request(pid, max_size=-1))

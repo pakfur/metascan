@@ -128,14 +128,48 @@
       "mode": "multiple",
       "megapixels": 2.0,
       "multiple": [
-        "10",
+        "15",
         0
       ],
       "long_edge": 1920,
       "align": 32
     },
     "_meta": {
-      "title": "Upscale size: source x MS_SCALE, aspect kept, on the 32 grid"
+      "title": "Upscale size: source x the capped scale, aspect kept, on the 32 grid"
+    }
+  },
+  "15": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "a if d <= 0 else min(a, max(1, d / max(b, c)))",
+      "values.a": [
+        "10",
+        0
+      ],
+      "values.b": [
+        "5",
+        1
+      ],
+      "values.c": [
+        "6",
+        1
+      ],
+      "values.d": [
+        "16",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Scale, capped so the long edge stays within MS_MAX_SIZE (never below the source)"
+    }
+  },
+  "16": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 2560
+    },
+    "_meta": {
+      "title": "MS_MAX_SIZE"
     }
   },
   "20": {
@@ -367,7 +401,7 @@
       ]
     },
     "_meta": {
-      "title": "BasicScheduler"
+      "title": "MS_STEPS"
     }
   },
   "42": {
@@ -418,7 +452,7 @@
       "overlap_mode": "earlier",
       "overlap_blend": "linear",
       "joint_steps": true,
-      "token_budget": 70000
+      "token_budget": 25000
     },
     "_meta": {
       "title": "Tiles (auto: sized to the token budget)"

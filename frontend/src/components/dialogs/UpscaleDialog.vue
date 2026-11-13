@@ -44,6 +44,8 @@ const negative = ref('')
 const loras = ref<UpscaleLora[]>([])
 const model = ref('')
 const denoise = ref<number | null>(null)
+const steps = ref<number | null>(null)
+const maxSize = ref<number | null>(null)
 // The image's model and LoRAs were left out (another model family) and the
 // owner asked for them anyway.
 const forceImageModel = ref(false)
@@ -254,6 +256,7 @@ function useImageModelAnyway() {
 }
 
 watch(workflowId, () => {
+  steps.value = workflow.value?.steps ?? null
   forceImageModel.value = false
   applyModel()
   writeSeq += 1
@@ -281,6 +284,23 @@ async function onWritePrompt() {
   } finally {
     if (seq === writeSeq) writingPrompt.value = false
   }
+}
+
+const validSteps = computed(
+  () => steps.value !== null && Number.isInteger(steps.value) && steps.value >= 1 && steps.value <= 100,
+)
+
+// A step count the box cannot send keeps Run off rather than quietly running
+// the graph's own.
+const stepsBlocked = computed(() => workflow.value?.has_steps === true && !validSteps.value)
+
+function onStepsInput(e: Event) {
+  const n = Number((e.target as HTMLInputElement).value)
+  steps.value = Number.isFinite(n) ? n : null
+}
+
+function maxSizeLabel(px: number): string {
+  return px > 0 ? `${px} px` : 'No limit'
 }
 
 // What a strength is for, in a word: the owner picks by purpose.
@@ -315,7 +335,9 @@ onMounted(async () => {
       workflowId.value = defaultWorkflowId(store.config, props.media)
       scale.value = store.config.default_scale
       denoise.value = store.config.default_denoise
+      maxSize.value = store.config.default_max_size
     }
+    steps.value = workflow.value?.steps ?? null
     applyGeneration()
     if (store.candidates.length) selectedId.value = store.candidates[0].id
     ready.value = true
@@ -327,7 +349,7 @@ onMounted(async () => {
 onBeforeUnmount(() => store.close())
 
 async function onRun() {
-  if (!ready.value || workflowId.value === null || starting.value) return
+  if (!ready.value || workflowId.value === null || starting.value || stepsBlocked.value) return
   starting.value = true
   try {
     const next = await store.run({
@@ -347,6 +369,8 @@ async function onRun() {
         : null,
       denoise: workflow.value?.has_denoise ? denoise.value : null,
       model: workflow.value?.has_model && model.value.trim() ? model.value.trim() : null,
+      steps: workflow.value?.has_steps ? steps.value : null,
+      max_size: workflow.value?.has_max_size ? maxSize.value : null,
     })
     if (next !== null) seed.value = next
   } catch (e) {
@@ -642,6 +666,34 @@ function onCountInput(e: Event) {
             </select>
           </label>
 
+          <label v-if="workflow?.has_max_size && store.config" class="fld">
+            <span>Max size</span>
+            <select
+              v-model.number="maxSize"
+              title="The longest edge of the result. The scale is lowered to fit, never below the source size. Time grows much faster than size."
+            >
+              <option v-for="px in store.config.max_sizes" :key="px" :value="px">
+                {{ maxSizeLabel(px) }}
+              </option>
+            </select>
+          </label>
+
+          <label v-if="workflow?.has_steps" class="fld">
+            <span>Steps</span>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              :value="steps ?? ''"
+              title="Sampler steps. Each one costs a full pass over the clip: half the steps, about half the time."
+              @input="onStepsInput"
+            />
+          </label>
+          <p v-if="workflow?.has_steps && !validSteps" class="hint warn">
+            Steps must be a whole number from 1 to 100.
+          </p>
+
           <SeedControls
             v-if="workflow?.has_seed"
             v-model:seed="seed"
@@ -666,7 +718,7 @@ function onCountInput(e: Event) {
           <div class="actions">
             <button
               class="btn primary"
-              :disabled="!ready || workflowId === null || starting || swapping"
+              :disabled="!ready || workflowId === null || starting || swapping || stepsBlocked"
               @click="onRun"
             >{{ runLabel }}</button>
             <button v-if="busy" class="btn" @click="onCancelAll">Cancel</button>
