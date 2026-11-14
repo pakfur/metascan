@@ -22,6 +22,7 @@ from metascan.core.t2i_models import MODEL_PROFILES
 from metascan.core.upscale_defaults import model_family
 from metascan.core.upscale_refine_prompts import default_store
 from metascan.core.upscale_runner import (
+    MAX_STEPS,
     UpscaleNotFoundError,
     UpscaleRequestError,
     UpscaleRunRequest,
@@ -95,15 +96,32 @@ def _workflow(row: Dict[str, Any], db: Any) -> Dict[str, Any]:
     prompt from the image)."""
     bindings = json.loads(row["bindings"])
     model: Optional[str] = None
-    if bindings.get("model"):
+    steps: Optional[int] = None
+    graph: Dict[str, Any] = {}
+    if bindings.get("model") or bindings.get("steps"):
         full = db.get_workflow_preset(row["id"])
         try:
             graph = json.loads(full["workflow_json"]) if full else {}
-            node = graph.get(str(bindings["model"])) or {}
-            value = (node.get("inputs") or {}).get(bindings.get("model_widget"))
-            model = value if isinstance(value, str) else None
-        except (AttributeError, TypeError, ValueError):
-            model = None
+        except (TypeError, ValueError):
+            graph = {}
+
+    def baked(node_key: str, widget: Optional[str]) -> Any:
+        try:
+            node = graph.get(str(bindings[node_key])) or {}
+            return (node.get("inputs") or {}).get(widget)
+        except (AttributeError, KeyError, TypeError):
+            return None
+
+    if bindings.get("model"):
+        value = baked("model", bindings.get("model_widget"))
+        model = value if isinstance(value, str) else None
+    if bindings.get("steps"):
+        value = baked("steps", "steps")
+        steps = (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            else None
+        )
     prompt_model = prompt_model_for(model) if bindings.get("positive") else None
     return {
         "id": row["id"],
@@ -115,6 +133,10 @@ def _workflow(row: Dict[str, Any], db: Any) -> Dict[str, Any]:
         "has_loras": bool(bindings.get("lora_stack")),
         "has_denoise": bool(bindings.get("denoise")),
         "has_model": bool(bindings.get("model")),
+        "has_steps": bool(bindings.get("steps")),
+        # The step count the graph has baked in: the dialog starts on it.
+        "steps": steps,
+        "has_max_size": bool(bindings.get("max_size")),
         "model": model,
         "prompt_model": prompt_model,
         "prompt_model_label": (
@@ -171,6 +193,9 @@ class RunRequest(BaseModel):
     loras: Optional[List[LoraEntry]] = None
     denoise: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     model: Optional[str] = None
+    steps: Optional[int] = Field(default=None, ge=1, le=MAX_STEPS)
+    # Longest output edge in pixels; 0 = no limit.
+    max_size: Optional[int] = Field(default=None, ge=0, le=16384)
 
 
 @router.post("/runs", dependencies=GPU_FREE)
@@ -201,6 +226,8 @@ async def start_run(body: RunRequest) -> Dict[str, Any]:
         ),
         denoise=body.denoise,
         model=body.model,
+        steps=body.steps,
+        max_size=body.max_size,
     )
     try:
         started = await runner.start_run(request, window=cfg["window"])

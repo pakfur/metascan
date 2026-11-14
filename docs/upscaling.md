@@ -54,6 +54,8 @@ Metascan finds nodes by title, so give these titles to the nodes in ComfyUI:
 | `MS_NEGATIVE` | A text node (`text` input) | Optional: adds a Negative prompt box |
 | `MS_SCALE` | A number node with a `value` input, wired into the scale | Optional: adds a Scale menu, with the choices from **Config → Upscale** |
 | `MS_DENOISE` | The sampler (`denoise` input), or a number node (`value`) wired into it | Optional: adds a Denoise menu |
+| `MS_STEPS` | The node with the sampler's `steps` input (a `BasicScheduler`, a KSampler) | Optional: adds a Steps box, starting on the workflow's own count |
+| `MS_MAX_SIZE` | A whole-number node (`value`) the graph caps its scale with; 0 means no limit | Optional: adds a Max size menu, with the choices from `upscale.max_sizes` |
 | `MS_MODEL` | The model loader (`unet_name` of Load Diffusion Model, or `ckpt_name` of Load Checkpoint) | Optional: adds a Model box |
 | `MS_LORA_STACK` | A Power Lora Loader (rgthree) | Optional: adds a LoRA list |
 
@@ -135,17 +137,19 @@ Run two strengths, or two seeds, and compare the results before accepting one. T
 `upscale_minimax_ultimate.json` is the video counterpart of the Moss refine. H3 makes sound and picture together, so the workflow encodes the clip's frames and audio into one H3 latent, enlarges it with the H3 3D latent upscaler, and has [MMH3 Ultimate Upscale](https://comfyui-wiki.com/en/news/2026-08-25-mmh3-ultimate-upscale) redraw it in 85-frame chunks and tiles at a low denoise. The audio is carried through unchanged. It needs the clip's own prompt, diffusion model and LoRAs, which the window [fills in](#filled-in-from-the-image) for a video made in the I2V window; without them it drifts.
 
 - **Scale** multiplies both edges (×2 doubles them). The size is worked out from the clip itself: its width and height are snapped to multiples of 32, as H3 needs, and the aspect ratio is kept.
-- **Denoise** sets how much it may change, as for images: 0.2 cleans up, 0.3 adds detail. It runs 8 steps, which suits a turbo LoRA; a clip made without one may want a lower denoise.
+- **Max size** caps the long edge (2560 by default; **No limit** turns it off). When the scale would go past it, the scale is lowered to fit, but never below the clip's own size, so a clip already past the cap is refined at its own size. This is the setting that decides how long a run takes: the time grows much faster than the size. A 2368 × 1344 clip at ×2 (4736 × 2688) took about 21 minutes per 85-frame chunk on a 32 GB card; at its own size a chunk takes 2 to 3 minutes.
+- **Steps** (8 by default) is how many times the model redraws every tile of every chunk, so the time is in proportion: 4 steps take about half as long. At a denoise of 0.2–0.3 fewer steps often look the same; compare before you settle on one.
+- **Denoise** sets how much it may change, as for images: 0.2 cleans up, 0.3 adds detail. The 8 steps suit a turbo LoRA; a clip made without one may want a lower denoise.
 - **Seed** is the noise for every chunk and tile.
 - **Length.** H3 takes 17k + 5 frames, so up to 16 frames are cut from the end, and the sound with them. The clip is read at 24 fps.
 
-The tiles size themselves to a token budget (70,000, the `MMH3 Spatial Split Params` node); lower it if a run runs out of VRAM. It uses no negative prompt.
+The tiles size themselves to a token budget (25,000, the `MMH3 Spatial Split Params` node). The model's attention costs grow with the square of a tile's size, so smaller tiles do the same frame in less time: on a 2368 × 1344 clip, four tiles of about 21,000 tokens took 116 s per chunk against 179 s for one tile of 68,000. Raise it only if seams between tiles show. It uses no negative prompt.
 
 **Setup.** Install `Comfyui-MMH3-UltimateUpscale` (or a pack that carries it, such as plaguekind-nodes, whose `H3UpscaleSizeLD` the workflow also uses), `LanPaint` (the H3 audio encoder), `ComfyUI-VideoHelperSuite`, `ComfyUI-JNodes`, `rgthree-comfy` and `ComfyUI-KJNodes` with the ComfyUI Manager. It loads `minmax\minimax_h3_fl2va_int8_convrot.safetensors`, `qwen3vl_32b_minimax_h3_int8_convrot.safetensors`, the H3 video and audio VAEs and `minimax_h3_latent_upscaler_3d_fp16.safetensors` (in `models/latent_upscale_models`); the window replaces the diffusion model with the clip's own. The source must have a sound track: H3 cannot encode a silent clip.
 
 **Setup.** Install [ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) with the ComfyUI Manager. Its models go in `ComfyUI/models/SEEDVR2/` (`seedvr2_ema_7b_fp16.safetensors`, `ema_vae_fp16.safetensors`) and download on first use if they are missing. They were tested on a 32 GB card. On a smaller card, change the model and lower the size limits.
 
-**Size limits.** Every workflow offers the Scale menu, but SeedVR2 results stop growing at 16 megapixels for images (about 4000 × 4000) and 3.7 megapixels for video (about 2560 × 1440). A large source at a high scale comes out smaller than the scale says.
+**Size limits.** Every workflow offers the Scale menu, but SeedVR2 results stop growing at 16 megapixels for images (about 4000 × 4000) and 3.7 megapixels for video (about 2560 × 1440). A large source at a high scale comes out smaller than the scale says. The video workflow also takes **Max size**, the same long-edge cap as the MiniMax refine. SeedVR2 runs a single step, so it has no Steps box.
 
 These limits matter. Past what fits in VRAM, a run slows from seconds to many minutes, and it can't be stopped: the SeedVR2 node only checks for Stop or ComfyUI's interrupt between batches. A 6144 × 6144 image was still in its only batch after 18 minutes. If you raise a limit and this happens, restarting ComfyUI is the only way out.
 

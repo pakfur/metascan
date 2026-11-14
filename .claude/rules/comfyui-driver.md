@@ -24,7 +24,7 @@ the root CLAUDE.md still applies.
   nodes are titled with the `MS_*` convention (`MS_POSITIVE`, `MS_NEGATIVE`,
   `MS_SEED`, `MS_LATENT`, `MS_SAVE`, optional `MS_LORA` / `MS_LORA_STACK` /
   `MS_REF_IMAGE` / `MS_RESOLUTION`, and for upscales `MS_SCALE` / `MS_DENOISE` /
-  `MS_MODEL`);
+  `MS_MODEL` / `MS_STEPS` / `MS_MAX_SIZE`);
   `comfy_bindings.resolve_bindings` maps titles to node ids at registration
   time and **fails loudly** on a missing required title. Titles are used
   rather than node ids because ComfyUI renumbers nodes on re-save.

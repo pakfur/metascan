@@ -168,6 +168,11 @@ def get_comfy_config(config: dict) -> dict:
     }
 
 
+# The longest output edges the Upscale dialog offers for a workflow with
+# MS_MAX_SIZE; 0 means no limit.
+DEFAULT_MAX_SIZES = (0, 1920, 2560, 3840)
+
+
 def get_upscale_config(config: dict) -> dict:
     """Return the ``upscale`` section with defaults filled in.
 
@@ -185,6 +190,9 @@ def get_upscale_config(config: dict) -> dict:
             # At or below this denoise the dialog starts on a refine prompt
             # (upscale_refine_prompts) instead of the image's own.
             "refine_prompt_max_denoise": 0.3,
+            # Longest output edge offered with MS_MAX_SIZE (0 = no limit)
+            "max_sizes": [0, 1920, 2560, 3840],
+            "default_max_size": 2560,
         }
     """
     raw = config.get("upscale", {}) or {}
@@ -230,6 +238,24 @@ def get_upscale_config(config: dict) -> dict:
         or not 0 <= refine_max <= 1
     ):
         refine_max = 0.3
+    sizes = raw.get("max_sizes")
+    if not isinstance(sizes, list):
+        sizes = list(DEFAULT_MAX_SIZES)
+    sizes = sorted(
+        {
+            int(v)
+            for v in sizes
+            if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 16384
+        }
+    )
+    sizes = sizes or list(DEFAULT_MAX_SIZES)
+    default_max_size = raw.get("default_max_size")
+    if (
+        not isinstance(default_max_size, int)
+        or isinstance(default_max_size, bool)
+        or default_max_size not in sizes
+    ):
+        default_max_size = 2560 if 2560 in sizes else sizes[0]
     original_root = raw.get("original_root")
     original_root = original_root.strip() if isinstance(original_root, str) else ""
     return {
@@ -243,6 +269,8 @@ def get_upscale_config(config: dict) -> dict:
         "denoise_levels": levels,
         "default_denoise": float(default_denoise),
         "refine_prompt_max_denoise": float(refine_max),
+        "max_sizes": sizes,
+        "default_max_size": default_max_size,
     }
 
 

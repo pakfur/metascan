@@ -44,7 +44,7 @@
   "4": {
     "class_type": "ComfyMathExpression",
     "inputs": {
-      "expression": "floor(min(min(b, c) * a, sqrt(3700000 * min(b, c) / max(b, c))) / 2) * 2",
+      "expression": "floor(min(min(b, c) * a, sqrt(3700000 * min(b, c) / max(b, c)), min(b, c) * a if d <= 0 else max(min(b, c), d * min(b, c) / max(b, c))) / 2) * 2",
       "values.a": [
         "2",
         0
@@ -56,10 +56,23 @@
       "values.c": [
         "3",
         1
+      ],
+      "values.d": [
+        "5",
+        0
       ]
     },
     "_meta": {
-      "title": "Target short edge in pixels, at most 3.7 MP"
+      "title": "Target short edge in pixels, at most 3.7 MP and MS_MAX_SIZE on the long edge"
+    }
+  },
+  "5": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 2560
+    },
+    "_meta": {
+      "title": "MS_MAX_SIZE"
     }
   },
   "20": {

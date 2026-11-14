@@ -35,11 +35,15 @@ _REQUIRED_WIDGETS: Dict[str, Tuple[str, ...]] = {
     "MS_AUDIO_2": ("audio",),
     "MS_DURATION": ("value",),
     "MS_RESOLUTION": ("width", "height"),
-    # Sampler step count. Only the i2v flow's High quality preset is ever
-    # written; a step-distilled (turbo) workflow must NOT carry this title.
+    # Sampler step count: the i2v flow's High quality preset and a video
+    # refine's scheduler (the Upscale dialog's Steps). A step-distilled
+    # (turbo) workflow must NOT carry this title.
     "MS_STEPS": ("steps",),
     "MS_SOURCE_IMAGE": ("image",),
     "MS_SCALE": ("value",),
+    # Longest output edge in pixels on a primitive the graph caps its scale
+    # with; 0 means no limit. The graph never goes below the source size.
+    "MS_MAX_SIZE": ("value",),
     # MS_DENOISE is special-cased: a sampler's "denoise" (KSampler, Ultimate SD
     # Upscale) or a primitive's "value" feeding one. A node has one title, so
     # a sampler already titled MS_SEED takes its denoise from a primitive.
@@ -99,6 +103,7 @@ class Bindings:
     source_video: Optional[str] = None
     source_video_widget: Optional[str] = None
     scale: Optional[str] = None
+    max_size: Optional[str] = None
     denoise: Optional[str] = None
     denoise_widget: Optional[str] = None
     model: Optional[str] = None
@@ -264,6 +269,7 @@ def resolve_bindings(workflow: Dict[str, Any], kind: str) -> Bindings:
             _source_video_widget(workflow, source_video) if source_video else None
         ),
         scale=found.get("MS_SCALE"),
+        max_size=found.get("MS_MAX_SIZE"),
         denoise=denoise,
         denoise_widget=_denoise_widget(workflow, denoise) if denoise else None,
         model=model,
@@ -301,6 +307,7 @@ class GenerationParams:
     source_image: Optional[str] = None
     source_video: Optional[str] = None
     scale: Optional[float] = None
+    max_size: Optional[int] = None
     denoise: Optional[float] = None
     model: Optional[str] = None
 
@@ -494,6 +501,16 @@ def apply_overrides(
                 "A scale was supplied but this workflow has no MS_SCALE node."
             )
         write(bindings.scale, "value", float(params.scale))
+
+    if params.max_size is not None:
+        if bindings.max_size is None:
+            raise BindingError(
+                "A maximum output size was supplied but this workflow has no "
+                "MS_MAX_SIZE node."
+            )
+        if int(params.max_size) < 0:
+            raise BindingError(f"Maximum size {params.max_size} is negative")
+        write(bindings.max_size, "value", int(params.max_size))
 
     if params.denoise is not None:
         if bindings.denoise is None or bindings.denoise_widget is None:

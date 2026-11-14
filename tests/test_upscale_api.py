@@ -286,6 +286,45 @@ def test_config_lists_workflows_by_type_and_says_what_each_takes(config_env):
     assert body["resolved_original_root"].endswith("_original")
 
 
+def test_config_offers_steps_and_a_max_size(config_env):
+    wf = {
+        "1": {"class_type": "BasicScheduler", "inputs": {"steps": 6}},
+        "2": {"class_type": "PrimitiveInt", "inputs": {"value": 2560}},
+    }
+    pid = preset(config_env.db, "v", "upscale_video", '{"steps": "1", "max_size": "2"}')
+    with config_env.db._get_connection() as conn:
+        conn.execute(
+            "UPDATE workflow_presets SET workflow_json = ? WHERE id = ?",
+            (json.dumps(wf), pid),
+        )
+        conn.commit()
+    preset(config_env.db, "plain", "upscale_video", "{}")
+    body = config_env.client.get("/api/upscale/config").json()
+    video, plain = body["video_workflows"]
+    assert (video["has_steps"], video["steps"], video["has_max_size"]) == (
+        True,
+        6,
+        True,
+    )
+    assert (plain["has_steps"], plain["steps"], plain["has_max_size"]) == (
+        False,
+        None,
+        False,
+    )
+    assert body["max_sizes"] == [0, 1920, 2560, 3840]
+    assert body["default_max_size"] == 2560
+
+
+def test_a_configured_max_size_list_is_cleaned(config_env):
+    config_env.stored["upscale"] = {
+        "max_sizes": [3840, "big", -5, 1280, 0, True, 1280],
+        "default_max_size": 999,
+    }
+    body = config_env.client.get("/api/upscale/config").json()
+    assert body["max_sizes"] == [0, 1280, 3840]
+    assert body["default_max_size"] == 0
+
+
 def test_a_folder_with_no_originals_just_saves(config_env):
     target = str(config_env.tmp / "keep")
     r = config_env.client.post("/api/upscale/original-folder", json={"path": target})

@@ -76,6 +76,10 @@ def _has_audio(path: Path) -> Optional[bool]:
     return any(s.get("codec_type") == "audio" for s in probe.get("streams", []))
 
 
+# The most sampler steps a run may ask for.
+MAX_STEPS = 100
+
+
 @dataclass
 class UpscaleRunRequest:
     source_path: str  # stored POSIX
@@ -90,6 +94,10 @@ class UpscaleRunRequest:
     loras: Optional[List[Dict[str, Any]]] = None
     denoise: Optional[float] = None
     model: Optional[str] = None
+    # Sampler steps (MS_STEPS) and the longest output edge (MS_MAX_SIZE,
+    # 0 = no limit); None keeps what the graph has.
+    steps: Optional[int] = None
+    max_size: Optional[int] = None
 
 
 @dataclass
@@ -217,6 +225,16 @@ class UpscaleRunner:
                 raise UpscaleRequestError("Denoise must be between 0 and 1")
         if req.model and bindings.model is None:
             raise UpscaleRequestError("This workflow takes no model")
+        if req.steps is not None:
+            if bindings.steps is None:
+                raise UpscaleRequestError("This workflow takes no step count")
+            if not 1 <= req.steps <= MAX_STEPS:
+                raise UpscaleRequestError(f"Steps must be 1 to {MAX_STEPS}")
+        if req.max_size is not None:
+            if bindings.max_size is None:
+                raise UpscaleRequestError("This workflow takes no maximum size")
+            if req.max_size < 0:
+                raise UpscaleRequestError("The maximum size cannot be negative")
         seeds, next_seed = self._plan_seeds(req, bindings.seed is not None)
         if self.purge_stale is not None:
             await asyncio.to_thread(self.purge_stale, req.source_path)
@@ -315,6 +333,8 @@ class UpscaleRunner:
             loras=list(req.loras or []),
             denoise=req.denoise,
             model=req.model or None,
+            steps=req.steps,
+            max_size=req.max_size,
         )
         output_dir = self.staging_root() / uuid.uuid4().hex
         # Shielded: submit writes the job row and only then queues it, so a
